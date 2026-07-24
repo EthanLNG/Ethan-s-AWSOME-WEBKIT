@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ethan's AWESOME WEBKIT — demo</title>
+<!--
+  Demo site for Ethan's AWESOME WEBKIT — deliberately self-contained (inline
+  CSS/JS, zero external requests) so it works served by the kit's preview
+  server with nothing else installed, and deliberately ABOUT the kit itself:
+  when you run a feedback round against this page, the copy you're annotating
+  is describing the loop you're using. Eat your own dogfood.
+
+  It also ships one LIVE experiment on the footer section (id "cta", variants
+  A/B) with the full marker contract — scope attribute, per-letter comment
+  fences, the switcher widget — so the kit's variant review flow (the letter
+  chip, chosenLetter accept, finalize) is testable out of the box.
+-->
+<style>
+  /* --ink / --paper are the kit's two anchor tokens: the abc switcher widget
+     styles itself from them (var(--ink), var(--paper)), so defining them here
+     makes the dev chrome harmonize with the page for free. */
+  :root {
+    --ink: #14171c;
+    --paper: #ffffff;
+    --accent: #2563eb;      /* same blue as the webkit overlay accent */
+    --muted: #5b6472;
+    --wash: #f2f5f9;        /* tinted section background */
+    --line: #dfe4ea;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: var(--paper);
+    line-height: 1.6;
+  }
+
+  section {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    padding: 8vh 24px;
+  }
+  .inner { max-width: 960px; width: 100%; }
+
+  .eyebrow {
+    font-size: .8rem;
+    font-weight: 700;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1rem;
+  }
+  h1 { font-size: clamp(2.6rem, 7vw, 4.6rem); line-height: 1.05; letter-spacing: -.02em; font-weight: 800; }
+  h2 { font-size: clamp(1.8rem, 4vw, 2.6rem); line-height: 1.15; letter-spacing: -.01em; font-weight: 800; margin-bottom: .6rem; }
+  .lead { font-size: clamp(1.05rem, 2vw, 1.3rem); color: var(--muted); max-width: 42em; }
+
+  .btn {
+    display: inline-block;
+    font-weight: 700;
+    text-decoration: none;
+    border-radius: 999px;
+    padding: .85em 2.1em;
+    transition: transform .12s ease, box-shadow .12s ease;
+  }
+  .btn:hover { transform: translateY(-2px); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { box-shadow: 0 8px 24px rgba(37, 99, 235, .35); }
+
+  /* ---- hero ---- */
+  .hero { text-align: center; }
+  .hero h1 span { color: var(--accent); }
+  .hero .lead { margin: 1.4rem auto 2.2rem; }
+  .hero-hint { margin-top: 3.5rem; font-size: .85rem; color: var(--muted); }
+  .hero-hint kbd {
+    font: inherit; font-weight: 700;
+    border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: .1em .45em; background: var(--wash);
+  }
+
+  /* ---- features ---- */
+  .features { background: var(--wash); }
+  .features-head { text-align: center; margin-bottom: 3rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 18px;
+  }
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 26px 24px;
+  }
+  .card .glyph { font-size: 1.6rem; margin-bottom: .6rem; }
+  .card h3 { font-size: 1.05rem; margin-bottom: .35rem; }
+  .card p { font-size: .93rem; color: var(--muted); }
+
+  /* ---- pricing ---- */
+  .pricing-head { text-align: center; margin-bottom: 3rem; }
+  .plans {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 18px;
+    align-items: stretch;
+  }
+  .plan {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 30px 26px;
+    display: flex;
+    flex-direction: column;
+    text-align: center;
+  }
+  .plan.featured { border: 2px solid var(--accent); position: relative; }
+  .plan.featured .flag {
+    position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
+    background: var(--accent); color: #fff;
+    font-size: .7rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
+    border-radius: 999px; padding: .25em 1em; white-space: nowrap;
+  }
+  .plan h3 { font-size: 1.1rem; }
+  .plan .price { font-size: 2.6rem; font-weight: 800; margin: .4rem 0 .1rem; }
+  .plan .per { font-size: .8rem; color: var(--muted); margin-bottom: 1.2rem; }
+  .plan ul { list-style: none; text-align: left; margin: 0 auto 1.6rem; font-size: .92rem; color: var(--muted); }
+  .plan li { padding: .3em 0 .3em 1.5em; position: relative; }
+  .plan li::before { content: "✓"; position: absolute; left: 0; color: var(--accent); font-weight: 700; }
+  .plan .btn { margin-top: auto; }
+  .btn-quiet { border: 1.6px solid var(--ink); color: var(--ink); }
+
+  /* ---- testimonial ---- */
+  .testimonial { background: var(--wash); text-align: center; }
+  .quote-mark { font-size: 4rem; line-height: 1; color: var(--accent); font-weight: 800; }
+  blockquote {
+    font-size: clamp(1.3rem, 2.8vw, 1.9rem);
+    font-weight: 600;
+    line-height: 1.4;
+    max-width: 34em;
+    margin: 0 auto 1.6rem;
+  }
+  .attribution { color: var(--muted); font-size: .95rem; }
+  .attribution strong { color: var(--ink); }
+
+  /* ---- footer CTA (hosts the live abc experiment "cta") ---- */
+  .cta {
+    background: var(--ink);
+    color: var(--paper);
+    text-align: center;
+  }
+  .cta h2 { color: var(--paper); }
+  .cta .lead { color: #aab3c0; margin: 1rem auto 2.4rem; }
+  .cta .fine { margin-top: 3rem; font-size: .8rem; color: #7c8593; }
+  .cta .fine a { color: inherit; }
+
+  /* Base look shared by both CTA variants — everything letter-specific lives
+     in the fenced blocks below, keyed on scope + letter per the abc contract. */
+  .cta-btn {
+    display: inline-block;
+    font-weight: 700;
+    text-decoration: none;
+    border-radius: 999px;
+    padding: .9em 2.4em;
+    font-size: 1.1rem;
+    transition: transform .12s ease, box-shadow .12s ease, background .12s ease, color .12s ease;
+  }
+  .cta-btn:hover { transform: translateY(-2px); }
+
+  /* ABC:cta:A */
+  [data-abc-scope="cta"][data-abc="A"] .cta-btn {
+    background: var(--accent);
+    color: #fff;
+    border: 2px solid var(--accent);
+  }
+  [data-abc-scope="cta"][data-abc="A"] .cta-btn:hover {
+    box-shadow: 0 10px 30px rgba(37, 99, 235, .45);
+  }
+  /* /ABC:cta:A */
+
+  /* ABC:cta:B */
+  [data-abc-scope="cta"][data-abc="B"] .cta-btn {
+    background: transparent;
+    color: var(--paper);
+    border: 2px solid var(--paper);
+    font-size: 1.35rem;
+    padding: 1.05em 2.9em;
+  }
+  [data-abc-scope="cta"][data-abc="B"] .cta-btn:hover {
+    background: var(--paper);
+    color: var(--ink);
+  }
+  /* /ABC:cta:B */
+</style>
+</head>
+<body>
+
+<!-- ======================= 1 · hero ======================= -->
+<section class="hero" id="top">
+  <div class="inner">
+    <div class="eyebrow">Ethan's AWESOME WEBKIT</div>
+    <h1>Draw on your site.<br>Your agent <span>does the rest.</span></h1>
+    <p class="lead">
+      Design iteration for the agent era: circle the thing that bugs you on the
+      live page, say what you want — out loud, if you like — and review the fix
+      with a before/after toggle. Accept it, redo it, or ask for A/B/C takes and
+      pick a winner.
+    </p>
+    <a class="btn btn-primary" href="#features">See how it works</a>
+    <p class="hero-hint">
+      Psst — this very page is a webkit playground. Press <kbd>Ctrl/Cmd + .</kbd>
+      or hover the bottom-left corner to open the feedback overlay.
+    </p>
+  </div>
+</section>
+
+<!-- ======================= 2 · features ======================= -->
+<section class="features" id="features">
+  <div class="inner">
+    <div class="features-head">
+      <h2>The loop, in six pieces</h2>
+      <p class="lead" style="margin: 0 auto;">Everything below is running on the page you're reading.</p>
+    </div>
+    <div class="grid">
+      <div class="card">
+        <div class="glyph">🖍️</div>
+        <h3>Rectangle feedback</h3>
+        <p>Drag a box over anything on the live page. Each point carries its exact
+           element context, so your agent knows precisely what "this" means.</p>
+      </div>
+      <div class="card">
+        <div class="glyph">🎙️</div>
+        <h3>Say it, don't type it</h3>
+        <p>Live speech-to-text in the note editor. Describe the change the way you'd
+           tell a designer standing next to you.</p>
+      </div>
+      <div class="card">
+        <div class="glyph">⏪</div>
+        <h3>Before / after from git</h3>
+        <p>The review bar swaps the whole page against the pre-round commit — served
+           straight from git, scroll position preserved. No screenshots, no squinting.</p>
+      </div>
+      <div class="card">
+        <div class="glyph">⚖️</div>
+        <h3>Verdict every point</h3>
+        <p>Accept, delete, or redo — per point, in the browser. Deletes revert the
+           exact commit; redos come back in the next round.</p>
+      </div>
+      <div class="card">
+        <div class="glyph">🔤</div>
+        <h3>A/B/C variants</h3>
+        <p>Any point can ask for lettered takes — described by you or invented by the
+           model — switchable live before you commit to one. (Try the button in the
+           footer.)</p>
+      </div>
+      <div class="card">
+        <div class="glyph">🖐️</div>
+        <h3>Five agents, five colors</h3>
+        <p>Atomic color locks and emoji-stamped tabs keep parallel agents from ever
+           colliding — you always know which tab belongs to whom.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 3 · pricing ======================= -->
+<section class="pricing" id="pricing">
+  <div class="inner">
+    <div class="pricing-head">
+      <h2>Pricing you can audit</h2>
+      <p class="lead" style="margin: 0 auto;">It's MIT-licensed. The tiers are a bit — the price is not.</p>
+    </div>
+    <div class="plans">
+      <div class="plan">
+        <h3>Solo</h3>
+        <div class="price">$0</div>
+        <div class="per">forever</div>
+        <ul>
+          <li>One agent, one color</li>
+          <li>Full feedback loop</li>
+          <li>Before/after from git</li>
+        </ul>
+        <a class="btn btn-quiet" href="#get">Clone it</a>
+      </div>
+      <div class="plan featured">
+        <div class="flag">Most parallel</div>
+        <h3>Squad</h3>
+        <div class="price">$0</div>
+        <div class="per">forever, but louder</div>
+        <ul>
+          <li>Up to five agents at once</li>
+          <li>Atomic color locks</li>
+          <li>Emoji-stamped tab strip</li>
+          <li>Per-color feedback inboxes</li>
+        </ul>
+        <a class="btn btn-primary" href="#get">Clone it</a>
+      </div>
+      <div class="plan">
+        <h3>Enterprise-ish</h3>
+        <div class="price">$0</div>
+        <div class="per">we simply cannot charge more</div>
+        <ul>
+          <li>Everything in Squad</li>
+          <li>Works with Claude Code &amp; Codex</li>
+          <li>Push your improvements upstream</li>
+        </ul>
+        <a class="btn btn-quiet" href="#get">Clone it</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= 4 · testimonial ======================= -->
+<section class="testimonial">
+  <div class="inner">
+    <div class="quote-mark">"</div>
+    <blockquote>
+      I used to write three paragraphs in chat trying to describe which button felt
+      wrong. Now I draw a box on it, mumble for five seconds, and review the fix
+      with a toggle. I am never going back.
+    </blockquote>
+    <p class="attribution"><strong>A developer</strong> · formerly of the "second button from the left, no, your other left" school of feedback</p>
+  </div>
+</section>
+
+<!-- ======================= 5 · footer CTA ======================= -->
+<!-- Live abc experiment "cta": A = solid accent button, B = larger outlined
+     button. Toggle with the bottom-left switcher; deep-link with ?abc-cta=B. -->
+<section class="cta" id="get" data-abc-scope="cta">
+  <div class="inner">
+    <h2>Stop describing pixels in prose.</h2>
+    <p class="lead">
+      Clone the kit, point your agent at it, and run your next design round on the
+      live page — this one, if you want the practice.
+    </p>
+    <!-- ABC:cta:A -->
+    <a class="cta-btn" data-abc-only="A" href="#top">Get the kit</a>
+    <!-- /ABC:cta:A -->
+    <!-- ABC:cta:B -->
+    <a class="cta-btn" data-abc-only="B" href="#top">Get the kit</a>
+    <!-- /ABC:cta:B -->
+    <p class="fine">MIT licensed · no runtime dependencies · bash + python3 stdlib only</p>
+  </div>
+</section>
+
+<!-- ABC:widget cta — section-scoped variation switcher (dev-only; removed at finalize) -->
+<script>
+(() => {
+  /* ABC:config */
+  const ID      = 'cta';    // experiment id — MUST equal the section's data-abc-scope="…"
+  const LETTERS = 'AB';     // one letter per live variation, in cycle order
+  const RELOAD  = false;    // true → each switch reloads the page (for draw-in / scroll scenes)
+  /* /ABC:config */
+
+  // --- shared manager: defined ONCE, even if several widget blocks are pasted on a page ---
+  const M = window.__abc || (window.__abc = (() => {
+    const insts = [];
+    const st = document.createElement('style');
+    st.textContent =
+      '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
+      'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
+      'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
+      'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
+      '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
+      '.abc-switch:hover{opacity:1}.abc-switch[hidden]{display:none}';
+    document.head.appendChild(st);
+    let raf = 0;
+    function recompute() {
+      raf = 0;
+      const vh = innerHeight;
+      for (const i of insts) {
+        const r = i.scope.getBoundingClientRect();
+        const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        // "the section I'm looking at": crosses the viewport's central band, OR a tall
+        // section fills half the view, OR a short section sits fully on screen.
+        i.visible = r.bottom > 0 && r.top < vh &&
+          ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
+           (r.height > 0 && shown >= r.height * 0.6));
+        i.btn.hidden = !i.visible;
+      }
+      // stack whatever buttons are visible so they never overlap (topmost section lowest)
+      insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
+        .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
+    }
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
+    addEventListener('scroll', schedule, { passive: true });
+    addEventListener('resize', schedule);
+    return {
+      add(inst) { insts.push(inst); schedule(); },
+      get(id) { return insts.find(i => i.id === id) || null; },
+      list() { return insts.map(i => i.id); },
+      relayout: schedule,
+    };
+  })());
+
+  // --- this experiment ---
+  const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
+  if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
+  const KEY = 'abc:' + location.pathname + ':' + ID;
+
+  let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
+         || localStorage.getItem(KEY) || LETTERS[0];
+  if (!LETTERS.includes(cur)) cur = LETTERS[0];
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'abc-switch';
+  btn.dataset.abcFor = ID;   // which experiment this button drives (runtime-only; aids QA)
+  btn.hidden = true;
+  btn.title = ID + ' variation — click: next, ⌥click: previous';
+  document.body.appendChild(btn);
+
+  function apply(letter) {
+    cur = letter;
+    localStorage.setItem(KEY, cur);
+    scope.setAttribute('data-abc', cur);
+    btn.textContent = cur;
+    scope.querySelectorAll('[data-abc-only]').forEach(el => {
+      el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur) ? '' : 'none';
+    });
+    scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+  }
+
+  btn.addEventListener('click', e => {
+    const step = e.altKey ? LETTERS.length - 1 : 1;
+    const next = LETTERS[(LETTERS.indexOf(cur) + step) % LETTERS.length];
+    if (RELOAD) {
+      localStorage.setItem(KEY, next);
+      sessionStorage.setItem('abc:scroll', String(scrollY));
+      const u = new URL(location.href);
+      u.searchParams.set('abc-' + ID, next);
+      location.href = u.href;
+    } else apply(next);
+  });
+
+  M.add({
+    id: ID, scope, btn, visible: false,
+    top: () => scope.getBoundingClientRect().top,
+    letters: LETTERS, get current() { return cur; }, set: apply,
+  });
+
+  const y = sessionStorage.getItem('abc:scroll');
+  if (y !== null) { sessionStorage.removeItem('abc:scroll'); addEventListener('load', () => scrollTo(0, +y)); }
+
+  apply(cur);
+})();
+</script>
+<!-- /ABC:widget cta -->
+
+</body>
+</html>

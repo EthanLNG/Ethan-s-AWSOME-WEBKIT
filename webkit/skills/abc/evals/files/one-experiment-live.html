@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RealClick — דמו רב-מקטעים</title>
+<style>
+  :root { --ink: #14171c; --blue: #2242ff; --blue-deep: #1a33cc; --paper: #ffffff; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "Rubik", -apple-system, sans-serif; background: var(--paper); color: var(--ink); }
+  section { min-height: 100vh; display: grid; place-content: center; gap: 18px; text-align: center; padding: 40px; }
+  .hero    { background: #fff; }
+  .pricing { background: #f4f6ff; }
+  h2 { font-size: clamp(26px, 5vw, 44px); }
+  .cta, .buy { display: inline-block; margin-inline: auto; padding: 13px 34px; font-size: 17px; font-weight: 700;
+         color: #fff; background: var(--blue); border: none; border-radius: 999px; cursor: pointer; font-family: inherit; }
+  .cta:hover, .buy:hover { background: var(--blue-deep); }
+
+  /* ABC:hero:base */
+  [data-abc-scope="hero"] .cta { position: relative; }
+  /* /ABC:hero:base */
+  /* ABC:hero:A */
+  [data-abc-scope="hero"][data-abc="A"] .cta { padding: 16px 44px; font-size: 19px; font-weight: 800; }
+  /* /ABC:hero:A */
+  /* ABC:hero:B */
+  [data-abc-scope="hero"][data-abc="B"] .cta { background: #fff; color: var(--blue); box-shadow: inset 0 0 0 2.4px var(--blue); }
+  /* /ABC:hero:B */
+  /* ABC:hero:C */
+  [data-abc-scope="hero"][data-abc="C"] .cta { box-shadow: 0 6px 0 var(--blue-deep); transform: translateY(-2px); }
+  /* /ABC:hero:C */
+  /* ABC:hero:D */
+  [data-abc-scope="hero"][data-abc="D"] .cta { animation: cta-pulse 2.2s ease-in-out infinite; }
+  @keyframes cta-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+  [data-abc-scope="hero"] .cta-sub { font-size: 13px; color: var(--blue); font-weight: 600; }
+  /* /ABC:hero:D */
+</style>
+</head>
+<body>
+  <section class="hero" data-abc-scope="hero">
+    <h2>מכירים אנשים אמיתיים</h2>
+    <button class="cta" id="cta">להזמנת טבעת</button>
+    <!-- ABC:hero:D -->
+    <div class="cta-sub" data-abc-only="D">בלי אפליקציה. באמת.</div>
+    <!-- /ABC:hero:D -->
+  </section>
+
+  <section class="pricing">
+    <h2>בחרו חבילה</h2>
+    <button class="buy" id="buy">קנו עכשיו</button>
+  </section>
+
+  <!-- ABC:widget hero — section-scoped variation switcher (dev-only; removed at finalize) -->
+  <script>
+  (() => {
+    /* ABC:config */
+    const ID      = 'hero';
+    const LETTERS = 'ABCD';
+    const RELOAD  = false;
+    /* /ABC:config */
+    const M = window.__abc || (window.__abc = (() => {
+      const insts = [];
+      const st = document.createElement('style');
+      st.textContent =
+        '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
+        'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
+        'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
+        'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
+        '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
+        '.abc-switch:hover{opacity:1}.abc-switch[hidden]{display:none}';
+      document.head.appendChild(st);
+      let raf = 0;
+      function recompute() {
+        raf = 0;
+        const vh = innerHeight;
+        for (const i of insts) {
+          const r = i.scope.getBoundingClientRect();
+          const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+          i.visible = r.bottom > 0 && r.top < vh &&
+            ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
+             (r.height > 0 && shown >= r.height * 0.6));
+          i.btn.hidden = !i.visible;
+        }
+        insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
+          .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
+      }
+      const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
+      addEventListener('scroll', schedule, { passive: true });
+      addEventListener('resize', schedule);
+      return {
+        add(inst) { insts.push(inst); schedule(); },
+        get(id) { return insts.find(i => i.id === id) || null; },
+        list() { return insts.map(i => i.id); },
+        relayout: schedule,
+      };
+    })());
+    const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
+    if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
+    const KEY = 'abc:' + location.pathname + ':' + ID;
+    let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
+           || localStorage.getItem(KEY) || LETTERS[0];
+    if (!LETTERS.includes(cur)) cur = LETTERS[0];
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'abc-switch';
+    btn.dataset.abcFor = ID;
+    btn.hidden = true;
+    btn.title = ID + ' variation — click: next, ⌥click: previous';
+    document.body.appendChild(btn);
+    function apply(letter) {
+      cur = letter;
+      localStorage.setItem(KEY, cur);
+      scope.setAttribute('data-abc', cur);
+      btn.textContent = cur;
+      scope.querySelectorAll('[data-abc-only]').forEach(el => {
+        el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur) ? '' : 'none';
+      });
+      scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+    }
+    btn.addEventListener('click', e => {
+      const step = e.altKey ? LETTERS.length - 1 : 1;
+      const next = LETTERS[(LETTERS.indexOf(cur) + step) % LETTERS.length];
+      if (RELOAD) {
+        localStorage.setItem(KEY, next);
+        sessionStorage.setItem('abc:scroll', String(scrollY));
+        const u = new URL(location.href);
+        u.searchParams.set('abc-' + ID, next);
+        location.href = u.href;
+      } else apply(next);
+    });
+    M.add({
+      id: ID, scope, btn, visible: false,
+      top: () => scope.getBoundingClientRect().top,
+      letters: LETTERS, get current() { return cur; }, set: apply,
+    });
+    const y = sessionStorage.getItem('abc:scroll');
+    if (y !== null) { sessionStorage.removeItem('abc:scroll'); addEventListener('load', () => scrollTo(0, +y)); }
+    apply(cur);
+  })();
+  </script>
+  <!-- /ABC:widget hero -->
+</body>
+</html>

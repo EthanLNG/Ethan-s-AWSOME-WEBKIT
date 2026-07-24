@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RealClick — דמו רב-מקטעים</title>
+<style>
+  :root { --ink: #14171c; --blue: #2242ff; --blue-deep: #1a33cc; --paper: #ffffff; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "Rubik", -apple-system, sans-serif; background: var(--paper); color: var(--ink); }
+  section { min-height: 100vh; display: grid; place-content: center; gap: 18px; text-align: center; padding: 40px; }
+  .hero    { background: #fff; }
+  .pricing { background: #f4f6ff; }
+  h2 { font-size: clamp(26px, 5vw, 44px); }
+  .cta, .buy { display: inline-block; margin-inline: auto; padding: 13px 34px; font-size: 17px; font-weight: 700;
+         color: #fff; background: var(--blue); border: none; border-radius: 999px; cursor: pointer; font-family: inherit; }
+  .cta:hover, .buy:hover { background: var(--blue-deep); }
+</style>
+</head>
+<body>
+  <section class="hero">
+    <h2>מכירים אנשים אמיתיים</h2>
+    <button class="cta" id="cta">להזמנת טבעת</button>
+  </section>
+
+  <section class="pricing">
+    <h2>בחרו חבילה</h2>
+    <button class="buy" id="buy">קנו עכשיו</button>
+  </section>
+</body>
+</html>

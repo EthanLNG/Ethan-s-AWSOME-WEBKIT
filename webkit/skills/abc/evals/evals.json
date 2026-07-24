@@ -1,0 +1,74 @@
+{
+  "skill_name": "abc",
+  "evals": [
+    {
+      "id": 0,
+      "name": "generate-default-4",
+      "prompt": "/ABC the hero CTA button feels weak - make it more prominent",
+      "expected_output": "Four genuinely different CTA variations (A-D), scoped under [data-abc-scope=\"hero\"][data-abc] with id-tagged ABC:hero:* fenced markers, plus the section-scoped switcher (appears only when the hero section is in view; ?abc-hero= deep link; per-path+id localStorage). Reply lists one line per letter.",
+      "files": ["evals/files/plain-two-section.html"],
+      "expectations": [
+        "The hero section is tagged data-abc-scope and its switcher button is fixed bottom-left",
+        "The switcher appears only while the hero section is in view and is hidden when scrolled away",
+        "Clicking the switcher cycles through exactly 4 distinct hero-CTA states and wraps back to the first",
+        "A ?abc-hero=<letter> URL parameter deep-links to that variation on load",
+        "Every experiment addition is fenced with balanced ABC:hero:* markers; no global html[data-abc]",
+        "The chat reply describes each lettered variation in one line"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "generate-count-6",
+      "prompt": "/ABC 6 try bolder takes on the hero cta button",
+      "expected_output": "Six section-scoped variations (A-F) with the switcher cycling all six, ?abc-hero= deep link, balanced ABC:hero:* fences for every letter, reply listing one line per letter.",
+      "files": ["evals/files/plain-two-section.html"],
+      "expectations": [
+        "The switcher cycles through exactly 6 distinct hero-CTA states and wraps back to the first",
+        "The six variations restyle the CTA in visibly different ways",
+        "Balanced ABC:hero:* fences cover letters A-F and the widget config lists all six",
+        "The chat reply describes each of the six lettered variations in one line"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "iterate-target-b",
+      "prompt": "in the hero one, B move the cta button 10px lower",
+      "expected_output": "A 10px downward offset added ONLY inside the hero experiment's B fenced block. Hero A/C/D, the hero base block, the pricing experiment and both widgets stay byte-identical. Reply signs off 'hero B' before the color emoji.",
+      "files": ["evals/files/two-experiments-live.html"],
+      "expectations": [
+        "In hero variation B the CTA renders exactly 10px lower than in the original fixture",
+        "Hero variations A, C, D and the entire pricing experiment render identical to the fixture",
+        "Outside the ABC:hero:B fenced block the file is byte-identical to the fixture",
+        "The chat reply signs off with the current section+letter (hero B) before the color emoji"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "add-second-experiment",
+      "prompt": "/ABC 3 give me three takes on the pricing button",
+      "expected_output": "A second, independent pricing experiment (A-C) added beside the already-live hero experiment: pricing section tagged data-abc-scope, id-tagged ABC:pricing:* markers, a second widget copy. Hero experiment untouched; the two switchers gate by section and stack instead of overlapping.",
+      "files": ["evals/files/one-experiment-live.html"],
+      "expectations": [
+        "The page now has two section-scoped experiments (hero + pricing) and the manager tracks both",
+        "Each section's button appears only when that section is in view; others are hidden",
+        "When two sections are on screen at once, the buttons stack instead of overlapping",
+        "Clicking one section's switcher changes only that section's variant, never the other's",
+        "Markers are id-tagged and balanced per experiment, one widget fence per id, no global html[data-abc]"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "finalize-one-of-two",
+      "prompt": "the hero cta - C is the winner. save it and remove its little switcher. leave the pricing experiment exactly as it is.",
+      "expected_output": "Hero winner C folded into the section (its rules collapsed to the section's own selector, hard-shadow lift kept), all ABC:hero:* markers / data-abc-scope=\"hero\" / hero widget / loser elements deleted, and the pricing experiment left fully live and switchable.",
+      "files": ["evals/files/two-experiments-live.html"],
+      "expectations": [
+        "The hero experiment is fully removed (no ABC:hero markers, scope attribute, widget, or loser elements)",
+        "The hero CTA permanently shows variant C's look with no switching",
+        "Only the pricing switcher remains on the page; the hero button is gone",
+        "The pricing experiment is untouched and still cycles A->B->C live",
+        "The page loads with no console errors"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "_comment": "TEMPLATE for webkit.config.json — JSON has no comments, hence this key. The install step copies this file to webkit/webkit.config.json (same directory) and fills in real values for the project. scripts/config-get.sh falls back to THIS template whenever no webkit.config.json exists, so every value below is a working demo default, not a broken placeholder. Fill in: project_name (short slug), site_root (the preview server's DOCUMENT ROOT — the directory it serves, relative to the project root; the server os.chdir's here and serves it; it is NOT where the feedback inbox lives), default_page (path under site_root), lock_dir (per-project color registry, conventionally /tmp/<project_name>-agent-colors — point it at an EXISTING registry, e.g. another repo's, only if you want agents across repos to share one palette). palette[] is the single source of truth for colors: order = claim order, slug = filesystem-safe lock name, port = that color's preview-server port. browser.mode: auto (macOS+osascript => applescript, else print) | applescript | print; browser.app_name must be a Chromium-family app (shared AppleScript dictionary). feedback_dir is where per-color feedback rounds live, resolved relative to the GIT ROOT (not site_root) because BEFORE mode reads history via git — a subdir-site project still keeps its inbox at <git-root>/<feedback_dir>/<slug>/ (gitignored). The server binds 127.0.0.1 (localhost only) so the working tree and feedback intake are never exposed to the LAN; set an optional bind_host to override only for deliberate LAN use.",
+  "project_name": "webkit-demo",
+  "site_root": ".",
+  "default_page": "index.html",
+  "lock_dir": "/tmp/webkit-demo-agent-colors",
+  "grace_seconds": 180,
+  "palette": [
+    { "slug": "blue",   "emoji": "🔵", "port": 5311 },
+    { "slug": "red",    "emoji": "🔴", "port": 5312 },
+    { "slug": "green",  "emoji": "🟢", "port": 5313 },
+    { "slug": "orange", "emoji": "🟠", "port": 5314 },
+    { "slug": "purple", "emoji": "🟣", "port": 5315 }
+  ],
+  "browser": { "mode": "auto", "app_name": "Google Chrome" },
+  "feedback_dir": ".webkit/feedback"
+}

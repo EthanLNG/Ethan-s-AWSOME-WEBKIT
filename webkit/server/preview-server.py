@@ -32,7 +32,7 @@ Config: $WK_CONFIG if set, else ../webkit.config.json, else
 the config is the single source of truth for emojis/slugs/ports — nothing
 color-related is hardcoded here.
 
-Behaviors deliberately preserved from the original RealClick server:
+Behaviors deliberately preserved from the server this grew out of:
   * Cache-Control: no-store on EVERY response (see end_headers), which fixed
     a real lost-iteration bug where edited CSS was served stale from disk
     cache even after a ?v= bump.
@@ -254,13 +254,32 @@ def stamp(html):
 _BODY_CLOSE = re.compile(r"</body\s*>", re.I)
 _HTML_CLOSE = re.compile(r"</html\s*>", re.I)
 
+# Optional per-project hotkey overrides: {"hotkeys": {"toggle": "Backquote",
+# "dictate": "KeyV"}}. Values are KeyboardEvent.code strings (layout-independent
+# — this matters on a Hebrew site, where e.key differs per layout); the overlay
+# carries the same two defaults, so an absent config block changes nothing.
+# Anything that isn't a bare alphanumeric code is dropped rather than escaped:
+# it could not be a valid code anyway, and dropping it keeps the injected tag
+# un-quotable from config.
+_HOTKEY_CODE = re.compile(r"^[A-Za-z0-9]+$")
+_HOTKEYS = CONFIG.get("hotkeys", {})
+if not isinstance(_HOTKEYS, dict):
+    _HOTKEYS = {}
+_HOTKEY_ATTRS = "".join(
+    ' data-wk-hotkey-{}="{}"'.format(name, _HOTKEYS[name])
+    for name in ("toggle", "dictate")
+    if isinstance(_HOTKEYS.get(name), str) and _HOTKEY_CODE.match(_HOTKEYS[name])
+)
+
 
 def inject(html, mode):
     if "data-wk-color" in html:  # already carries an overlay tag — don't stack
         return html
     tag = (
         '<script src="/__wk/overlay.js" defer data-wk-color="{}" '
-        'data-wk-emoji="{}" data-wk-mode="{}"></script>'.format(SLUG, COLOR, mode)
+        'data-wk-emoji="{}" data-wk-mode="{}"{}></script>'.format(
+            SLUG, COLOR, mode, _HOTKEY_ATTRS
+        )
     )
     matches = list(_BODY_CLOSE.finditer(html)) or list(_HTML_CLOSE.finditer(html))
     if matches:

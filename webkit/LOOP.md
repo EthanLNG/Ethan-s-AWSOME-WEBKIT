@@ -21,6 +21,13 @@ process verdicts and either run another round or close the batch.
 - **Keep the working tree committed at round boundaries.** The before/after
   toggle serves files out of `git show` — uncommitted work is invisible to it
   and gets mixed into the *next* round's diff, corrupting the story.
+  BEFORE swaps **in place** (no page reload): the overlay lifts the reviewed
+  point's container out of the snapshot document and repoints the page's
+  stylesheets at their `/__wk/before/` equivalents, so a point whose change
+  lives entirely in CSS still shows a real difference. It falls back to a full
+  navigation (with a toast saying why) when the container can't be matched in
+  both documents — one more reason the point's primary element should sit
+  inside a stable `section`/`article`/`[id]`.
 - **One git commit per point.** The verdict loop reverts and redoes at
   point granularity; a commit spanning two points makes `delete` on one of
   them impossible to do cleanly.

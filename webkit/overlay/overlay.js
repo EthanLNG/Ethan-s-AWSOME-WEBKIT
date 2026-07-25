@@ -8,7 +8,7 @@
  *   <script src="/__wk/overlay.js" defer
  *           data-wk-color="blue" data-wk-emoji="🔵" data-wk-mode="after">
  *
- * The user toggles into "feedback" mode (corner button / Ctrl+. / double-Esc),
+ * The user toggles into "feedback" mode with a single key (default C),
  * draws rectangles over the live site, types or dictates a note per point
  * (optionally requesting A/B/C variants), and sends the batch. The agent picks
  * the batch up from .webkit/feedback/<color>/feedback.json, applies each point
@@ -62,8 +62,22 @@
   const EMOJI = DS.wkEmoji || '⬜';
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
 
+  // Hotkeys are KeyboardEvent.code values (LAYOUT-INDEPENDENT: this site is
+  // Hebrew, so `e.key` would be a different character on every layout).
+  // Ctrl/Cmd+. — the original primary — never reaches the page on macOS Chrome
+  // (the browser eats the combo), hence a single bare key. The server injects
+  // overrides from the config's `hotkeys` block; these are the defaults.
+  const HOTKEY_TOGGLE = DS.wkHotkeyToggle || 'KeyC';
+  const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'KeyV';
+  const keyLabel = (code) => code === 'Backquote' ? '`'
+    : /^Key[A-Z]$/.test(code) ? code.slice(3)
+      : /^Digit[0-9]$/.test(code) ? code.slice(5)
+        : code;
+  const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
+  const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
+  const MIC_TITLE = 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL;
+
   const BEFORE_PREFIX = '/__wk/before';
-  const ESC_WINDOW_MS = 350;                  // double-Esc detection window
   const LETTERS = 'ABCDEFGHIJ';               // abc request letters, count capped at 10
 
   // ===== tiny utils ==========================================================
@@ -177,7 +191,6 @@
     offeredReview: '',          // batchId:round already toasted, don't re-nag
     bootReview: null,           // ?wk-review target during boot — suppresses the offer toast
     pinEls: [],                 // [{node, box}] for the rAF repositioner
-    lastEsc: 0,
     altHeld: false,
   };
   // read-merge-write so a second tab on the same origin can't clobber points:
@@ -214,7 +227,7 @@
   // retrying with backoff until the real sheet lands.
   const CRITICAL =
     '.wk-wrap{position:fixed;inset:0;pointer-events:none}.wk-wrap.wk-off{visibility:hidden}' +
-    '.wk-corner,.wk-draw:not(.pass),.wk-pin,.wk-bar,.wk-card,.wk-toast,.wk-send{pointer-events:auto}';
+    '.wk-draw:not(.pass),.wk-pin,.wk-bar,.wk-card,.wk-toast,.wk-send{pointer-events:auto}';
   let cssSheet = null, cssStyleNode = null;
   function applySheet(css) {
     try {
@@ -240,25 +253,17 @@
     applySheet(css);
   }
 
-  // --- structure: corner button OUTSIDE the hideable container ---------------
-  const corner = el('button', 'wk-corner');
-  corner.type = 'button';
-  corner.title = EMOJI + ' webkit feedback — Ctrl/Cmd+. or double-Esc';
-  // crosshair-in-rounded-square glyph, currentColor strokes (no glyph-font risk)
-  corner.innerHTML =
-    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"' +
-    ' stroke-width="1.5" stroke-linecap="round" aria-hidden="true">' +
-    '<rect x="1.75" y="1.75" width="12.5" height="12.5" rx="3.5"/>' +
-    '<line x1="8" y1="4.4" x2="8" y2="6.9"/><line x1="8" y1="9.1" x2="8" y2="11.6"/>' +
-    '<line x1="4.4" y1="8" x2="6.9" y2="8"/><line x1="9.1" y1="8" x2="11.6" y2="8"/>' +
-    '</svg><span class="wk-dot" hidden></span>';
-  const cornerDot = corner.querySelector('.wk-dot');
-
+  // No corner button by design: the ONE way in and out is the toggle key. A
+  // permanently-mounted button is chrome on someone's design, and the author
+  // would rather tell people "press C" than have them hunt for a target.
   const wrap = el('div', 'wk-wrap wk-off');          // visibility-toggled container
   const drawLayer = IS_BEFORE ? null : el('div', 'wk-draw');
   const pinLayer = el('div', 'wk-pins');
+  // The toggle key always wins, even mid-sentence in a note — that is what makes
+  // hide/show instant at any moment, and it costs typing that one letter.
   const hintChip = el('div', 'wk-hint',
-    'drag to mark a spot · hold ⌥ to use the page · ⌘. to hide');
+    'drag to mark a spot · hold ⌥ to use the page · ' + TOGGLE_LABEL +
+    ' to hide (not typable) · ' + DICTATE_LABEL + ' to dictate');
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
   sendBtn.hidden = true;
@@ -275,7 +280,6 @@
   wrap.appendChild(statusChip);
   wrap.appendChild(bar);
   root.appendChild(wrap);
-  root.appendChild(corner);
   // toasts live OUTSIDE wrap: wrap gets visibility:hidden in evaluate mode, and
   // the review-ready offer + auto-sent notices must be visible while the user is
   // browsing (evaluate mode is the normal waiting state).
@@ -318,47 +322,11 @@
     return json;
   }
 
-  // ===== corner button: proximity reveal =====================================
-  // Invisible at rest (evaluate mode), fades in as the pointer approaches so it
-  // never pollutes screenshots or the design itself; steady while in feedback.
-  let proxRaf = 0, lastPointer = null;
-  function proximityTick() {
-    proxRaf = 0;
-    if (S.mode === 'feedback') { corner.classList.add('steady'); corner.classList.remove('near'); return; }
-    corner.classList.remove('steady');
-    if (!lastPointer) return;
-    const r = corner.getBoundingClientRect();
-    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    const d = Math.hypot(lastPointer.x - cx, lastPointer.y - cy);
-    corner.classList.toggle('near', d < 120);
-  }
-  window.addEventListener('pointermove', (e) => {
-    lastPointer = { x: e.clientX, y: e.clientY };
-    if (!proxRaf) proxRaf = requestAnimationFrame(proximityTick);
-  }, { passive: true });
-
-  function updateCornerDot() {
-    // red dot = a review round is waiting and the user isn't in it yet
-    cornerDot.hidden = !(S.phase === 'reviewing' && !S.reviewing);
-    // reveal the corner (normally opacity:0 until the pointer is near) whenever
-    // the dot is showing, so a ready review isn't hidden behind proximity
-    corner.classList.toggle('alert', !cornerDot.hidden);
-  }
-
-  // The corner honours its own dot: with a review waiting, a click enters it —
-  // otherwise the only in-page path to enterReview is the dismissable offer toast
-  // (or a full reload). Falls back to the plain mode toggle.
-  corner.addEventListener('click', () => {
-    if (S.phase === 'reviewing' && !S.reviewing && S.review && S.batch) { enterReview({}); return; }
-    toggleMode();
-  });
-
   // ===== mode toggle =========================================================
   function setMode(mode) {
     S.mode = mode;
     LS.set('wk:mode', mode);
     wrap.classList.toggle('wk-off', mode !== 'feedback');
-    proximityTick();
     if (mode === 'feedback') {
       if (!IS_BEFORE && !S.card) restoreCardDraft();
       if (S.card) {
@@ -369,6 +337,11 @@
       }
       renderPins();
       updateHint();
+      if (S.reviewing) updateBar();   // re-parks the page's abc switcher for this point
+    } else {
+      // overlay hidden = the page is the user's again: its own abc switcher is
+      // now the only control there is, so un-park it
+      restorePageAbc();
     }
     schedulePoll(true);
   }
@@ -549,6 +522,30 @@
     }
     return Object.keys(out).length ? out : null;
   }
+  // While reviewing an abc point the review bar's ⚗ chip IS the switcher, so the
+  // page's own bottom-left button for THAT scope is a confusing duplicate — park
+  // it behind an inline display:none (the abc manager only ever writes .hidden
+  // and .style.bottom, so it never fights us) and restore it on the way out.
+  // Scoped by data-abc-for: an unrelated live experiment's button keeps working.
+  let hiddenAbcBtns = [];
+  function restorePageAbc() {
+    for (const h of hiddenAbcBtns) h.el.style.display = h.prev;
+    hiddenAbcBtns = [];
+  }
+  function hidePageAbc(scopeId) {
+    if (hiddenAbcBtns.length && hiddenAbcBtns[0].scopeId === scopeId) return;   // already parked
+    restorePageAbc();
+    if (!scopeId) return;
+    let btns = [];
+    try {
+      btns = [...document.querySelectorAll('.abc-switch[data-abc-for="' + cssEscape(scopeId) + '"]')];
+    } catch (e) { /* exotic scope id — leave the page's button alone */ }
+    for (const el2 of btns) {
+      hiddenAbcBtns.push({ el: el2, prev: el2.style.display, scopeId });
+      el2.style.display = 'none';
+    }
+  }
+
   window.addEventListener('abc:change', (e) => {
     const id = e.detail?.id;
     if (id) S.abcToggled.add(id);
@@ -889,7 +886,7 @@
       userOn = true;
       netFails = 0;
       btn.classList.remove('error');
-      btn.title = 'Dictating — click to stop';
+      btn.title = 'Dictating — click or press ' + DICTATE_LABEL + ' to stop';
       paint();
       start();
       ta.focus();
@@ -898,7 +895,7 @@
       stop,
       // after a reload we can't auto-start (browser gesture rule) — show the
       // armed look so the user knows one click resumes dictation
-      arm() { if (!userOn) { btn.classList.add('armed'); btn.title = 'Click to resume dictation'; } },
+      arm() { if (!userOn) { btn.classList.add('armed'); btn.title = 'Click (or press ' + DICTATE_LABEL + ') to resume dictation'; } },
       get on() { return userOn; },
     };
     return self;
@@ -949,7 +946,7 @@
     const title = el('span', 'wk-card-title', editing ? 'edit point' : 'feedback');
     const micBtn = el('button', 'wk-mic');
     micBtn.type = 'button';
-    micBtn.title = 'Dictate (Chrome speech-to-text)';
+    micBtn.title = MIC_TITLE;
     micBtn.innerHTML = micGlyph;
     head.append(num, title, micBtn);
 
@@ -1107,7 +1104,9 @@
       }
     });
 
-    S.card = { node, ta, draft, mic, saveDraft, commit, cancel() { LS.remove('wk:card'); teardown(); } };
+    // micBtn is exposed so the dictate hotkey can drive the SAME click handler
+    // (it owns the one-live-recognition registry and the focus/paint bookkeeping)
+    S.card = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel() { LS.remove('wk:card'); teardown(); } };
     paintAbc();
     autoGrow();
     positionFrozen();
@@ -1304,6 +1303,13 @@
       // by construction (a send in collecting clears them) → flush it now
       if (prevPhase !== null && prevPhase !== 'collecting' && S.points.length) {
         sendPoints(true);
+      } else if (!S.points.length) {
+        // The batch is finished and nothing is queued behind it, so the numbering
+        // starts over at #1. The high-water mark only exists to stop a NEW point
+        // colliding with the pins of a batch still on screen; once the inbox is
+        // empty there is nothing to collide with, and carrying on at "#6" just
+        // reads as though the old round never closed.
+        LS.remove('wk:lastNum');
       }
     } else if (S.phase === 'reviewing' && S.review) {
       const key = S.review.batchId + ':' + S.review.round;
@@ -1322,7 +1328,6 @@
 
     updateStatusChip();
     updateSendBtn();
-    updateCornerDot();
     if (S.reviewing) updateBar();
   }
 
@@ -1386,18 +1391,21 @@
     bar.hidden = false;
     statusChip.hidden = true;
     jumpTo(idx, { noScroll: !!opts.noScroll });
-    updateCornerDot();
   }
 
   function exitReview() {
     S.reviewing = false;
     S.reviewList = [];
     S.curPinEls = null;
+    // leaving review = the page must go back to being itself: the live AFTER
+    // DOM/stylesheets, and the page's own abc switcher visible again
+    restoreSwap();
+    if (!IS_BEFORE) S.side = 'after';
+    restorePageAbc();
     bar.hidden = true;
     SS.remove('wk:reviewCursor');
     renderPins();
     updateStatusChip();
-    updateCornerDot();
   }
 
   // Probe a cross-document target before navigating: the agent may have created,
@@ -1426,6 +1434,7 @@
         "This point's page no longer exists on this side — the agent may have removed or renamed it.");
       return;
     }
+    if (S.side === 'before' && !IS_BEFORE) resyncSwap(pt);   // per-point swap container
     renderPins();
     updateBar();
     const va = pinBox(pt);
@@ -1447,9 +1456,206 @@
     }
   }
 
-  function setSide(side) {
-    if (side === S.side) return;
-    LS.set('wk:side', side);  // sticky preference; the document itself is authoritative on load
+  // ===== BEFORE|AFTER: in-place swap =========================================
+  // A full navigation to /__wk/before/<page> is correct but brutal on a long
+  // scroll story: seconds of reload, the scroll story replays, the eye loses the
+  // spot. So we swap like an A/B variant instead — fetch the before document
+  // once, lift out the container the current point lives in, and put it in the
+  // live DOM, keeping the live node in memory for the way back. Two things make
+  // this honest rather than a half-truth: the page's own stylesheets are pointed
+  // at their /__wk/before/ equivalents (a real bug in this project was CSS-only —
+  // identical HTML, a missing selector), and the reveal/doodle machinery is
+  // nudged so the swapped subtree doesn't land inert. Anything that can't be
+  // resolved falls back to the old full navigation with a toast saying why.
+  const SWAP = {
+    doc: null,      // parsed before-document (per logical page)
+    docPath: '',
+    sel: '',        // selector of the swapped container
+    live: null,     // the AFTER node, detached, waiting to go back
+    placed: null,   // the BEFORE node currently in the document
+    css: null,      // [{link, href}] stylesheet hrefs we repointed
+  };
+  let swapBusy = false, swapQueued = null;
+
+  async function beforeDocument() {
+    const page = logicalPath();
+    if (SWAP.doc && SWAP.docPath === page) return SWAP.doc;
+    const r = await fetch(BEFORE_PREFIX + page, { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status === 409 ? 'round just ended' : 'HTTP ' + r.status);
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    SWAP.doc = doc;
+    SWAP.docPath = page;
+    return doc;
+  }
+
+  // The swap container must exist AND be unique in BOTH documents. context[0] is
+  // the primary element, but a bare <span> is a poor unit to swap — prefer its
+  // nearest section/article/[id], which is what a design change is usually scoped
+  // to and what survives the agent rewriting the innards.
+  function resolveSwapTarget(pt, doc) {
+    const cands = [];
+    for (const c of ((pt && pt.context) || []).slice(0, 4)) {
+      if (!c.selector) continue;
+      let live = null;
+      try { live = document.querySelector(c.selector); } catch (e) { continue; }
+      if (!live || live === document.body || live === document.documentElement) continue;
+      const anc = live.closest('section, article, [id]');
+      if (anc && anc !== live && anc !== document.body) cands.push(anc);
+      cands.push(live);
+    }
+    const tried = new Set();
+    for (const node of cands) {
+      const sel = buildSelector(node);
+      if (!sel || tried.has(sel)) continue;
+      tried.add(sel);
+      if (!matchesUnique(sel, node)) continue;
+      let inc = null;
+      try { inc = doc.querySelectorAll(sel); } catch (e) { continue; }
+      if (inc.length === 1) return { sel, live: node, incoming: inc[0] };
+    }
+    return null;
+  }
+
+  // Reveal machinery is class-driven here (.is-in / .is-active land once, from an
+  // IntersectionObserver that already fired): a freshly parsed before-node would
+  // arrive without them and render as an invisible/unstarted scene. Copy state
+  // classes across, stopping at the first structural divergence — below that the
+  // trees aren't comparable and positional matching would paint the wrong nodes.
+  const SWAP_STATE_CLASS = /^(?:is-|has-|js-)|^(?:in|active|visible|shown|open|current|played|done)$/;
+  function carryState(from, to) {
+    if (!from || !to) return;
+    for (const c of from.classList) if (SWAP_STATE_CLASS.test(c)) to.classList.add(c);
+    const a = from.children, b = to.children;
+    if (a.length !== b.length) return;
+    for (let i = 0; i < a.length; i++) carryState(a[i], b[i]);
+  }
+
+  // The doodles are drawn by a load-time pass over `.rough` groups; if the host
+  // page exposes it as a callable, re-run it on the swapped subtree so line art
+  // isn't left as raw un-warped geometry (or nothing at all).
+  function reinitDoodles(node) {
+    for (const name of ['roughen', '__roughen', 'wkRoughen', '__wkRoughen']) {
+      const hook = window[name];
+      const fn = typeof hook === 'function' ? hook : (hook && typeof hook.run === 'function' ? hook.run : null);
+      if (!fn) continue;
+      try { fn.call(hook === fn ? window : hook, node); } catch (e) { /* best effort */ }
+      return;
+    }
+  }
+
+  function afterSwapPaint(node) {
+    reinitDoodles(node);
+    // observers/parallax/beat-snap all recompute off these; the swap changed
+    // heights, so pins must re-anchor through correctedRect too
+    window.dispatchEvent(new Event('scroll'));
+    window.dispatchEvent(new Event('resize'));
+    renderPins();
+    schedulePos();
+    if (node && node.isConnected) window.__abc?.relayout?.();
+  }
+
+  // Keep the eye on the thing being compared. A swap changes the height of the
+  // container (and on a scroll-driven page the synthetic scroll/resize above can
+  // make the host's own story JS re-snap), so without this the page can end up
+  // thousands of px away from the point — toggling BEFORE|AFTER would show you
+  // somewhere else entirely. Capture where the anchor sits in the viewport, then
+  // put it back there afterwards. Returns a restore fn; call it AFTER the paint.
+  function anchorViewport(pt) {
+    const sels = [];
+    for (const c of ((pt && pt.context) || []).slice(0, 4)) if (c.selector) sels.push(c.selector);
+    if (SWAP.sel) sels.push(SWAP.sel);
+    let sel = null, top = null;
+    for (const s of sels) {
+      let el = null;
+      try { el = document.querySelector(s); } catch (e) { continue; }
+      if (el) { sel = s; top = el.getBoundingClientRect().top; break; }
+    }
+    return () => {
+      if (sel == null || top == null) return;
+      const settle = () => {
+        let el = null;
+        try { el = document.querySelector(sel); } catch (e) { return; }
+        if (!el) return;
+        const delta = el.getBoundingClientRect().top - top;
+        if (Math.abs(delta) > 1) window.scrollBy({ top: delta, behavior: 'instant' });
+      };
+      settle();
+      // the host's scroll handlers may move things again on the next tick
+      setTimeout(settle, 60);
+    };
+  }
+
+  // CSS-only changes are invisible to a DOM swap, so BEFORE also repoints every
+  // same-origin stylesheet at its snapshot. Each candidate is probed first: a
+  // stylesheet added since the beforeRef 404s out of git, and blindly repointing
+  // it would strip the page bare — worse than showing the current one.
+  async function stylesheetsToBefore() {
+    if (SWAP.css) return;
+    const cands = [];
+    for (const link of document.querySelectorAll('link[rel~="stylesheet"][href]')) {
+      const raw = link.getAttribute('href');
+      let u;
+      try { u = new URL(raw, location.href); } catch (e) { continue; }
+      if (u.origin !== location.origin || u.pathname.startsWith('/__wk/')) continue;
+      cands.push({ link, href: raw, to: BEFORE_PREFIX + u.pathname + u.search });
+    }
+    const ok = await Promise.all(cands.map(async (c) => {
+      try { return (await fetch(c.to, { cache: 'no-store' })).ok; } catch (e) { return false; }
+    }));
+    SWAP.css = [];
+    cands.forEach((c, i) => {
+      if (!ok[i]) return;
+      SWAP.css.push({ link: c.link, href: c.href });
+      c.link.setAttribute('href', c.to);
+    });
+  }
+  function stylesheetsToAfter() {
+    for (const c of SWAP.css || []) c.link.setAttribute('href', c.href);
+    SWAP.css = null;
+  }
+
+  async function applySwap(pt) {
+    const doc = await beforeDocument();
+    const t = resolveSwapTarget(pt, doc);
+    if (!t) throw new Error('no container shared by both versions');
+    const reanchor = anchorViewport(pt);
+    const node = document.importNode(t.incoming, true);
+    carryState(t.live, node);
+    t.live.replaceWith(node);
+    SWAP.sel = t.sel;
+    SWAP.live = t.live;
+    SWAP.placed = node;
+    await stylesheetsToBefore();
+    afterSwapPaint(node);
+    reanchor();
+  }
+
+  function restoreSwap() {
+    if (SWAP.placed && SWAP.live) {
+      const reanchor = anchorViewport(currentPoint());
+      if (SWAP.placed.isConnected) SWAP.placed.replaceWith(SWAP.live);
+      SWAP.placed = null;
+      SWAP.live = null;
+      SWAP.sel = '';
+      stylesheetsToAfter();
+      afterSwapPaint(document.body);
+      reanchor();
+      return;
+    }
+    SWAP.placed = SWAP.live = null;
+    SWAP.sel = '';
+    stylesheetsToAfter();
+  }
+
+  function markSide(side) {
+    S.side = side;
+    LS.set('wk:side', side);   // sticky preference; the document is authoritative on load
+    updateBar();
+  }
+
+  // the pre-existing behaviour, kept verbatim as the fallback path
+  function navSide(side) {
+    LS.set('wk:side', side);
     const pt = S.reviewList[S.cursor];
     SS.setJSON('wk:scroll', { path: logicalPath(), x: Math.round(scrollX), y: Math.round(scrollY) });
     const page = pt ? pt.page : logicalPath();
@@ -1457,6 +1663,50 @@
       '?wk-review=' + encodeURIComponent(S.reviewBatchId) +
       (pt ? '&wk-point=' + pt.number : ''),
       "This page isn't in the before snapshot (or the round just ended).");
+  }
+
+  function setSide(side) {
+    // A document actually SERVED from /__wk/before is a git snapshot with no
+    // live tree to restore — only a navigation can leave it.
+    if (IS_BEFORE) { if (side !== S.side) navSide(side); return; }
+    // The first BEFORE costs a fetch; a click landing during it must not be
+    // swallowed (the button would just look dead) — remember it and settle there.
+    if (swapBusy) { swapQueued = side; return; }
+    if (side === S.side) return;
+    if (side === 'after') { restoreSwap(); markSide('after'); return; }
+    const pt = currentPoint();
+    if (!pt) return navSide('before');
+    swapBusy = true;
+    applySwap(pt).then(() => { markSide('before'); }).catch((e) => {
+      restoreSwap();
+      toast('In-place BEFORE not possible here (' + e.message + ') — loading the snapshot page.',
+        { kind: 'warn' });
+      navSide('before');
+    }).finally(() => { swapBusy = false; drainSwapQueue(); });
+  }
+  function drainSwapQueue() {
+    const q = swapQueued;
+    swapQueued = null;
+    if (q && q !== S.side) setSide(q);
+  }
+
+  // Moving to another point while BEFORE is showing: the swapped container is
+  // per-point, so re-resolve it. If the new point has no shared container we are
+  // honestly on AFTER for it — say so rather than mislabel the bar.
+  function resyncSwap(pt) {
+    if (swapBusy || !SWAP.placed) return;
+    const t = resolveSwapTarget(pt, SWAP.doc);
+    if (t && t.sel === SWAP.sel) return;
+    swapBusy = true;
+    const css = SWAP.css;
+    SWAP.css = null;                 // keep the before stylesheets while we re-swap
+    restoreSwap();
+    SWAP.css = css;
+    applySwap(pt).catch(() => {
+      restoreSwap();
+      markSide('after');
+      toast('No in-place BEFORE for this point — showing AFTER.', { kind: 'warn' });
+    }).finally(() => { swapBusy = false; drainSwapQueue(); });
   }
 
   // --- review bar -------------------------------------------------------------
@@ -1530,6 +1780,25 @@
     return scopeId ? (window.__abc?.get?.(scopeId) || null) : null;
   }
 
+  // The chip is the ONLY variant switcher on screen during review, so it has to
+  // read as a real button rather than the flat status pill it used to be:
+  // flask · the current letter, large · the whole letter run with the live one
+  // lit · a cycle glyph that says "clicking me advances this".
+  function paintAbcChip(letter, letters) {
+    B.abcChip.textContent = '';
+    B.abcChip.append(el('span', 'wk-chip-flask', '⚗'), el('span', 'wk-chip-letter', String(letter)));
+    // the run only earns its width while it's short — /ABC allows up to 10
+    // variants, and ten pips would push the review bar into a second row
+    if (letters && letters.length > 1 && letters.length <= 5) {
+      const run = el('span', 'wk-chip-run');
+      for (const L of letters) run.appendChild(el('span', 'wk-chip-l' + (L === letter ? ' on' : ''), L));
+      B.abcChip.appendChild(run);
+    } else if (letters && letters.length > 5) {
+      B.abcChip.appendChild(el('span', 'wk-chip-of', 'of ' + letters.length));
+    }
+    B.abcChip.appendChild(el('span', 'wk-chip-cycle', '⟳'));
+  }
+
   function updateBar() {
     if (!S.reviewing || bar.hidden) return;
     const pt = currentPoint();
@@ -1553,25 +1822,28 @@
     B.before.classList.toggle('active', S.side === 'before');
     B.after.classList.toggle('active', S.side === 'after');
 
-    // abc chip: live current letter, bound to abc:change
+    // abc chip: live current letter, bound to abc:change. This is the ONLY
+    // switcher the user should see for the point under review — hidePageAbc
+    // parks the page's own duplicate button for the same scope.
     const isAbc = !!(h && h.abc);
     B.abcChip.hidden = !isAbc;
+    hidePageAbc(isAbc && !IS_BEFORE ? h.abc.scopeId : null);
     let abcBlocked = false;
     if (isAbc) {
       const inst = currentAbcInst();
       if (IS_BEFORE) {
-        B.abcChip.textContent = '⚗ —';
+        paintAbcChip('—', null);
         B.abcChip.classList.add('disabled');
         B.abcChip.classList.remove('error');
         B.abcChip.title = 'Variants live in the AFTER view — toggle AFTER to compare A/B/C';
       } else if (!inst) {
-        B.abcChip.textContent = '⚗ ?';
+        paintAbcChip('?', null);
         B.abcChip.classList.add('error');
         B.abcChip.classList.remove('disabled');
         B.abcChip.title = 'abc scope "' + h.abc.scopeId + '" not found on this page — accept blocked';
         abcBlocked = true;
       } else {
-        B.abcChip.textContent = '⚗ ' + inst.current;
+        paintAbcChip(inst.current, inst.letters);
         B.abcChip.classList.remove('disabled', 'error');
         B.abcChip.title = 'variant ' + inst.current + ' of ' + inst.letters + ' — click to cycle';
       }
@@ -1660,6 +1932,7 @@
     ta.value = (existing && existing.redoText) || '';
     const micBtn = el('button', 'wk-mic');
     micBtn.type = 'button';
+    micBtn.title = MIC_TITLE;
     micBtn.innerHTML = micGlyph;
     const cancel = el('button', 'wk-btn ghost', 'Cancel');
     const save = el('button', 'wk-btn primary', 'Redo it');
@@ -1678,7 +1951,7 @@
       close();
       recordVerdict({ verdict: 'redo', redoText: txt });
     });
-    S.mini = { node, close };
+    S.mini = { node, ta, micBtn, close };
     ta.focus();
   }
 
@@ -1725,27 +1998,58 @@
     const inOverlay = isNode && root.contains(t);
     const editable = isNode && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 
-    // Ctrl/Cmd+. — the toggle. Works inside the overlay's own textarea (so a
-    // mid-sentence hide/show is one keystroke) but never steals the shortcut
-    // from the host page's editors.
-    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === '.' || e.code === 'Period')) {
+    // THE toggle — deliberately the only one. One key to learn, one key to tell
+    // other developers about, no button anywhere on the page. Matched by CODE so
+    // a Hebrew (or any) layout can't move it. It always wins, including inside a
+    // half-typed note, because hiding the GUI has to be instant at any moment;
+    // the cost is that this one letter can't be typed into feedback text (the
+    // hint chip says so). Shift is let through so the shifted char stays typable.
+    // Never steals the key from the HOST page's own inputs.
+    if (e.code === HOTKEY_TOGGLE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       if (editable && !inOverlay) return;
       e.preventDefault();
       e.stopPropagation();
-      toggleMode();
+      // With a review waiting, the key walks into it rather than just unhiding —
+      // this was the corner button's job before it was removed, and the offer
+      // toast is dismissable, so without this a dismissed toast would strand you.
+      if (S.phase === 'reviewing' && !S.reviewing && S.review && S.batch) enterReview({});
+      else toggleMode();
       return;
     }
 
+    // Dictation toggle. The modifier guard is load-bearing: Cmd+V must stay
+    // paste, Ctrl+V too. Disambiguation from the letter "v":
+    //   recording  → always stops (while recording the user is speaking, not typing)
+    //   otherwise  → starts only when the note field is empty or unfocused
+    if (e.code === HOTKEY_DICTATE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (liveMic && liveMic.on) {
+        e.preventDefault();
+        e.stopPropagation();
+        liveMic.stop();
+        return;
+      }
+      if (S.mode !== 'feedback') return;     // overlay hidden: don't dictate into an invisible card
+      const holder = S.mini || S.card;      // the redo mini-input wins while open
+      if (!holder || !holder.micBtn || holder.micBtn.hidden) return;
+      if (editable) {
+        if (!inOverlay) return;             // host page's own input — hands off
+        if (t !== holder.ta) return;        // another overlay field (abc prompts) — type it
+        if (holder.ta.value.trim()) return; // the note already has text — V is a letter
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      holder.micBtn.click();                // reuse the button's own start/stop path
+      return;
+    }
+
+    // Escape only ever CANCELS. It used to double-tap into a mode toggle, but the
+    // toggle key is deliberately the single way to switch modes now.
     if (e.key === 'Escape') {
       if (S.mode === 'feedback') {
-        if (S.drag) { S.drag.cancel && S.drag.cancel(); S.drag = null; S.lastEsc = 0; e.stopPropagation(); return; }
-        if (S.mini) { S.mini.close(); S.lastEsc = 0; e.stopPropagation(); return; }
-        if (S.card) { S.card.cancel(); S.lastEsc = 0; e.stopPropagation(); return; }
+        if (S.drag) { S.drag.cancel && S.drag.cancel(); S.drag = null; e.stopPropagation(); return; }
+        if (S.mini) { S.mini.close(); e.stopPropagation(); return; }
+        if (S.card) { S.card.cancel(); e.stopPropagation(); return; }
       }
-      // double-Esc toggle — only when nothing above consumed the first press
-      const now = performance.now();
-      if (now - S.lastEsc <= ESC_WINDOW_MS) { S.lastEsc = 0; toggleMode(); }
-      else S.lastEsc = now;
       return;
     }
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.0 (2026-07-25)
+
+First round of changes driven by real use on a live site.
+
+- **One key, no button.** Showing/hiding the overlay is a single keypress
+  (default `C`, `hotkeys.toggle` in config). The bottom-left toggle button is
+  gone — nothing of the kit sits on the page at rest — and the old aliases
+  (backquote, double-Esc, Ctrl/Cmd+.) are removed so there is exactly one thing
+  to learn. Ctrl/Cmd+. was never reaching the page on macOS Chrome anyway.
+  With a review round waiting, the key walks into the review.
+- **`V` starts and stops dictation** (`hotkeys.dictate`), so a drawn rectangle
+  goes straight to speech without reaching for the mic button. It still types a
+  literal "v" once the note has text, and Cmd/Ctrl+V stays paste.
+- **BEFORE|AFTER no longer reloads the page.** The snapshot is fetched once and
+  the reviewed section is swapped in place, with the page's stylesheets
+  repointed at their snapshot copies so CSS-only changes show a real difference.
+  The compared element keeps its viewport position across toggles. Falls back to
+  the old full navigation (with a toast) when no container matches both versions.
+- **One ABC control during review.** The page's own variant switcher is parked
+  for the point under review, leaving the action-bar chip — now a real button
+  showing the current letter, the letter run and a cycle affordance.
+- **Point numbers restart at #1** once a batch is finished and nothing is
+  queued, instead of climbing forever. Numbering still continues within a batch.
+- Keyboard shortcuts are matched by `KeyboardEvent.code`, so they work on
+  non-US layouts (Hebrew, Arabic, …).
+- Hardening: `--end-of-options` and a SHA format check before `git show`; the
+  server binds `127.0.0.1` only; `site_root` is honoured as the document root;
+  RTL host pages no longer mirror the overlay; touch/coarse pointers supported.
+
 ## v0.1.0 (2026-07-25) — initial release
 
 - Multi-agent color system: atomic `mkdir` locks with owner records, stale-lock

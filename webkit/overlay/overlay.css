@@ -6,7 +6,7 @@
  * root). NOTHING here can leak into the host page and no host rule reaches in —
  * the host element carries all:initial, so every visual decision is made here.
  * ONE exception: the `all` shorthand deliberately excludes `direction` and
- * `unicode-bidi`, so `<html dir="rtl">` (e.g. the Hebrew RealClick site) still
+ * `unicode-bidi`, so `<html dir="rtl">` (a Hebrew, Arabic or Farsi site) still
  * inherits into the shadow tree and would mirror the whole tool. :host pins
  * `direction: ltr` below to neutralise that; the free-text fields opt back into
  * auto-detection with `unicode-bidi: plaintext` so Hebrew still types RTL.
@@ -16,8 +16,9 @@
  * shadows; 0.16s ease transitions (mirrors the abc switcher's feel).
  *
  * Geometry contract with the abc switcher: abc buttons stack UP from
- * left:14px/bottom:14px; the webkit row grows RIGHT along y=14 (corner toggle
- * at left:60px, send at left:106px). Never place anything at left:14px.
+ * left:14px/bottom:14px; the webkit row grows RIGHT along y=14 (send at
+ * left:60px). Never place anything at left:14px. There is no toggle button —
+ * showing/hiding the overlay is a keypress, so nothing sits on the page at rest.
  * ========================================================================== */
 
 /* overlay.js toggles visibility with the `hidden` attribute; class rules below
@@ -65,56 +66,6 @@
 .wk-wrap button {
   font-family: var(--wk-font);
   -webkit-tap-highlight-color: transparent;
-}
-
-/* ===== corner toggle (outside the hideable container) ===== */
-.wk-corner {
-  position: fixed;
-  left: 60px;                 /* abc owns x=14; we start one slot to the right */
-  bottom: 14px;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 1.6px solid var(--wk-ink);
-  background: var(--wk-paper);
-  color: var(--wk-ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  pointer-events: auto;
-  opacity: 0;                 /* invisible until the pointer comes near */
-  transition: opacity var(--wk-ease), transform var(--wk-ease), box-shadow var(--wk-ease);
-  z-index: 40;
-}
-.wk-corner.near { opacity: 0.55; }
-.wk-corner:hover { opacity: 1; box-shadow: var(--wk-shadow-soft); }
-.wk-corner.steady { opacity: 0.9; border-color: var(--wk-accent); color: var(--wk-accent); }
-.wk-corner.steady:hover { opacity: 1; }
-/* A review is waiting: keep the corner visible even without pointer proximity, so
-   a dismissed "review ready" toast still leaves a clickable way back into review. */
-.wk-corner.alert { opacity: 0.9; }
-.wk-corner:active { transform: scale(0.94); }
-.wk-corner .wk-dot {
-  position: absolute;
-  top: -1px;
-  right: -1px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--wk-danger);
-  border: 2px solid var(--wk-paper);
-}
-/* Touch/coarse pointers have no pointermove hover, so the proximity reveal
- * (overlay.js) never fires — the button would sit at opacity:0 forever and the
- * only entry point would be an invisible tap-trap. Keep it persistently visible
- * and give it a comfortable 44px tap target. */
-@media (pointer: coarse), (hover: none) {
-  .wk-corner {
-    opacity: 0.55;
-    width: 44px;
-    height: 44px;
-  }
 }
 
 /* ===== draw layer ===== */
@@ -480,10 +431,9 @@
 .wk-btn.danger:hover { background: rgba(220, 38, 38, 0.08); }
 .wk-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* ===== send button (left:106px — third slot in the corner row) ===== */
 .wk-send {
   position: fixed;
-  left: 106px;
+  left: 60px;
   bottom: 14px;
   height: 36px;
   display: flex;
@@ -549,8 +499,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: calc(100vw - 210px);   /* clear of the corner row on the left */
-  flex-wrap: wrap;
+  max-width: calc(100vw - 210px);   flex-wrap: wrap;
   justify-content: center;
   background: var(--wk-paper);
   border: 1px solid var(--wk-line);
@@ -594,19 +543,81 @@
 .wk-dot-i.v-redo { background: var(--wk-warn); border-color: var(--wk-warn); }
 .wk-dot-i.v-delete { background: var(--wk-muted); border-color: var(--wk-muted); }
 
+/* ===== abc chip (the ONLY variant switcher shown during review) =====
+ * overlay.js hides the page's own .abc-switch button for the scope under
+ * review, so this chip carries the whole job: it must read as a pressable
+ * control, not a status label. Hence the raised surface, the oversized current
+ * letter, the full letter run with the live one lit, and a ⟳ that spins on
+ * hover — "click me and the variant changes" has to be legible at a glance. */
 .wk-abc-chip {
-  border: 1px solid var(--wk-accent);
-  background: var(--wk-accent-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1.5px solid var(--wk-accent);
+  background: var(--wk-paper);
   color: var(--wk-accent);
   border-radius: 999px;
   font: 700 12px/1 var(--wk-font);
-  padding: 5px 11px;
+  padding: 5px 6px 5px 10px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background var(--wk-ease), color var(--wk-ease), border-color var(--wk-ease);
+  box-shadow: 0 1px 0 rgba(37, 99, 235, 0.28), var(--wk-shadow-soft);
+  transition: background var(--wk-ease), color var(--wk-ease), border-color var(--wk-ease),
+    box-shadow var(--wk-ease), transform var(--wk-ease);
 }
-.wk-abc-chip.disabled { border-color: var(--wk-line); background: transparent; color: var(--wk-muted); cursor: default; }
-.wk-abc-chip.error { border-color: var(--wk-danger); background: rgba(220, 38, 38, 0.08); color: var(--wk-danger); }
+.wk-abc-chip:hover { background: var(--wk-accent-soft); box-shadow: 0 2px 0 rgba(37, 99, 235, 0.35), var(--wk-shadow); }
+.wk-abc-chip:active { transform: translateY(1px); box-shadow: 0 0 0 rgba(37, 99, 235, 0.28), var(--wk-shadow-soft); }
+.wk-abc-chip .wk-chip-flask { font-size: 13px; opacity: 0.85; }
+.wk-abc-chip .wk-chip-letter {
+  font: 800 15px/1 var(--wk-font);
+  letter-spacing: 0.01em;
+  min-width: 11px;
+  text-align: center;
+}
+/* the run of available letters — shows at a glance that there ARE others */
+.wk-abc-chip .wk-chip-run { display: inline-flex; gap: 2px; }
+.wk-abc-chip .wk-chip-l {
+  font: 700 9px/13px var(--wk-font);
+  min-width: 13px;
+  height: 13px;
+  text-align: center;
+  border-radius: 4px;
+  color: var(--wk-muted);
+  background: rgba(15, 23, 42, 0.05);
+}
+.wk-abc-chip .wk-chip-l.on { color: #fff; background: var(--wk-accent); }
+.wk-abc-chip .wk-chip-of { font: 600 10px/1 var(--wk-font); color: var(--wk-muted); }
+.wk-abc-chip .wk-chip-cycle {
+  font-size: 13px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--wk-accent);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.3s ease;
+}
+.wk-abc-chip:hover .wk-chip-cycle { transform: rotate(180deg); }
+.wk-abc-chip.disabled {
+  border-color: var(--wk-line);
+  background: transparent;
+  color: var(--wk-muted);
+  cursor: default;
+  box-shadow: none;
+}
+.wk-abc-chip.disabled .wk-chip-cycle,
+.wk-abc-chip.error .wk-chip-cycle { background: transparent; color: inherit; }
+.wk-abc-chip.disabled:hover .wk-chip-cycle,
+.wk-abc-chip.error:hover .wk-chip-cycle { transform: none; }
+.wk-abc-chip.error {
+  border-color: var(--wk-danger);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--wk-danger);
+  box-shadow: none;
+}
 
 .wk-bar-note {
   font: 400 11px/1.3 var(--wk-font);

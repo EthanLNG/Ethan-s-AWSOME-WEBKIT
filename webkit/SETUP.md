@@ -57,6 +57,11 @@ python3 webkit/server/preview-server.py "$color"
 webkit/scripts/open-preview.sh "http://localhost:<port>/<default_page>"
 ```
 
+- **This script owns browser selection.** Run it as a shell command even when
+  your agent harness offers a generic Browser tool, an in-app browser, a
+  preview pane, or a webview. Do not open a second copy there. The configured
+  `browser.app_name` is the user's external desktop browser; with the default
+  config it is the actual Google Chrome application.
 - `<port>` is your color's port, `<default_page>` from the config.
 - On macOS + Chrome this closes any stale tab on the same `host:port` first,
   then opens and focuses a fresh one — one tab per design, always current.

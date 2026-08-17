@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.0 (2026-08-18)
+
+- **External-browser routing is explicit.** `webkit/scripts/open-preview.sh`
+  is now documented as the sole browser-selection path. The configured
+  `browser.app_name` is the user's real desktop browser (Google Chrome by
+  default), never an agent-hosted in-app browser, preview pane, or webview.
+- The installed `AGENTS.md` and `CLAUDE.md` pointer now blocks generic browser
+  tools, the Codex/ChatGPT in-app browser, Claude preview panes, IDE webviews,
+  and other embedded surfaces unless the user explicitly overrides the rule.
+- The Claude `webkit-setup` skill now triggers for ordinary launch, open,
+  preview, show, and browser-test requests, not only explicit Webkit setup
+  phrasing.
+
+**Migration:** refresh the vendored Webkit files, re-copy the updated
+`webkit-setup` skill into `.claude/skills/`, and update existing `AGENTS.md`
+and `CLAUDE.md` Webkit sections with the v0.4 pointer wording. No config or
+runtime migration is required.
+
 ## v0.3.0 (2026-08-17)
 
 - **Seamless Codex discovery.** Installation now always creates or updates the

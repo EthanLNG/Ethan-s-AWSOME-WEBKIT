@@ -76,6 +76,8 @@ defaults; you fill in the per-project values. Inference rules, per key:
   (e.g. 5321–5325) — keeping the block contiguous keeps slug→port predictable
   for humans scanning `lsof` output.
 - **`browser`** — template default: `{"mode": "auto", "app_name": "Google Chrome"}`.
+  `app_name` is the external desktop browser the user will actually see; it is
+  never an agent-hosted in-app browser, preview pane, or webview.
   `auto` means: AppleScript tab management when on macOS with Chrome available,
   print-the-URL fallback everywhere else. Only change it if the user says so.
 - **`feedback_dir`** — template default `.webkit/feedback`. Resolved relative
@@ -123,15 +125,20 @@ This project uses Ethan's AWESOME WEBKIT for design iteration. At the start of
 every website-working session, and whenever the user asks to launch, open,
 preview, show, or test the website in a browser, read and follow
 `webkit/SETUP.md` exactly. Use its claimed color, stamping preview server, and
-`webkit/scripts/open-preview.sh`; never substitute a generic HTTP server or a
-manually opened browser tab. If the WebKit session is already active, reuse it
-instead of claiming again. Read `webkit/LOOP.md` for browser feedback rounds.
+`webkit/scripts/open-preview.sh`; never substitute a generic HTTP server, a
+manually opened browser tab, the Codex/ChatGPT in-app browser, a Claude preview
+pane, an IDE webview, or another embedded browser. The configured external
+desktop browser is the only preview surface unless the user explicitly
+overrides it. If the WebKit session is already active, reuse it instead of
+claiming again. Read `webkit/LOOP.md` for browser feedback rounds.
 ```
 
 The pointer is deliberately explicit about launch/preview requests: those are
 the common prompts where an agent may otherwise reach for its generic browser
 tooling before discovering the project workflow. The operational details remain
 canonical in `webkit/`, where the pull flow keeps them current.
+The same section goes into `CLAUDE.md` when that file exists, so Claude Code and
+Codex receive the identical external-browser rule.
 
 ## 6. Gitignore the runtime data
 

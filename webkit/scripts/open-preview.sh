@@ -1,6 +1,7 @@
 #!/bin/bash
-# open-preview.sh — (re)open a preview URL in the user's browser, without
-# piling up tabs.
+# open-preview.sh — (re)open a preview URL in the user's configured external
+# desktop browser, without piling up tabs. Agent-hosted in-app browsers,
+# preview panes, and webviews are deliberately not launch targets.
 #
 # Why: several agents iterate on different designs at once, each serving on
 # its own port. If every reload opened a NEW tab the strip would silt up in

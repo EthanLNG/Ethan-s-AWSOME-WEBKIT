@@ -36,7 +36,9 @@ tab strip.
   markdown (`webkit/SETUP.md`, `webkit/LOOP.md`) that any agent can follow; Claude Code
   additionally gets thin skill wrappers. Installation always creates a Codex-readable
   `AGENTS.md` entry point, even in projects that previously had only `CLAUDE.md`, and
-  preview requests are routed through WebKit instead of generic browser tooling.
+  preview requests are routed through WebKit instead of generic browser tooling. The
+  configured external desktop browser (Google Chrome by default) is the only preview
+  surface—never an agent in-app browser, Claude preview pane, or IDE webview.
 
 ## Quickstart
 
@@ -52,7 +54,9 @@ That's the whole install. The agent reads [AGENTS.md](AGENTS.md), vendors the ki
 your project, infers a config, installs the project-level `AGENTS.md` discovery pointer,
 claims a color, starts the preview server, and hands you a URL. From then on, both Codex
 and Claude route website launch/preview requests through `webkit/SETUP.md` and run the
-feedback loop in `webkit/LOOP.md`.
+feedback loop in `webkit/LOOP.md`. The canonical launcher opens the configured external
+desktop browser, so a new agent conversation cannot silently divert the preview into an
+embedded browser surface.
 
 Want to try it without a project? `examples/demo-site/` is a self-contained page (with a
 live A/B experiment already on it) built to exercise every part of the loop.

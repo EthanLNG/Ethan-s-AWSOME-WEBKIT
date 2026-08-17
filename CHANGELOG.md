@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.0 (2026-08-17)
+
+- **Seamless Codex discovery.** Installation now always creates or updates the
+  project's `AGENTS.md`, even when that project already has only a
+  `CLAUDE.md`. Previously that shape silently skipped the Codex entry point.
+- The installed `## Webkit` pointer now explicitly routes launch, open,
+  preview, show, and browser-test requests through `webkit/SETUP.md`, including
+  its claimed color, stamping server, and canonical tab-reuse helper. It also
+  tells agents to reuse an active session rather than claim twice.
+- Installation verifies the Codex entry point before reporting success.
+
+**Migration:** existing projects should add the documented `## Webkit` section
+from the installer to a root `AGENTS.md` (create it if missing). No config or
+runtime migration is required.
+
 ## v0.2.0 (2026-07-25)
 
 First round of changes driven by real use on a live site.

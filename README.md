@@ -34,7 +34,9 @@ tab strip.
   accepting a letter folds it in and deletes the rest, losslessly.
 - **Harness-agnostic** — works with **Claude Code and Codex**. The protocol lives in plain
   markdown (`webkit/SETUP.md`, `webkit/LOOP.md`) that any agent can follow; Claude Code
-  additionally gets thin skill wrappers.
+  additionally gets thin skill wrappers. Installation always creates a Codex-readable
+  `AGENTS.md` entry point, even in projects that previously had only `CLAUDE.md`, and
+  preview requests are routed through WebKit instead of generic browser tooling.
 
 ## Quickstart
 
@@ -47,9 +49,10 @@ Then open your website project in your agent and tell it:
 > Set up Ethan's AWESOME WEBKIT from ~/Projects/Ethans-AWESOME-WEBKIT in this project.
 
 That's the whole install. The agent reads [AGENTS.md](AGENTS.md), vendors the kit into
-your project, infers a config, claims a color, starts the preview server, and hands you
-a URL. From then on, every session starts with `webkit/SETUP.md` and runs the feedback
-loop in `webkit/LOOP.md`.
+your project, infers a config, installs the project-level `AGENTS.md` discovery pointer,
+claims a color, starts the preview server, and hands you a URL. From then on, both Codex
+and Claude route website launch/preview requests through `webkit/SETUP.md` and run the
+feedback loop in `webkit/LOOP.md`.
 
 Want to try it without a project? `examples/demo-site/` is a self-contained page (with a
 live A/B experiment already on it) built to exercise every part of the loop.

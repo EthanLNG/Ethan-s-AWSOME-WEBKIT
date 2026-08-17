@@ -102,23 +102,36 @@ view.
 (`webkit/SETUP.md`, `webkit/LOOP.md`) are canonical and self-sufficient; the
 skills are only thin convenience wrappers for Claude Code's skill system.
 
-## 5. Pointer sections in the project's agent docs
+## 5. Install the project's Codex/Claude entry points
 
-Append a short pointer section to the project's `AGENTS.md` **and** `CLAUDE.md`
-(whichever of the two exist; if neither exists, create `AGENTS.md`). Both files
-because different harnesses auto-read different ones. Skip a file that already
-contains the pointer (idempotency). The section:
+**Always ensure `<project>/AGENTS.md` exists**, creating it if needed, and append
+the pointer section below. Codex auto-reads `AGENTS.md`; a project that only has
+`CLAUDE.md` is not Codex-configured. This is mandatory even when the user is
+currently installing through Claude Code, because the project must remain
+harness-portable.
+
+If `<project>/CLAUDE.md` exists, append the same section there too. Do not create
+`CLAUDE.md` solely for the kit. Skip a file that already contains a `## Webkit`
+section (idempotency).
+
+Use this section:
 
 ```markdown
 ## Webkit
 
-This project uses Ethan's AWESOME WEBKIT for design iteration. Read
-`webkit/SETUP.md` to start a session, `webkit/LOOP.md` to run the feedback loop.
+This project uses Ethan's AWESOME WEBKIT for design iteration. At the start of
+every website-working session, and whenever the user asks to launch, open,
+preview, show, or test the website in a browser, read and follow
+`webkit/SETUP.md` exactly. Use its claimed color, stamping preview server, and
+`webkit/scripts/open-preview.sh`; never substitute a generic HTTP server or a
+manually opened browser tab. If the WebKit session is already active, reuse it
+instead of claiming again. Read `webkit/LOOP.md` for browser feedback rounds.
 ```
 
-Keep it this short — the pointer's job is discovery, not duplication; the
-canonical instructions live in `webkit/` where they get updated by the kit's
-pull flow.
+The pointer is deliberately explicit about launch/preview requests: those are
+the common prompts where an agent may otherwise reach for its generic browser
+tooling before discovering the project workflow. The operational details remain
+canonical in `webkit/`, where the pull flow keeps them current.
 
 ## 6. Gitignore the runtime data
 
@@ -130,6 +143,10 @@ regenerates `webkit/server/__pycache__/` inside the project, and that compiled
 bytecode should never be committed either. Skip any line already present.
 
 ## 7. Start the first session and report
+
+Before starting, verify that `<project>/AGENTS.md` exists and contains the
+`## Webkit` section. This is the Codex-support invariant; do not report a
+successful install without it.
 
 Now run `webkit/SETUP.md` top to bottom (claim a color, start the server, open
 the preview, start the watcher). Finish by reporting to the user, concretely:

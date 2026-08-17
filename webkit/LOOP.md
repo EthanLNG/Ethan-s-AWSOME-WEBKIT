@@ -74,7 +74,15 @@ fix/delete `.webkit/feedback/<slug>/feedback.json`), then wait again.
 - **Claude Code idiom:** run it as a background Bash task
   (`run_in_background`), so the harness re-invokes you when it exits — you
   don't burn your turn polling. On `124`, start it again in the background.
-- **Codex idiom:** run it in the foreground; when it exits `124`, re-run it.
+- **Codex idiom:** keep the current agent turn alive until the waiter exits.
+  Start the command in the foreground. If the shell tool yields a live session
+  id, wait/poll that **same session** in chunks of at most 60 seconds; do not
+  send a final response while it is still running. A detached waiter can notice
+  `feedback.json`, but its exit does not wake a Codex task after the task has
+  already returned a final response. Exit `0` → read the batch immediately;
+  exit `124` → start a fresh waiter and remain in this step. The user can still
+  send a message while the turn is waiting; handle it normally without losing
+  the waiter state.
 
 ## Step 2 — READ the batch
 

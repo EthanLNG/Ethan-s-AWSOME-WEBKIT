@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.1 (2026-08-18)
+
+- **Codex feedback waiting is now explicit and durable.** Codex agents keep the
+  active turn open and poll the yielded waiter session in bounded chunks, so a
+  submitted feedback batch is processed immediately instead of being noticed
+  by an orphaned terminal process after the task has already returned.
+- Setup now warns that opening the preview is not a terminal state for Codex.
+
+**Migration:** refresh the vendored Webkit files. No config or runtime migration
+is required.
+
 ## v0.4.0 (2026-08-18)
 
 - **External-browser routing is explicit.** `webkit/scripts/open-preview.sh`

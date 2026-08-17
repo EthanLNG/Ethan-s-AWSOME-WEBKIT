@@ -76,6 +76,12 @@ The session is now live for the user; your job is to wait for their first
 feedback batch. Go to `webkit/LOOP.md` and run it from **step 1** (the wait).
 Re-read that file at the top of every round — it says so itself.
 
+**Codex:** opening the preview is not the end of the turn. Keep the current
+turn alive while the waiter runs and follow the Codex polling instructions in
+`LOOP.md`. A waiter left in a detached/background terminal after a final reply
+can detect the file, but it cannot wake a Codex task whose turn has already
+ended.
+
 ## End of session
 
 When the user ends the session (e.g. asks you to merge / says you're done):

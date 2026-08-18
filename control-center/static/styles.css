@@ -106,7 +106,8 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .session-state { padding: 6px 9px; border-radius: 99px; background: #eef6ef; color: #23663f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
 .session-state.busy, .session-state.merging { background: #fff2db; color: #8c5516; }
 .session-state.error { background: #fff0ee; color: #9f2724; }
-.open-chat { border: 0; border-bottom: 1px solid var(--ink); background: none; font-weight: 800; cursor: pointer; }
+.open-chat { padding: 5px 7px; border: 0; border-radius: 7px; background: none; font-weight: 800; cursor: pointer; }
+.open-chat:hover { background: #ece7dd; }
 .no-sessions { padding: 22px; border: 1px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }
 
 .chat-drawer { position: fixed; z-index: 20; top: 88px; right: 14px; bottom: 14px; width: min(460px, calc(100vw - 28px)); display: grid; grid-template-rows: auto 1fr auto auto; border: 1.5px solid var(--ink); border-radius: 20px; background: var(--panel); box-shadow: 10px 12px 0 rgba(23,23,23,.13); overflow: hidden; }

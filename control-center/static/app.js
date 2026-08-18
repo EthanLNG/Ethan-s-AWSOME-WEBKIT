@@ -264,13 +264,6 @@ function renderProjectView() {
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
-  const github = project.github || { connected: false };
-  $("#githubNote").className = `github-note ${github.connected ? "connected" : "missing"}`;
-  $("#githubNoteIcon").textContent = github.connected ? "✓" : "!";
-  $("#githubNoteTitle").textContent = github.connected ? "GitHub sync is on" : "Connect GitHub";
-  $("#githubNoteText").textContent = github.connected
-    ? "Accepted merges automatically update main on GitHub."
-    : "Connect GitHub to your coding agent or run gh auth login; WebKit will detect it automatically.";
   const active = (project.sessions || []).filter((session) => ["active", "busy", "error"].includes(session.status));
   const byColor = new Map(active.map((session) => [session.color, session]));
   const grid = $("#colorGrid");

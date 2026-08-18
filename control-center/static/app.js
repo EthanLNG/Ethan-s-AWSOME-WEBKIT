@@ -351,7 +351,12 @@ function renderSessions(sessions) {
     open.className = "open-chat";
     open.textContent = "Chat";
     open.addEventListener("click", () => openSession(session));
-    row.append(emoji, info, status, open);
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "open-chat";
+    preview.textContent = "Open";
+    preview.addEventListener("click", () => window.open(session.previewUrl, `webkit-${session.projectId}-${session.color}`));
+    row.append(emoji, info, status, preview, open);
     list.appendChild(row);
   });
 }

@@ -244,17 +244,53 @@
   // ===== shadow shell ========================================================
   const host = document.createElement('div');
   host.setAttribute('data-wk-host', '');
+  host.setAttribute('popover', 'manual');
   // Inline (not stylesheet) so isolation holds even if the CSS fetch fails.
   host.style.cssText =
     'all:initial;position:fixed;inset:0;z-index:2147483400;pointer-events:none;display:block;';
   const root = host.attachShadow({ mode: 'open' });
   document.documentElement.appendChild(host);
 
+  // Native dialogs and popovers live in the browser's "top layer", above
+  // every z-index in the document. Keep WebKit in that same layer and raise it
+  // again whenever the page opens another top-layer surface. This lets users
+  // draw on settings dialogs, menus, and other popups instead of the feedback
+  // UI disappearing behind them. Pointer-events still pass through whenever
+  // the drawing layer is in browse mode.
+  let topLayerRaiseQueued = false;
+  function raiseAboveTopLayer() {
+    topLayerRaiseQueued = false;
+    if (typeof host.showPopover !== 'function') return;
+    try {
+      if (host.matches(':popover-open')) host.hidePopover();
+      host.showPopover();
+    } catch (e) { /* older browser or a transient detached host */ }
+  }
+  function queueTopLayerRaise() {
+    if (topLayerRaiseQueued) return;
+    topLayerRaiseQueued = true;
+    setTimeout(raiseAboveTopLayer, 0);
+  }
+  queueTopLayerRaise();
+  document.addEventListener('toggle', (event) => {
+    if (event.target !== host && event.newState === 'open') queueTopLayerRaise();
+  }, true);
+
   // A tidy-minded host page (or a framework re-render) may remove foreign
   // nodes from the tree — quietly re-append ourselves.
-  new MutationObserver(() => {
+  new MutationObserver((records) => {
     if (!host.isConnected) document.documentElement.appendChild(host);
-  }).observe(document.documentElement, { childList: true });
+    if (records.some((record) => record.type === 'attributes' &&
+      typeof HTMLDialogElement !== 'undefined' &&
+      record.target instanceof HTMLDialogElement && record.target.open)) {
+      queueTopLayerRaise();
+    }
+  }).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['open'],
+  });
 
   // If the fetch fails there is no "unstyled but working" fallback: pointer-events
   // is inherited from the host div's inline `pointer-events:none`, so ONLY the
@@ -392,8 +428,7 @@
 
   function updateHint() {
     if (IS_BEFORE) { hintChip.hidden = true; return; }
-    hintChip.hidden = !(S.mode === 'feedback' && !S.card && !S.reviewing &&
-      S.points.filter((p) => p.page === logicalPath()).length === 0);
+    hintChip.hidden = !(S.mode === 'feedback' && !S.card && !S.reviewing);
   }
 
   // ===== rAF reposition engine ===============================================
@@ -1960,7 +1995,17 @@
     B.scopeWrap = el('div', 'wk-scope-wrap');
     B.scope = el('button', 'wk-scope-btn', '▾');
     B.scope.type = 'button';
-    B.scopeWrap.append(B.scope);
+    B.scope.setAttribute('aria-haspopup', 'menu');
+    B.scopeMenu = el('div', 'wk-scope-menu');
+    B.scopeMenu.hidden = true;
+    B.scopeMenu.setAttribute('role', 'menu');
+    B.scopePoint = el('button', 'wk-scope-option', 'Current point');
+    B.scopeSite = el('button', 'wk-scope-option', 'Whole website');
+    B.scopePoint.type = B.scopeSite.type = 'button';
+    B.scopePoint.setAttribute('role', 'menuitemradio');
+    B.scopeSite.setAttribute('role', 'menuitemradio');
+    B.scopeMenu.append(B.scopePoint, B.scopeSite);
+    B.scopeWrap.append(B.scope, B.scopeMenu);
 
     B.abcChip = el('button', 'wk-abc-chip');
     B.abcChip.type = 'button';
@@ -1990,8 +2035,25 @@
     B.before.addEventListener('click', () => setSide('before'));
     B.after.addEventListener('click', () => setSide('after'));
     B.scope.addEventListener('click', () => {
-      setCompareScope(S.compareScope === 'point' ? 'site' : 'point');
+      B.scopeMenu.hidden = !B.scopeMenu.hidden;
+      B.scope.setAttribute('aria-expanded', String(!B.scopeMenu.hidden));
+      B.scope.textContent = B.scopeMenu.hidden ? '▾' : '▴';
     });
+    B.scopePoint.addEventListener('click', () => {
+      B.scopeMenu.hidden = true;
+      setCompareScope('point');
+    });
+    B.scopeSite.addEventListener('click', () => {
+      B.scopeMenu.hidden = true;
+      setCompareScope('site');
+    });
+    bar.onpointerdown = (event) => {
+      if (!B.scopeWrap.contains(event.target)) {
+        B.scopeMenu.hidden = true;
+        B.scope.setAttribute('aria-expanded', 'false');
+        B.scope.textContent = '▾';
+      }
+    };
     B.accept.addEventListener('click', onAccept);
     B.del.addEventListener('click', () => recordVerdict({ verdict: 'delete' }));
     B.dismiss.addEventListener('click', () => recordVerdict({ verdict: 'delete' }));
@@ -2078,7 +2140,13 @@
       ? 'Comparison scope: current feedback point'
       : 'Comparison scope: whole website';
     B.scope.setAttribute('aria-label', B.scope.title);
+    B.scope.setAttribute('aria-expanded', String(!B.scopeMenu.hidden));
+    B.scope.textContent = B.scopeMenu.hidden ? '▾' : '▴';
     B.scope.classList.toggle('site', S.compareScope === 'site');
+    B.scopePoint.classList.toggle('active', S.compareScope === 'point');
+    B.scopeSite.classList.toggle('active', S.compareScope === 'site');
+    B.scopePoint.setAttribute('aria-checked', String(S.compareScope === 'point'));
+    B.scopeSite.setAttribute('aria-checked', String(S.compareScope === 'site'));
 
     // abc chip: live current letter, bound to abc:change. This is the ONLY
     // switcher the user should see for the point under review — hidePageAbc

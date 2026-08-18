@@ -903,9 +903,11 @@
       const body = el('div', 'wk-frozen-body');
       body.dataset.h = 'move';
       frozen.appendChild(body);
-      const remove = el('button', 'wk-frozen-delete', '×');
+      const remove = el('button', 'wk-frozen-delete');
       remove.type = 'button';
       remove.title = 'Delete this rectangle';
+      remove.setAttribute('aria-label', 'Delete this rectangle');
+      remove.innerHTML = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
       remove.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1472,6 +1474,47 @@
       if (S.phase !== 'collecting' && S.phase !== null) sendPoints(false);
     });
 
+    // The header doubles as a drag handle. Keep the chosen viewport position in
+    // the live draft so resize/scroll passes do not snap the card back beside
+    // its rectangle, and a reload restores the user's placement.
+    head.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || S.drag || event.target.closest('button, select, input')) return;
+      event.preventDefault();
+      head.setPointerCapture(event.pointerId);
+      const start = { left: node.offsetLeft, top: node.offsetTop };
+      const previous = draft.cardPosition ? { ...draft.cardPosition } : null;
+      S.drag = {
+        kind: 'card',
+        pointerId: event.pointerId,
+        sx: event.clientX,
+        sy: event.clientY,
+        start,
+        cancel() {
+          draft.cardPosition = previous;
+          S.drag = null;
+          positionCard();
+          saveDraft();
+        },
+      };
+    });
+    head.addEventListener('pointermove', (event) => {
+      const drag = S.drag;
+      if (!drag || drag.kind !== 'card' || drag.pointerId !== event.pointerId) return;
+      const left = clamp(drag.start.left + event.clientX - drag.sx, 8, Math.max(8, innerWidth - node.offsetWidth - 8));
+      const top = clamp(drag.start.top + event.clientY - drag.sy, 8, Math.max(8, innerHeight - node.offsetHeight - 8));
+      draft.cardPosition = { left, top };
+      node.style.left = left + 'px';
+      node.style.top = top + 'px';
+    });
+    head.addEventListener('pointerup', (event) => {
+      if (!S.drag || S.drag.kind !== 'card' || S.drag.pointerId !== event.pointerId) return;
+      S.drag = null;
+      saveDraft();
+    });
+    head.addEventListener('pointercancel', (event) => {
+      if (S.drag?.kind === 'card' && S.drag.pointerId === event.pointerId) S.drag.cancel();
+    });
+
     // micBtn is exposed so the dictate/record hotkey drives the same handler.
     S.card = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft };
     paintAbc();
@@ -1489,8 +1532,17 @@
   function positionCard() {
     if (!S.card) return;
     const node = S.card.node, r = S.card.draft.rect;
-    const vx = r.x - scrollX, vy = r.y - scrollY;
     const cw = node.offsetWidth || 320, ch = node.offsetHeight || 160;
+    if (S.card.draft.cardPosition) {
+      const saved = S.card.draft.cardPosition;
+      const left = clamp(saved.left, 8, Math.max(8, innerWidth - cw - 8));
+      const top = clamp(saved.top, 8, Math.max(8, innerHeight - ch - 8));
+      S.card.draft.cardPosition = { left, top };
+      node.style.left = left + 'px';
+      node.style.top = top + 'px';
+      return;
+    }
+    const vx = r.x - scrollX, vy = r.y - scrollY;
     let left = clamp(vx, 8, Math.max(8, innerWidth - cw - 8));
     let top = vy + r.h + 10;
     if (top + ch > innerHeight - 8) top = vy - ch - 10;   // flip above

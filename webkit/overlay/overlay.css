@@ -184,8 +184,8 @@
 .wk-frozen-delete {
   position: absolute;
   z-index: 2;
-  left: 4px;
-  top: 4px;
+  left: -22px;
+  top: -22px;
   display: grid;
   place-items: center;
   width: 20px;
@@ -195,10 +195,10 @@
   border-radius: 50%;
   background: var(--wk-paper);
   color: var(--wk-danger);
-  font: 700 14px/1 var(--wk-font);
   cursor: pointer;
   pointer-events: auto;
 }
+.wk-frozen-delete svg { display: block; width: 10px; height: 10px; }
 .wk-frozen-delete:hover { background: var(--wk-danger); color: #fff; }
 .wk-handle {
   position: absolute;
@@ -226,7 +226,7 @@
   background: var(--wk-paper);
   border: 1.5px solid var(--wk-ink);
   border-radius: var(--wk-radius);
-  box-shadow: var(--wk-shadow);
+  box-shadow: none;
   padding: 10px 12px 12px;
   pointer-events: auto;
   z-index: 4;
@@ -244,7 +244,14 @@
 .wk-row { display: flex; align-items: center; gap: 8px; }
 .wk-spacer { flex: 1; }
 
-.wk-head { gap: 8px; }
+.wk-head {
+  gap: 8px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.wk-head:active { cursor: grabbing; }
+.wk-head button, .wk-head select { cursor: pointer; }
 .wk-num {
   width: 22px;
   height: 22px;

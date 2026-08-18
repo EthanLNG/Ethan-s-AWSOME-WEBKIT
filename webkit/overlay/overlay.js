@@ -334,7 +334,7 @@
     (INTERACTION_MODE === 'browse-default' ? ' pass' : ''));
   const pinLayer = el('div', 'wk-pins');
   const interactionHint = INTERACTION_MODE === 'browse-default'
-    ? 'hold ⌥ + drag to mark a spot · click normally to use the page'
+    ? 'hold ⌥ + drag to mark a spot'
     : 'drag to mark a spot · hold ⌥ to use the page';
   const hintChip = el('div', 'wk-hint', interactionHint + ' · ' + TOGGLE_LABEL +
     ' to hide · ' + DICTATE_LABEL + ' to dictate (outside text fields)');

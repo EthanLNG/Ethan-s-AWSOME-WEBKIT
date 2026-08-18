@@ -96,7 +96,8 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-card small { color: var(--muted); }
 .color-card.active { background: color-mix(in srgb, var(--color) 9%, var(--panel)); }
 .color-card.active strong { margin-top: 34px; }
-.color-card .active-label { display: inline-block; margin-top: 8px; padding: 4px 7px; border-radius: 99px; background: var(--ink); color: white; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.color-card.active small { display: inline-block; margin-top: 11px; vertical-align: middle; }
+.color-card .active-label { display: inline-block; margin: 11px 0 0 10px; padding: 4px 7px; border-radius: 99px; background: var(--ink); color: white; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; vertical-align: middle; }
 
 .session-list { display: grid; gap: 10px; }
 .session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }

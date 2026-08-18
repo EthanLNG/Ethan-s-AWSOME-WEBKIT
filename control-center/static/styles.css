@@ -96,7 +96,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-card small { color: var(--muted); }
 .color-card.active { background: color-mix(in srgb, var(--color) 9%, var(--panel)); }
 .color-card.active strong { margin-top: 34px; }
-.color-card.active small { display: inline-block; margin-top: 11px; vertical-align: middle; }
+.color-card.active small { display: inline-block; margin-top: 11px; font-weight: 800; vertical-align: middle; }
 .color-card.active .emoji,
 .color-card.active::after { transform-origin: center; will-change: transform; animation: active-circle-pulse 4s ease-in-out infinite; }
 @keyframes active-circle-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }

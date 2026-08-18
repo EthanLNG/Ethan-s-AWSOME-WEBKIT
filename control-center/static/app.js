@@ -308,7 +308,9 @@ function renderProjectView() {
     const title = document.createElement("strong");
     title.textContent = color.slug;
     const hint = document.createElement("small");
-    hint.textContent = session ? session.status : "Start isolated agent";
+    hint.textContent = session
+      ? (session.status === "active" ? "Currently active" : session.status)
+      : "Start isolated agent";
     hint.dataset.working = String(!!session && ["busy", "merging"].includes(session.status));
     card.append(emoji, title, hint);
     if (session) {

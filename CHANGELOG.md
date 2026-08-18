@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.1 (2026-08-18) — Bilingual dictation and typing-safe hotkeys
+
+- `C` and `V` now remain ordinary characters while any text field is focused,
+  including an empty feedback note and the redo input. Their overlay and
+  dictation shortcuts still work everywhere outside editable fields.
+- Added a persistent English/עברית selector beside every microphone. It sets
+  `SpeechRecognition.lang` to `en-US` or `he-IL` before recognition starts and
+  restarts an active recognizer when the language changes.
+- Updated the overlay hints and configuration documentation to describe the
+  editable-field shortcut guard.
+
 ## v0.5.0 (2026-08-18) — Local Control Center
 
 - Added a token-protected localhost Control Center with first-run

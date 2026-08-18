@@ -75,7 +75,7 @@
         : code;
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
-  const MIC_TITLE = 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL;
+  const MIC_TITLE = 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL + ' outside a text field';
 
   const BEFORE_PREFIX = '/__wk/before';
   const LETTERS = 'ABCDEFGHIJ';               // abc request letters, count capped at 10
@@ -157,6 +157,29 @@
   }
   const LS = makeStore(window.localStorage || { getItem() { return null; }, setItem() {}, removeItem() {} });
   const SS = makeStore(window.sessionStorage || { getItem() { return null; }, setItem() {}, removeItem() {} });
+
+  // SpeechRecognition.lang is a real request parameter, not a UI hint. Keep an
+  // explicit English/Hebrew choice because automatic language inference turns
+  // accented English into Hebrew (and Hebrew into nonsense English) too often.
+  const SPEECH_LANGS = new Set(['en-US', 'he-IL']);
+  let speechLang = LS.get('wk:speechLang');
+  if (!SPEECH_LANGS.has(speechLang)) {
+    speechLang = /^he(?:-|$)/i.test(navigator.language || '') ? 'he-IL' : 'en-US';
+  }
+  LS.set('wk:speechLang', speechLang);
+
+  function speechLanguageSelect() {
+    const select = el('select', 'wk-speech-lang');
+    select.setAttribute('aria-label', 'Dictation language');
+    select.title = 'Speech recognition language';
+    const english = el('option', '', 'English');
+    english.value = 'en-US';
+    const hebrew = el('option', '', 'עברית');
+    hebrew.value = 'he-IL';
+    select.append(english, hebrew);
+    select.value = speechLang;
+    return select;
+  }
 
   let SESSION_ID = LS.get('wk:sessionId');
   if (!SESSION_ID) {
@@ -259,11 +282,9 @@
   const wrap = el('div', 'wk-wrap wk-off');          // visibility-toggled container
   const drawLayer = IS_BEFORE ? null : el('div', 'wk-draw');
   const pinLayer = el('div', 'wk-pins');
-  // The toggle key always wins, even mid-sentence in a note — that is what makes
-  // hide/show instant at any moment, and it costs typing that one letter.
   const hintChip = el('div', 'wk-hint',
     'drag to mark a spot · hold ⌥ to use the page · ' + TOGGLE_LABEL +
-    ' to hide (not typable) · ' + DICTATE_LABEL + ' to dictate');
+    ' to hide · ' + DICTATE_LABEL + ' to dictate (outside text fields)');
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
   sendBtn.hidden = true;
@@ -806,9 +827,14 @@
   // endless ping-pong where neither transcribes. This registry guarantees one.
   let liveMic = null;
 
-  function makeMic(ta, btn, onText) {
-    if (!SRClass) { btn.hidden = true; return { stop() {}, arm() {}, get on() { return false; } }; }
+  function makeMic(ta, btn, langSelect, onText) {
+    if (!SRClass) {
+      btn.hidden = true;
+      langSelect.hidden = true;
+      return { stop() {}, arm() {}, get on() { return false; } };
+    }
     let rec = null, userOn = false, netFails = 0, restartT = 0, interim = '';
+    let languageRestart = false;
 
     function paint() {
       btn.classList.toggle('on', userOn);
@@ -818,7 +844,9 @@
       rec = new SRClass();
       rec.continuous = true;
       rec.interimResults = true;
-      rec.lang = document.documentElement.lang || navigator.language || 'en-US';
+      // The Web Speech API sends this BCP 47 tag to the recognition service
+      // when the request starts. This is what makes the UI selector functional.
+      rec.lang = langSelect.value;
       rec.onresult = (e) => {
         let fin = '';
         interim = '';
@@ -849,7 +877,7 @@
             btn.classList.add('error');
             btn.title = 'Speech service unreachable — dictation stopped after 3 network errors';
           }
-        } else if (e.error !== 'no-speech') {
+        } else if (e.error !== 'no-speech' && !(languageRestart && e.error === 'aborted')) {
           // audio-capture / language-not-supported / 'aborted' are terminal: make
           // them stop userOn so onend's 250ms restart loop ends (and the two-mic
           // ping-pong breaks — a preempted recognition lands here and must not
@@ -863,6 +891,11 @@
       rec.onend = () => {
         interim = '';
         onText && onText('');
+        if (languageRestart) {
+          languageRestart = false;
+          if (userOn) restartT = setTimeout(start, 0);
+          return;
+        }
         // Chrome ends recognition on every silence — quietly re-arm unless the
         // user toggled off or errors made restarting pointless.
         if (userOn) restartT = setTimeout(() => { try { rec && start(); } catch (e) { /* ok */ } }, 250);
@@ -871,6 +904,7 @@
     }
     function stop() {
       userOn = false;
+      languageRestart = false;
       clearTimeout(restartT);
       try { rec && rec.stop(); } catch (e) { /* ok */ }
       rec = null;
@@ -886,16 +920,34 @@
       userOn = true;
       netFails = 0;
       btn.classList.remove('error');
-      btn.title = 'Dictating — click or press ' + DICTATE_LABEL + ' to stop';
+      btn.title = 'Dictating — click, or press ' + DICTATE_LABEL + ' outside a text field, to stop';
       paint();
       start();
       ta.focus();
+    });
+    langSelect.addEventListener('change', () => {
+      if (!SPEECH_LANGS.has(langSelect.value)) langSelect.value = 'en-US';
+      speechLang = langSelect.value;
+      LS.set('wk:speechLang', speechLang);
+      langSelect.title = 'Speech recognition language: ' + langSelect.options[langSelect.selectedIndex].text;
+      if (!userOn) return;
+      clearTimeout(restartT);
+      languageRestart = true;
+      try { rec && rec.stop(); } catch (e) {
+        languageRestart = false;
+        restartT = setTimeout(start, 0);
+      }
     });
     const self = {
       stop,
       // after a reload we can't auto-start (browser gesture rule) — show the
       // armed look so the user knows one click resumes dictation
-      arm() { if (!userOn) { btn.classList.add('armed'); btn.title = 'Click (or press ' + DICTATE_LABEL + ') to resume dictation'; } },
+      arm() {
+        if (!userOn) {
+          btn.classList.add('armed');
+          btn.title = 'Click (or press ' + DICTATE_LABEL + ' outside a text field) to resume dictation';
+        }
+      },
       get on() { return userOn; },
     };
     return self;
@@ -948,7 +1000,8 @@
     micBtn.type = 'button';
     micBtn.title = MIC_TITLE;
     micBtn.innerHTML = micGlyph;
-    head.append(num, title, micBtn);
+    const langSelect = speechLanguageSelect();
+    head.append(num, title, langSelect, micBtn);
 
     const taWrap = el('div', 'wk-ta-wrap');
     const ta = el('textarea', 'wk-ta');
@@ -1021,7 +1074,7 @@
       ta.addEventListener(evt, () => { syncGhost(); saveDraft(); });
     }
 
-    const mic = makeMic(ta, micBtn, (interim) => { syncGhost(interim); saveDraft(); });
+    const mic = makeMic(ta, micBtn, langSelect, (interim) => { syncGhost(interim); saveDraft(); });
     if (draft.micOn) mic.arm();
 
     // --- abc panel wiring -----------------------------------------------------
@@ -1934,15 +1987,16 @@
     micBtn.type = 'button';
     micBtn.title = MIC_TITLE;
     micBtn.innerHTML = micGlyph;
+    const langSelect = speechLanguageSelect();
     const cancel = el('button', 'wk-btn ghost', 'Cancel');
     const save = el('button', 'wk-btn primary', 'Redo it');
     micBtn.type = cancel.type = save.type = 'button';
-    row.append(ta, micBtn);
+    row.append(ta, langSelect, micBtn);
     const actions = el('div', 'wk-row wk-actions');
     actions.append(el('span', 'wk-spacer'), cancel, save);
     node.append(label, row, actions);
     wrap.appendChild(node);
-    const mic = makeMic(ta, micBtn, null);
+    const mic = makeMic(ta, micBtn, langSelect, null);
     function close() { mic.stop(); node.remove(); S.mini = null; }
     cancel.addEventListener('click', close);
     save.addEventListener('click', () => {
@@ -1995,18 +2049,13 @@
     const t = e.composedPath ? e.composedPath()[0] : e.target;
     // t can be window/document for programmatic dispatch — contains() would throw
     const isNode = t instanceof Node;
-    const inOverlay = isNode && root.contains(t);
     const editable = isNode && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 
-    // THE toggle — deliberately the only one. One key to learn, one key to tell
-    // other developers about, no button anywhere on the page. Matched by CODE so
-    // a Hebrew (or any) layout can't move it. It always wins, including inside a
-    // half-typed note, because hiding the GUI has to be instant at any moment;
-    // the cost is that this one letter can't be typed into feedback text (the
-    // hint chip says so). Shift is let through so the shifted char stays typable.
-    // Never steals the key from the HOST page's own inputs.
+    // THE toggle — deliberately the only one. Matched by CODE so a Hebrew (or
+    // any) layout can't move it. Editable fields always win, including Webkit's
+    // own feedback textarea: C must remain a normal typed character there.
     if (e.code === HOTKEY_TOGGLE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-      if (editable && !inOverlay) return;
+      if (editable) return;
       e.preventDefault();
       e.stopPropagation();
       // With a review waiting, the key walks into it rather than just unhiding —
@@ -2018,10 +2067,11 @@
     }
 
     // Dictation toggle. The modifier guard is load-bearing: Cmd+V must stay
-    // paste, Ctrl+V too. Disambiguation from the letter "v":
-    //   recording  → always stops (while recording the user is speaking, not typing)
-    //   otherwise  → starts only when the note field is empty or unfocused
+    // paste, Ctrl+V too. Any editable field also wins unconditionally, so V is
+    // always typable in notes (even an empty note or while the mic is running).
+    // The nearby mic button remains the explicit start/stop control while typing.
     if (e.code === HOTKEY_DICTATE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (editable) return;
       if (liveMic && liveMic.on) {
         e.preventDefault();
         e.stopPropagation();
@@ -2031,11 +2081,6 @@
       if (S.mode !== 'feedback') return;     // overlay hidden: don't dictate into an invisible card
       const holder = S.mini || S.card;      // the redo mini-input wins while open
       if (!holder || !holder.micBtn || holder.micBtn.hidden) return;
-      if (editable) {
-        if (!inOverlay) return;             // host page's own input — hands off
-        if (t !== holder.ta) return;        // another overlay field (abc prompts) — type it
-        if (holder.ta.value.trim()) return; // the note already has text — V is a letter
-      }
       e.preventDefault();
       e.stopPropagation();
       holder.micBtn.click();                // reuse the button's own start/stop path

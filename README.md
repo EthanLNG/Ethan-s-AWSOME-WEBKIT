@@ -21,8 +21,10 @@ tab strip.
   you see is always the file on disk, never a stale cache.
 - **Feedback overlay** — press **C** on the live page to open a drawing layer: rectangle
   annotations, per-point notes, and **live speech-to-text** (press **V**) so you can
-  dictate feedback instead of typing it. Nothing of the kit sits on the page at rest —
-  no button, no badge — so what you look at is your design, not a tool around it.
+  dictate feedback instead of typing it. Both shortcuts switch off while a text field
+  is focused, so `C` and `V` remain typable. Dictation has an explicit persistent
+  English/עברית recognition selector. Nothing of the kit sits on the page at rest — no
+  button, no badge — so what you look at is your design, not a tool around it.
 - **Before/after toggle from git** — the review bar swaps the reviewed section in place
   between the pre-round commit (served straight out of `git show`) and the current state
   — no page reload, stylesheets included so CSS-only changes show — scroll
@@ -106,7 +108,8 @@ live A/B experiment already on it) built to exercise every part of the loop.
 - **Python 3.7+** — the preview server and helpers are stdlib-only; no pip installs, no
   Node at runtime.
 - **A Chromium-based browser** — the overlay's mic uses Chrome's live speech recognition
-  (`webkitSpeechRecognition`). Everything except dictation works in other browsers.
+  (`webkitSpeechRecognition`) and explicitly requests English (`en-US`) or Hebrew
+  (`he-IL`) from the user's selector. Everything except dictation works in other browsers.
 - **macOS + Google Chrome** for automatic tab management (stale tabs closed, fresh tab
   opened and focused per design). On other platforms/browsers the kit degrades
   gracefully: it prints the URL and you open it yourself.

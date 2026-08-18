@@ -356,7 +356,7 @@ function renderSessions(sessions) {
     preview.className = "open-chat";
     preview.textContent = "Open";
     preview.addEventListener("click", () => window.open(session.previewUrl, `webkit-${session.projectId}-${session.color}`));
-    row.append(emoji, info, status, preview, open);
+    row.append(emoji, info, status, open, preview);
     list.appendChild(row);
   });
 }

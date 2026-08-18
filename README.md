@@ -58,6 +58,45 @@ feedback loop in `webkit/LOOP.md`. The canonical launcher opens the configured e
 desktop browser, so a new agent conversation cannot silently divert the preview into an
 embedded browser surface.
 
+## Local Control Center
+
+AWESOME WEBKIT also includes a small local browser app for people who want to
+work without keeping Codex or Claude Code open. It uses the CLIs already
+authenticated on your computer; no API keys are stored by Webkit.
+
+```sh
+./launch-control-center.sh
+```
+
+On first launch, choose Codex, Claude Code, or both, then add an existing
+website or create a starter website. Every project chooses one provider. Pick
+one of the five colors to start an isolated Git worktree, background agent, and
+stamped preview. The chat stays collapsed until you want it; normal rectangle
+feedback on the website wakes the matching CLI automatically.
+
+Each color session has two explicit finish actions:
+
+- **Merge to main** merges the color branch and closes its worktree.
+- **Discard work** permanently deletes the unmerged color branch and worktree.
+
+Agents never work directly on `main`. Project onboarding may create an initial
+Git commit or install the vendored kit before the first color session. GitHub
+is optional—the UI reminds you to publish useful projects, but local Git is all
+Webkit requires.
+
+Install a clickable desktop shortcut:
+
+```sh
+python3 control-center/install-shortcut.py
+```
+
+The Control Center is dependency-free Python plus HTML/CSS/JavaScript, binds to
+`127.0.0.1` only, protects mutating endpoints with a per-launch token, and
+keeps its local state under `~/.awesome-webkit/`. On macOS the launcher opens
+Google Chrome by default (`WKCC_BROWSER_APP` can override it); elsewhere it
+uses the system browser. The original agent-app flow above remains fully
+supported and unchanged.
+
 Want to try it without a project? `examples/demo-site/` is a self-contained page (with a
 live A/B experiment already on it) built to exercise every part of the loop.
 

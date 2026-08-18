@@ -1,0 +1,390 @@
+const COLORS = [
+  { slug: "blue", emoji: "🔵", hex: "#3294e2" },
+  { slug: "red", emoji: "🔴", hex: "#ed5d55" },
+  { slug: "green", emoji: "🟢", hex: "#44aa71" },
+  { slug: "orange", emoji: "🟠", hex: "#ee9c3a" },
+  { slug: "purple", emoji: "🟣", hex: "#9b6bd6" },
+];
+
+const state = {
+  providers: [],
+  projects: [],
+  system: {},
+  selectedProjectId: null,
+  chatSessionId: null,
+  chatCursor: 0,
+  projectMode: "create",
+  confirmCallback: null,
+};
+
+const $ = (selector) => document.querySelector(selector);
+
+async function api(path, options = {}) {
+  const request = { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } };
+  if (request.body && typeof request.body !== "string") request.body = JSON.stringify(request.body);
+  const response = await fetch(path, request);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  return data;
+}
+
+function toast(message) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { node.hidden = true; }, 3800);
+}
+
+function setBusy(button, busy, label) {
+  if (!button.dataset.label) button.dataset.label = button.textContent;
+  button.disabled = busy;
+  button.textContent = busy ? label : button.dataset.label;
+}
+
+function renderStatus() {
+  const target = $("#systemStatus");
+  target.replaceChildren();
+  ["git", "codex", "claude"].forEach((name) => {
+    const info = state.system[name] || { installed: false };
+    const pill = document.createElement(info.installed || name !== "git" ? "span" : "button");
+    pill.className = `status-pill ${info.installed ? "ok" : "missing"}`;
+    pill.textContent = `${name === "claude" ? "Claude" : name[0].toUpperCase() + name.slice(1)} ${info.installed ? "ready" : "missing"}`;
+    pill.title = info.version || info.path || "Not found on PATH";
+    if (!info.installed && name === "git") pill.addEventListener("click", installGit);
+    target.appendChild(pill);
+  });
+}
+
+async function installGit() {
+  if (!window.confirm("Open your system's Git installer?")) return;
+  try {
+    const result = await api("/api/system/install-git", { method: "POST", body: { confirmed: true } });
+    toast(result.message);
+  } catch (error) { toast(error.message); }
+}
+
+async function installShortcut() {
+  const button = $("#installShortcutButton");
+  setBusy(button, true, "Installing…");
+  try {
+    const result = await api("/api/system/install-shortcut", { method: "POST", body: {} });
+    toast(result.message);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+function renderProjects() {
+  const list = $("#projectList");
+  list.replaceChildren();
+  state.projects.forEach((project) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `project-link ${project.id === state.selectedProjectId ? "active" : ""}`;
+    const icon = document.createElement("span");
+    icon.className = "project-icon";
+    icon.textContent = project.name.slice(0, 2);
+    const name = document.createElement("span");
+    name.textContent = project.name;
+    button.append(icon, name);
+    button.addEventListener("click", () => selectProject(project.id));
+    list.appendChild(button);
+  });
+  const hasProjects = state.projects.length > 0;
+  $("#emptyState").hidden = hasProjects && !!state.selectedProjectId;
+  $("#projectView").hidden = !hasProjects || !state.selectedProjectId;
+}
+
+function selectedProject() {
+  return state.projects.find((project) => project.id === state.selectedProjectId) || null;
+}
+
+function selectProject(id) {
+  state.selectedProjectId = id;
+  renderProjects();
+  renderProjectView();
+}
+
+function renderProjectView() {
+  const project = selectedProject();
+  if (!project) return;
+  $("#projectName").textContent = project.name;
+  $("#projectPath").textContent = project.path;
+  $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
+  const active = (project.sessions || []).filter((session) => ["active", "busy", "error"].includes(session.status));
+  const byColor = new Map(active.map((session) => [session.color, session]));
+  const grid = $("#colorGrid");
+  grid.replaceChildren();
+  COLORS.forEach((color) => {
+    const session = byColor.get(color.slug);
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = `color-card ${session ? "active" : ""}`;
+    card.style.setProperty("--color", color.hex);
+    const emoji = document.createElement("span");
+    emoji.className = "emoji";
+    emoji.textContent = color.emoji;
+    const title = document.createElement("strong");
+    title.textContent = color.slug;
+    const hint = document.createElement("small");
+    hint.textContent = session ? `${session.provider} · ${session.status}` : "Start isolated agent";
+    card.append(emoji, title, hint);
+    if (session) {
+      const live = document.createElement("span");
+      live.className = "active-label";
+      live.textContent = "Open";
+      card.appendChild(live);
+      card.addEventListener("click", () => {
+        window.open(session.previewUrl, `webkit-${project.id}-${color.slug}`);
+      });
+    } else {
+      card.addEventListener("click", () => startColor(color.slug, card));
+    }
+    grid.appendChild(card);
+  });
+  renderSessions(active);
+}
+
+function renderSessions(sessions) {
+  const list = $("#sessionList");
+  list.replaceChildren();
+  if (!sessions.length) {
+    const empty = document.createElement("div");
+    empty.className = "no-sessions";
+    empty.textContent = "No agents running yet. Pick a color above.";
+    list.appendChild(empty);
+    return;
+  }
+  sessions.forEach((session) => {
+    const row = document.createElement("article");
+    row.className = "session-row";
+    const emoji = document.createElement("span");
+    emoji.className = "session-emoji";
+    emoji.textContent = session.emoji;
+    const info = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `${capitalize(session.color)} · ${session.provider === "codex" ? "Codex" : "Claude Code"}`;
+    const branch = document.createElement("small");
+    branch.textContent = session.branch;
+    info.append(title, branch);
+    const status = document.createElement("span");
+    status.className = `session-state ${session.status}`;
+    status.textContent = session.status;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "open-chat";
+    open.textContent = "Chat";
+    open.addEventListener("click", () => openSession(session));
+    row.append(emoji, info, status, open);
+    list.appendChild(row);
+  });
+}
+
+async function startColor(color, button) {
+  const project = selectedProject();
+  if (!project) return;
+  const tabName = `webkit-${project.id}-${color}`;
+  const previewTab = window.open("about:blank", tabName);
+  setBusy(button, true, "Starting…");
+  try {
+    const { session } = await api("/api/sessions/start", {
+      method: "POST", body: { projectId: project.id, color },
+    });
+    if (previewTab) previewTab.location.replace(session.previewUrl);
+    else toast(`Preview ready at ${session.previewUrl}. Allow popups to open it automatically.`);
+    await refreshProjects();
+    toast(`${session.emoji} ${capitalize(color)} agent is live.`);
+  } catch (error) {
+    if (previewTab) previewTab.close();
+    toast(error.message);
+  } finally { setBusy(button, false); }
+}
+
+function openSession(session) {
+  state.chatSessionId = session.id;
+  state.chatCursor = 0;
+  $("#chatDrawer").hidden = false;
+  $("#chatColor").textContent = `${session.emoji} ${session.color} worktree`;
+  $("#chatTitle").textContent = session.provider === "codex" ? "Codex" : "Claude Code";
+  $("#chatStatus").className = `live-dot ${session.status}`;
+  $("#chatEvents").replaceChildren();
+  pollEvents();
+}
+
+function currentSession() {
+  for (const project of state.projects) {
+    const session = (project.sessions || []).find((item) => item.id === state.chatSessionId);
+    if (session) return session;
+  }
+  return null;
+}
+
+async function pollEvents() {
+  if (!state.chatSessionId || $("#chatDrawer").hidden) return;
+  const expected = state.chatSessionId;
+  try {
+    const data = await api(`/api/sessions/${expected}/events?after=${state.chatCursor}`);
+    if (expected !== state.chatSessionId) return;
+    const target = $("#chatEvents");
+    data.events.forEach((event) => {
+      const node = document.createElement("div");
+      node.className = `event ${event.role} ${event.kind}`;
+      node.textContent = event.text;
+      target.appendChild(node);
+    });
+    if (data.events.length) target.scrollTop = target.scrollHeight;
+    state.chatCursor = data.next;
+  } catch (error) {
+    if (expected === state.chatSessionId) toast(error.message);
+  }
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  const input = $("#chatInput");
+  const message = input.value.trim();
+  if (!message || !state.chatSessionId) return;
+  const button = $("#chatForm button");
+  setBusy(button, true, "Queued");
+  try {
+    await api(`/api/sessions/${state.chatSessionId}/message`, { method: "POST", body: { message } });
+    input.value = "";
+    setTimeout(pollEvents, 150);
+  } catch (error) { toast(error.message); }
+  finally { setBusy(button, false); }
+}
+
+function askConfirm(kind) {
+  const session = currentSession();
+  if (!session) return;
+  const isMerge = kind === "merge";
+  $("#confirmEyebrow").textContent = isMerge ? "Keep the work" : "Permanent action";
+  $("#confirmTitle").textContent = isMerge ? "Merge this color into main?" : "Discard this color session?";
+  $("#confirmText").textContent = isMerge
+    ? `The ${session.emoji} branch will be merged into main, then its worktree will close.`
+    : `All unmerged work in ${session.branch} will be deleted. This cannot be undone.`;
+  $("#confirmAction").textContent = isMerge ? "Merge to main" : "Discard forever";
+  $("#confirmAction").className = isMerge ? "primary" : "danger";
+  state.confirmCallback = () => finishSession(session, kind);
+  $("#confirmDialog").showModal();
+}
+
+async function finishSession(session, kind) {
+  const button = $("#confirmAction");
+  setBusy(button, true, kind === "merge" ? "Merging…" : "Discarding…");
+  try {
+    const body = kind === "discard" ? { confirmation: session.id } : {};
+    await api(`/api/sessions/${session.id}/${kind}`, { method: "POST", body });
+    $("#confirmDialog").close();
+    $("#chatDrawer").hidden = true;
+    state.chatSessionId = null;
+    await refreshProjects();
+    toast(kind === "merge" ? "Merged into main." : "Color worktree discarded.");
+  } catch (error) { toast(error.message); }
+  finally { setBusy(button, false); }
+}
+
+function openProjectDialog() {
+  $("#projectError").textContent = "";
+  const select = $("#projectProviderSelect");
+  select.replaceChildren();
+  state.providers.forEach((provider) => {
+    const option = document.createElement("option");
+    option.value = provider;
+    option.textContent = provider === "codex" ? "Codex" : "Claude Code";
+    select.appendChild(option);
+  });
+  $("#projectDialog").showModal();
+}
+
+function setProjectMode(mode) {
+  state.projectMode = mode;
+  document.querySelectorAll("[data-project-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.projectMode === mode);
+  });
+  $("#createFields").hidden = mode !== "create";
+  $("#existingFields").hidden = mode !== "existing";
+  $("#saveProject").textContent = mode === "create" ? "Create website" : "Add project";
+}
+
+async function saveProject(event) {
+  event.preventDefault();
+  const button = $("#saveProject");
+  const errorNode = $("#projectError");
+  errorNode.textContent = "";
+  setBusy(button, true, state.projectMode === "create" ? "Creating…" : "Adding…");
+  try {
+    const provider = $("#projectProviderSelect").value;
+    const isCreate = state.projectMode === "create";
+    const path = isCreate ? "/api/projects/create" : "/api/projects/existing";
+    const body = isCreate
+      ? { name: $("#newName").value, parent: $("#newParent").value, provider }
+      : { path: $("#existingPath").value, provider };
+    const { project } = await api(path, { method: "POST", body });
+    $("#projectDialog").close();
+    await refreshProjects();
+    selectProject(project.id);
+    if ($("#githubReminder").checked) toast("Project ready. Remember to publish it to GitHub when you want a remote backup.");
+  } catch (error) { errorNode.textContent = error.message; }
+  finally { setBusy(button, false); }
+}
+
+async function saveProviders() {
+  const selected = [...document.querySelectorAll("#providerDialog input:checked")].map((input) => input.value);
+  const button = $("#saveProviders");
+  $("#providerError").textContent = "";
+  setBusy(button, true, "Checking…");
+  try {
+    const result = await api("/api/providers", { method: "POST", body: { providers: selected } });
+    state.providers = result.providers;
+    $("#providerDialog").close();
+    openProjectDialog();
+  } catch (error) { $("#providerError").textContent = error.message; }
+  finally { setBusy(button, false); }
+}
+
+async function refreshProjects() {
+  const data = await api("/api/projects");
+  state.projects = data.projects;
+  if (state.selectedProjectId && !state.projects.some((p) => p.id === state.selectedProjectId)) state.selectedProjectId = null;
+  if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
+  renderProjects();
+  renderProjectView();
+  const session = currentSession();
+  if (session) $("#chatStatus").className = `live-dot ${session.status}`;
+}
+
+async function initialize() {
+  try {
+    const data = await api("/api/bootstrap");
+    state.providers = data.providers;
+    state.projects = data.projects;
+    state.system = data.system;
+    if (state.projects.length) state.selectedProjectId = state.projects[0].id;
+    renderStatus();
+    renderProjects();
+    renderProjectView();
+    if (!state.providers.length) $("#providerDialog").showModal();
+  } catch (error) { toast(error.message); }
+}
+
+function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
+
+$("#homeButton").addEventListener("click", () => { state.selectedProjectId = null; renderProjects(); });
+[$("#addProjectButton"), $("#railAddButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
+$("#saveProviders").addEventListener("click", saveProviders);
+$("#installShortcutButton").addEventListener("click", installShortcut);
+document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("click", () => setProjectMode(button.dataset.projectMode)));
+$("#projectForm").addEventListener("submit", saveProject);
+$("#closeChat").addEventListener("click", () => { $("#chatDrawer").hidden = true; state.chatSessionId = null; });
+$("#chatForm").addEventListener("submit", sendChat);
+$("#mergeButton").addEventListener("click", () => askConfirm("merge"));
+$("#discardButton").addEventListener("click", () => askConfirm("discard"));
+$("#confirmAction").addEventListener("click", () => state.confirmCallback && state.confirmCallback());
+
+initialize();
+setInterval(() => refreshProjects().catch(() => {}), 2200);
+setInterval(() => pollEvents().catch(() => {}), 900);

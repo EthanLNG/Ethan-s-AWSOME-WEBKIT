@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.5.0 (2026-08-18) — Local Control Center
+
+- Added a token-protected localhost Control Center with first-run
+  Codex/Claude Code selection, existing-project onboarding, and starter-site
+  creation.
+- Added five clickable color sessions backed by isolated Git worktrees,
+  resumable local CLI conversations, live chat output, and automatic browser
+  feedback/verdict wakeups.
+- Added controller-owned **Merge to main** and confirmed **Discard work**
+  actions so background agents never operate directly on `main`.
+- Added a cross-platform launcher and desktop-shortcut installer; local Git is
+  required, while GitHub publication remains optional.
+- Added `webkit/CONTROL-CENTER.md` as the finite, event-driven companion to the
+  existing `SETUP.md`/`LOOP.md` workflow. Existing Codex and Claude app usage
+  remains backward compatible.
+
 ## v0.4.1 (2026-08-18)
 
 - **Codex feedback waiting is now explicit and durable.** Codex agents keep the

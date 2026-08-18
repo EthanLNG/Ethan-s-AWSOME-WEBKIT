@@ -31,7 +31,7 @@ Check both; if either fails, stop and tell the user what's missing:
 ## 2. Copy the payload
 
 Copy `<kit>/webkit/` into `<project>/webkit/` — the whole directory: `VERSION`,
-`SETUP.md`, `LOOP.md`, `UPDATE-KIT.md`, `webkit.config.template.json`,
+`SETUP.md`, `LOOP.md`, `CONTROL-CENTER.md`, `UPDATE-KIT.md`, `webkit.config.template.json`,
 `scripts/`, `server/`, `overlay/`, `skills/`. Preserve the executable bits on
 `scripts/*.sh`, but **skip runtime junk** — a `server/__pycache__/` may sit in
 the kit clone from a prior run, and vendoring a stray `.pyc` into someone's
@@ -139,6 +139,21 @@ tooling before discovering the project workflow. The operational details remain
 canonical in `webkit/`, where the pull flow keeps them current.
 The same section goes into `CLAUDE.md` when that file exists, so Claude Code and
 Codex receive the identical external-browser rule.
+
+Then append this separate, idempotent controller section if it is missing:
+
+```markdown
+## Webkit Control Center
+
+When `WK_CONTROL_CENTER=1`, the local Control Center already owns the color,
+worktree, preview process, browser tab, and waiting. Read
+`webkit/CONTROL-CENTER.md`, process one finite feedback or chat transition, and
+exit; never merge or discard the controller-owned branch yourself.
+```
+
+Keeping this under its own heading lets the Control Center upgrade projects
+that already have an older `## Webkit` section without rewriting user-owned
+instructions.
 
 ## 6. Gitignore the runtime data
 

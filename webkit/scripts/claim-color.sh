@@ -25,6 +25,7 @@
 #   color=$(webkit/scripts/claim-color.sh)    # prints the emoji, e.g. 🟢
 #   webkit/scripts/claim-color.sh --full      # prints "emoji slug port"
 #                                             # (port = this color's preview port)
+#   webkit/scripts/claim-color.sh --slug blue # claim one specific palette color
 # Release (session end): webkit/scripts/release-color.sh "$color"
 #
 # Env overrides:
@@ -65,14 +66,24 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 full=0
-if [ "${1:-}" = "--full" ]; then
-  full=1
-  shift
-fi
-if [ "$#" -gt 0 ]; then
-  echo "usage: claim-color.sh [--full]" >&2
-  exit 1
-fi
+requested_slug=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --full)
+      full=1
+      shift
+      ;;
+    --slug)
+      [ "$#" -ge 2 ] || { echo "claim-color.sh: --slug needs a palette slug" >&2; exit 2; }
+      requested_slug="$2"
+      shift 2
+      ;;
+    *)
+      echo "usage: claim-color.sh [--full] [--slug <palette-slug>]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # Config (palette read must fail loudly; grace falls back to the classic 180s
 # so a config that predates the key still works).
@@ -161,6 +172,9 @@ now="$(date +%s)"
 
 while IFS=' ' read -r slug emoji port; do
   [ -n "$slug" ] || continue
+  if [ -n "$requested_slug" ] && [ "$slug" != "$requested_slug" ]; then
+    continue
+  fi
   lock="$lockdir/$slug.lock"
 
   # 1. A live tab already shows this color -> reserved, skip.
@@ -230,6 +244,11 @@ while IFS=' ' read -r slug emoji port; do
   fi
   # else: lost the mkdir race (lock now exists) — try the next color.
 done <<< "$palette"
+
+if [ -n "$requested_slug" ] && ! printf '%s\n' "$palette" | awk '{print $1}' | grep -Fxq "$requested_slug"; then
+  echo "claim-color.sh: '$requested_slug' is not a configured palette slug" >&2
+  exit 2
+fi
 
 echo NONE >&2
 exit 1

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AWESOME WEBKIT</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" id="homeButton" type="button" aria-label="Projects">
+      <span class="brand-mark" aria-hidden="true">W</span>
+      <span><strong>AWESOME</strong><small>WEBKIT</small></span>
+    </button>
+    <div class="system-status" id="systemStatus" aria-live="polite"></div>
+    <button class="secondary small" id="installShortcutButton" type="button">Desktop shortcut</button>
+    <button class="primary small" id="addProjectButton" type="button">+ Project</button>
+  </header>
+
+  <main class="shell">
+    <aside class="project-rail">
+      <p class="eyebrow">Projects</p>
+      <nav id="projectList" aria-label="Website projects"></nav>
+      <button class="rail-add" id="railAddButton" type="button">Add or create</button>
+    </aside>
+
+    <section class="workspace" id="workspace">
+      <div class="empty-state" id="emptyState">
+        <div class="empty-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Local design cockpit</p>
+        <h1>Choose a website.<br>Pick a color.<br>Start shaping.</h1>
+        <p>Every color opens an isolated Git worktree with its own agent, preview, and feedback loop.</p>
+        <button class="primary" id="emptyAddButton" type="button">Add your first project</button>
+      </div>
+
+      <div class="project-view" id="projectView" hidden>
+        <div class="project-heading">
+          <div>
+            <p class="eyebrow" id="projectProvider"></p>
+            <h1 id="projectName"></h1>
+            <p class="path" id="projectPath"></p>
+          </div>
+          <div class="github-note">
+            <span aria-hidden="true">↗</span>
+            <div><strong>Back it up on GitHub</strong><small>Optional, but recommended once the idea matters.</small></div>
+          </div>
+        </div>
+
+        <section class="colors-section">
+          <div class="section-title">
+            <div><p class="eyebrow">Parallel worktrees</p><h2>Open a color</h2></div>
+            <p>Each active color is a separate branch, preview server, and agent conversation.</p>
+          </div>
+          <div class="color-grid" id="colorGrid"></div>
+        </section>
+
+        <section class="active-section">
+          <div class="section-title"><div><p class="eyebrow">Live now</p><h2>Agent sessions</h2></div></div>
+          <div class="session-list" id="sessionList"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <aside class="chat-drawer" id="chatDrawer" aria-label="Agent chat" hidden>
+    <header>
+      <button class="icon-button" id="closeChat" type="button" aria-label="Collapse chat">×</button>
+      <div><p class="eyebrow" id="chatColor"></p><h2 id="chatTitle">Agent</h2></div>
+      <span class="live-dot" id="chatStatus"></span>
+    </header>
+    <div class="chat-events" id="chatEvents" aria-live="polite"></div>
+    <form class="composer" id="chatForm">
+      <textarea id="chatInput" rows="2" placeholder="Describe a change or ask the agent…"></textarea>
+      <button class="primary" type="submit">Send</button>
+    </form>
+    <footer>
+      <button class="secondary merge" id="mergeButton" type="button">Merge to main</button>
+      <button class="danger" id="discardButton" type="button">Discard work</button>
+    </footer>
+  </aside>
+
+  <dialog id="providerDialog" class="modal wizard">
+    <form method="dialog">
+      <p class="eyebrow">First launch</p>
+      <h2>Which local agents do you use?</h2>
+      <p>Select one or both. Each website will still use one provider at a time.</p>
+      <div class="provider-options">
+        <label><input type="checkbox" value="codex"><span><b>Codex</b><small>OpenAI Codex CLI</small></span></label>
+        <label><input type="checkbox" value="claude"><span><b>Claude Code</b><small>Anthropic Claude Code CLI</small></span></label>
+      </div>
+      <div class="modal-error" id="providerError"></div>
+      <button class="primary full" id="saveProviders" type="button">Continue</button>
+    </form>
+  </dialog>
+
+  <dialog id="projectDialog" class="modal project-modal">
+    <form method="dialog" id="projectForm">
+      <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+      <p class="eyebrow">Website project</p>
+      <h2>Create or bring your own</h2>
+      <div class="segmented" role="tablist">
+        <button type="button" class="active" data-project-mode="create">Create new</button>
+        <button type="button" data-project-mode="existing">Use existing</button>
+      </div>
+      <div id="createFields">
+        <label>Website name<input id="newName" autocomplete="off" placeholder="My brilliant website"></label>
+        <label>Parent folder<input id="newParent" autocomplete="off" placeholder="~/Projects"></label>
+      </div>
+      <div id="existingFields" hidden>
+        <label>Project folder<input id="existingPath" autocomplete="off" placeholder="~/Projects/my-website"></label>
+      </div>
+      <label>Agent provider<select id="projectProviderSelect"></select></label>
+      <label class="github-checkbox"><input id="githubReminder" type="checkbox" checked><span>Remind me to publish this project to GitHub</span></label>
+      <div class="modal-error" id="projectError"></div>
+      <button class="primary full" id="saveProject" type="submit">Create website</button>
+    </form>
+  </dialog>
+
+  <dialog id="confirmDialog" class="modal confirm-modal">
+    <form method="dialog">
+      <p class="eyebrow" id="confirmEyebrow">Confirm</p>
+      <h2 id="confirmTitle"></h2>
+      <p id="confirmText"></p>
+      <div class="modal-actions">
+        <button class="secondary" value="cancel">Cancel</button>
+        <button class="danger" id="confirmAction" type="button">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

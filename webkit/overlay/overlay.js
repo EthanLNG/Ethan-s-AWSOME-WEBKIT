@@ -776,22 +776,32 @@
         if (p.page !== page) return;
         if (!pointSurfaceVisible(p)) return;
         const va = pinBox(p);
-        const box = va ? va.box : correctedRect(p);
+        const primary = va ? va.box : correctedRect(p);
+        const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
+        const boxes = (p.rects || [p.rect]).map((box) => ({
+          x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
+        }));
         const v = S.verdicts[p.id];
-        const els = addPin(p.number, box,
-          'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
-          () => jumpTo(i), 'point ' + p.number + (v ? ' — ' + v.verdict : ''), !!va);
-        if (i === S.cursor) { S.curPinEls = els; }
+        boxes.forEach((box, rectIndex) => {
+          const els = addPin(p.number, box,
+            'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
+            () => jumpTo(i), 'point ' + p.number + (v ? ' — ' + v.verdict : ''), !!va);
+          if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
+        });
       });
     }
     for (const p of S.points) {
       if (p.page !== page) continue;
       if (!pointSurfaceVisible(p)) continue;
       const va = pinBox(p);
-      addPin(p.number, va ? va.box : p.rect, 'queued', () => {
+      const primary = va ? va.box : p.rect;
+      const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
+      (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
+        x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
+      }, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
-      }, S.reviewing ? 'queued for next batch — click to edit' : 'click to edit', !!va);
+      }, S.reviewing ? 'added to current batch — click to edit' : 'click to edit', !!va));
     }
     repositionAll();
     updateHint();
@@ -876,61 +886,86 @@
 
   // ===== frozen rect (resize handles + move) =================================
   const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
-  let frozenEl = null;
+  let frozenEls = [];
 
-  function buildFrozen() {
-    frozenEl = el('div', 'wk-frozen');
-    const body = el('div', 'wk-frozen-body');
-    body.dataset.h = 'move';
-    frozenEl.appendChild(body);
-    for (const h of HANDLES) {
-      const hd = el('div', 'wk-handle h-' + h);
-      hd.dataset.h = h;
-      frozenEl.appendChild(hd);
-    }
-    frozenEl.addEventListener('pointerdown', (e) => {
-      const h = e.target.dataset && e.target.dataset.h;
-      if (!h || e.button !== 0 || !S.card || S.drag) return;
-      e.preventDefault();
-      e.target.setPointerCapture(e.pointerId);
-      const r0 = { ...S.card.draft.rect };
-      S.drag = {
-        kind: 'frozen', h, sx: e.clientX, sy: e.clientY, r0, target: e.target,
-        cancel() { S.card.draft.rect = r0; S.drag = null; positionFrozen(); positionCard(); },
-      };
-    });
-    frozenEl.addEventListener('pointermove', (e) => {
-      const d = S.drag;
-      if (!d || d.kind !== 'frozen' || !S.card) return;
-      const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
-      let { x, y, w, h } = d.r0;
-      if (d.h === 'move') { x += dx; y += dy; }
-      else {
-        if (d.h.includes('w')) { x += dx; w -= dx; }
-        if (d.h.includes('e')) { w += dx; }
-        if (d.h.includes('n')) { y += dy; h -= dy; }
-        if (d.h.includes('s')) { h += dy; }
-        if (w < 8) { if (d.h.includes('w')) x += w - 8; w = 8; }
-        if (h < 8) { if (d.h.includes('n')) y += h - 8; h = 8; }
+  function clearFrozen() {
+    for (const node of frozenEls) node.remove();
+    frozenEls = [];
+  }
+
+  function buildFrozen(draftOverride) {
+    clearFrozen();
+    const activeDraft = draftOverride || S.card?.draft;
+    if (!activeDraft) return;
+    const rects = activeDraft.rects || [activeDraft.rect];
+    rects.forEach((rect, index) => {
+      const frozen = el('div', 'wk-frozen');
+      const body = el('div', 'wk-frozen-body');
+      body.dataset.h = 'move';
+      frozen.appendChild(body);
+      const remove = el('button', 'wk-frozen-delete', '×');
+      remove.type = 'button';
+      remove.title = 'Delete this rectangle';
+      remove.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!S.card) return;
+        if (S.card.draft.rects.length === 1) { S.card.cancel(); return; }
+        S.card.draft.rects.splice(index, 1);
+        S.card.draft.rect = S.card.draft.rects[S.card.draft.rects.length - 1];
+        buildFrozen(); positionFrozen(); positionCard(); S.card.saveDraft();
+      });
+      frozen.appendChild(remove);
+      for (const h of HANDLES) {
+        const hd = el('div', 'wk-handle h-' + h);
+        hd.dataset.h = h;
+        frozen.appendChild(hd);
       }
-      S.card.draft.rect = { x, y, w, h };
-      if (S.card.draft.rects?.length) {
-        S.card.draft.rects[S.card.draft.rects.length - 1] = S.card.draft.rect;
-      }
-      positionFrozen();
-      positionCard();
-      S.card.saveDraft();
+      frozen.addEventListener('pointerdown', (e) => {
+        const h = e.target.dataset && e.target.dataset.h;
+        if (!h || e.button !== 0 || !S.card || S.drag) return;
+        e.preventDefault();
+        e.target.setPointerCapture(e.pointerId);
+        const r0 = { ...S.card.draft.rects[index] };
+        S.card.draft.rect = S.card.draft.rects[index];
+        S.drag = {
+          kind: 'frozen', h, index, sx: e.clientX, sy: e.clientY, r0, target: e.target,
+          cancel() { S.card.draft.rects[index] = r0; S.card.draft.rect = r0; S.drag = null; positionFrozen(); positionCard(); },
+        };
+      });
+      frozen.addEventListener('pointermove', (e) => {
+        const d = S.drag;
+        if (!d || d.kind !== 'frozen' || d.index !== index || !S.card) return;
+        const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
+        let { x, y, w, h } = d.r0;
+        if (d.h === 'move') { x += dx; y += dy; }
+        else {
+          if (d.h.includes('w')) { x += dx; w -= dx; }
+          if (d.h.includes('e')) { w += dx; }
+          if (d.h.includes('n')) { y += dy; h -= dy; }
+          if (d.h.includes('s')) { h += dy; }
+          if (w < 8) { if (d.h.includes('w')) x += w - 8; w = 8; }
+          if (h < 8) { if (d.h.includes('n')) y += h - 8; h = 8; }
+        }
+        S.card.draft.rects[index] = { x, y, w, h };
+        S.card.draft.rect = S.card.draft.rects[index];
+        positionFrozen(); positionCard(); S.card.saveDraft();
+      });
+      frozen.addEventListener('pointerup', () => { if (S.drag?.kind === 'frozen') S.drag = null; });
+      frozen.addEventListener('pointercancel', () => { if (S.drag?.kind === 'frozen') S.drag.cancel(); });
+      frozenEls.push(frozen);
+      wrap.appendChild(frozen);
     });
-    frozenEl.addEventListener('pointerup', () => { if (S.drag?.kind === 'frozen') S.drag = null; });
-    frozenEl.addEventListener('pointercancel', () => { if (S.drag?.kind === 'frozen') S.drag.cancel(); });
-    wrap.appendChild(frozenEl);
   }
   function positionFrozen() {
-    if (!frozenEl || !S.card) return;
-    const r = S.card.draft.rect;
-    place(frozenEl, r);
-    frozenEl.style.width = r.w + 'px';
-    frozenEl.style.height = r.h + 'px';
+    if (!S.card) return;
+    frozenEls.forEach((node, index) => {
+      const r = S.card.draft.rects[index];
+      if (!r) return;
+      place(node, r);
+      node.style.width = r.w + 'px';
+      node.style.height = r.h + 'px';
+    });
   }
 
   // ===== speech (webkitSpeechRecognition) ====================================
@@ -1284,7 +1319,7 @@
 
     node.append(head, taWrap, abcWrap, actions);
     wrap.appendChild(node);
-    buildFrozen();
+    buildFrozen(draft);
 
     // --- draft persistence: every input debounced 150ms into wk:card ---------
     const saveDraft = debounce(() => {
@@ -1371,7 +1406,7 @@
       // write here would resurrect a discarded draft 150ms after the fact
       saveDraft.cancel();
       node.remove();
-      if (frozenEl) { frozenEl.remove(); frozenEl = null; }
+      clearFrozen();
       S.card = null;
       renderPins();
       updateSendBtn();
@@ -1427,7 +1462,6 @@
       mic.stop();
       saveDraft.cancel();
       node.remove();
-      if (frozenEl) { frozenEl.remove(); frozenEl = null; }
       S.card = null;
       toast('Draw another rectangle for this same feedback point.');
     });

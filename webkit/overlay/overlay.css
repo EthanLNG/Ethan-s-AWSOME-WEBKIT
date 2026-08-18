@@ -181,6 +181,25 @@
   cursor: move;
   touch-action: none;   /* drag-to-move by touch (see .wk-draw) */
 }
+.wk-frozen-delete {
+  position: absolute;
+  z-index: 2;
+  left: 4px;
+  top: 4px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--wk-danger);
+  border-radius: 50%;
+  background: var(--wk-paper);
+  color: var(--wk-danger);
+  font: 700 14px/1 var(--wk-font);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.wk-frozen-delete:hover { background: var(--wk-danger); color: #fff; }
 .wk-handle {
   position: absolute;
   width: 9px;

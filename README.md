@@ -19,9 +19,11 @@ tab strip.
   parallel agents never collide and you always know which tab is whose.
 - **No-store preview server** — every asset served with `Cache-Control: no-store`; what
   you see is always the file on disk, never a stale cache.
-- **Feedback overlay** — press **C** on the live page to open a drawing layer: rectangle
-  annotations, per-point notes, and **live speech-to-text** (press **V**) so you can
-  dictate feedback instead of typing it. Both shortcuts switch off while a text field
+- **Feedback overlay** — press **C** on the live page, then hold **Option** while
+  dragging to draw a rectangle. Normal clicks keep using the website underneath, so
+  the feedback tool never blocks ordinary interaction. Per-point notes and **live
+  speech-to-text** (press **V**) let you dictate feedback instead of typing it. Both
+  shortcuts switch off while a text field
   is focused, so `C` and `V` remain typable. Dictation has an explicit persistent
   English/עברית recognition selector. Nothing of the kit sits on the page at rest — no
   button, no badge — so what you look at is your design, not a tool around it.
@@ -72,14 +74,16 @@ authenticated on your computer; no API keys are stored by Webkit.
 On first launch, choose Codex, Claude Code, or both, then add an existing
 website or create a starter website. Every project chooses one provider. Pick
 one of the five colors to start an isolated Git worktree, background agent, and
-stamped preview. The chat stays collapsed until you want it; normal rectangle
-feedback on the website wakes the matching CLI automatically.
+stamped preview. The chat stays collapsed until you want it; submitted rectangle
+feedback from the website wakes the matching CLI automatically.
 
-The top-bar **Settings** button controls the microphone mode. Browser
-speech-to-text remains the default. **Agent voice notes** instead stores the
-original recording with the feedback point and has the background agent
-transcribe it with a local Whisper installation; Settings reports whether that
-private, on-device transcription engine is ready.
+The top-bar **Settings** button controls microphone and website interaction
+modes. Browser speech-to-text remains the default. **Agent voice notes** instead
+stores the original recording with the feedback point and has the background
+agent transcribe it with a local Whisper installation; Settings reports whether
+that private, on-device transcription engine is ready. Website clicks pass
+through normally by default while **Option** temporarily arms rectangle drawing;
+the legacy draw-first behavior is still available in Settings.
 
 Each color session has two explicit finish actions:
 

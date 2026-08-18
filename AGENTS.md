@@ -177,5 +177,5 @@ the preview, start the watcher). Finish by reporting to the user, concretely:
 - the **port** your server is on,
 - the **preview URL** you opened (or printed, on non-Chrome/macOS setups),
 
-and one sentence telling them the loop is live: hover the bottom-left of the
-page, draw a rectangle, describe the change, hit send.
+and one sentence telling them the loop is live: press C, hold Option while
+dragging a rectangle, describe the change, and hit send.

@@ -135,7 +135,7 @@
       <p class="eyebrow">Control Center settings</p>
       <h2>How should the mic work?</h2>
       <p>Choose one mode for all WebKit previews opened by this Control Center.</p>
-      <div class="dictation-options">
+      <div class="settings-options">
         <label>
           <input type="radio" name="dictationMode" value="speech">
           <span><b>Browser speech-to-text</b><small>Default. Chrome/Google writes recognized words into the note.</small></span>
@@ -146,6 +146,20 @@
         </label>
       </div>
       <p class="capability-note" id="voiceCapability"></p>
+      <div class="settings-section">
+        <h2>How should the website behave?</h2>
+        <p>Choose what a normal click does while the feedback overlay is open.</p>
+        <div class="settings-options">
+          <label>
+            <input type="radio" name="interactionMode" value="browse-default">
+            <span><b>Click the website normally</b><small>Default. Hold Option while dragging to draw a feedback rectangle.</small></span>
+          </label>
+          <label>
+            <input type="radio" name="interactionMode" value="draw-default">
+            <span><b>Draw rectangles immediately</b><small>Legacy mode. Hold Option when you want to click the website underneath.</small></span>
+          </label>
+        </div>
+      </div>
       <div class="modal-error" id="settingsError"></div>
       <button class="primary full" id="saveSettings" type="submit">Save settings</button>
     </form>

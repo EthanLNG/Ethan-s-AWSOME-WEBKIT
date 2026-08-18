@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.6.1 (2026-08-18) — Click-first website interaction
+
+- Feedback mode now leaves the website directly clickable by default. Hold
+  Option while dragging to draw a feedback rectangle.
+- Added a Control Center setting for the legacy draw-first behavior, where
+  Option temporarily passes clicks through to the website.
+- The interaction preference is injected into every active preview, persisted
+  locally, and defaults safely for existing state and older project configs.
+
 ## v0.6.0 (2026-08-18) — Point-scoped review and private agent voice notes
 
 - Before/after now defaults to the current feedback target. A compact arrow

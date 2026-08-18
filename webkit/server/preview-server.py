@@ -276,6 +276,14 @@ if not isinstance(_DICTATION, dict):
 _DICTATION_MODE = os.environ.get("WK_DICTATION_MODE", _DICTATION.get("mode", "speech"))
 if _DICTATION_MODE not in ("speech", "voice-note"):
     _DICTATION_MODE = "speech"
+_INTERACTION = CONFIG.get("interaction", {})
+if not isinstance(_INTERACTION, dict):
+    _INTERACTION = {}
+_INTERACTION_MODE = os.environ.get(
+    "WK_INTERACTION_MODE", _INTERACTION.get("mode", "browse-default")
+)
+if _INTERACTION_MODE not in ("browse-default", "draw-default"):
+    _INTERACTION_MODE = "browse-default"
 
 
 def inject(html, mode):
@@ -283,8 +291,9 @@ def inject(html, mode):
         return html
     tag = (
         '<script src="/__wk/overlay.js" defer data-wk-color="{}" '
-        'data-wk-emoji="{}" data-wk-mode="{}" data-wk-dictation-mode="{}"{}></script>'.format(
-            SLUG, COLOR, mode, _DICTATION_MODE, _HOTKEY_ATTRS
+        'data-wk-emoji="{}" data-wk-mode="{}" data-wk-dictation-mode="{}" '
+        'data-wk-interaction-mode="{}"{}></script>'.format(
+            SLUG, COLOR, mode, _DICTATION_MODE, _INTERACTION_MODE, _HOTKEY_ATTRS
         )
     )
     matches = list(_BODY_CLOSE.finditer(html)) or list(_HTML_CLOSE.finditer(html))

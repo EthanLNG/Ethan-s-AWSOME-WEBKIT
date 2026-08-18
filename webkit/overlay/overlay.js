@@ -64,6 +64,9 @@
   const EMOJI = DS.wkEmoji || '⬜';
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
   const DICTATION_MODE = DS.wkDictationMode === 'voice-note' ? 'voice-note' : 'speech';
+  const INTERACTION_MODE = DS.wkInteractionMode === 'draw-default'
+    ? 'draw-default'
+    : 'browse-default';
 
   // Hotkeys are KeyboardEvent.code values (LAYOUT-INDEPENDENT: this site is
   // Hebrew, so `e.key` would be a different character on every layout).
@@ -286,10 +289,13 @@
   // permanently-mounted button is chrome on someone's design, and the author
   // would rather tell people "press C" than have them hunt for a target.
   const wrap = el('div', 'wk-wrap wk-off');          // visibility-toggled container
-  const drawLayer = IS_BEFORE ? null : el('div', 'wk-draw');
+  const drawLayer = IS_BEFORE ? null : el('div', 'wk-draw' +
+    (INTERACTION_MODE === 'browse-default' ? ' pass' : ''));
   const pinLayer = el('div', 'wk-pins');
-  const hintChip = el('div', 'wk-hint',
-    'drag to mark a spot · hold ⌥ to use the page · ' + TOGGLE_LABEL +
+  const interactionHint = INTERACTION_MODE === 'browse-default'
+    ? 'hold ⌥ + drag to mark a spot · click normally to use the page'
+    : 'drag to mark a spot · hold ⌥ to use the page';
+  const hintChip = el('div', 'wk-hint', interactionHint + ' · ' + TOGGLE_LABEL +
     ' to hide · ' + DICTATE_LABEL + ' to dictate (outside text fields)');
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
@@ -732,16 +738,22 @@
 
   // ===== draw layer ==========================================================
   if (drawLayer) {
-    // Alt = interact with the page underneath (pointer pass-through). Wheel
+    // New default: the site is directly interactive and Alt temporarily arms
+    // rectangle drawing. The legacy setting reverses that relationship. Wheel
     // needs no special-casing: the layer isn't scrollable, so scroll chains to
-    // the document anyway.
+    // the document whenever it owns the pointer.
+    const syncDrawLayer = () => {
+      const drawingArmed = INTERACTION_MODE === 'browse-default' ? S.altHeld : !S.altHeld;
+      drawLayer.classList.toggle('pass', !drawingArmed);
+    };
     window.addEventListener('keydown', (e) => {
-      if (e.key === 'Alt') { S.altHeld = true; drawLayer.classList.add('pass'); }
+      if (e.key === 'Alt') { S.altHeld = true; syncDrawLayer(); }
     }, true);
     window.addEventListener('keyup', (e) => {
-      if (e.key === 'Alt') { S.altHeld = false; drawLayer.classList.remove('pass'); }
+      if (e.key === 'Alt') { S.altHeld = false; syncDrawLayer(); }
     }, true);
-    window.addEventListener('blur', () => { S.altHeld = false; drawLayer.classList.remove('pass'); });
+    window.addEventListener('blur', () => { S.altHeld = false; syncDrawLayer(); });
+    syncDrawLayer();
 
     drawLayer.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || S.drag) return;

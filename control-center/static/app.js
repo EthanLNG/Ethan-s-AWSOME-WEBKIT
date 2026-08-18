@@ -10,7 +10,7 @@ const state = {
   providers: [],
   projects: [],
   system: {},
-  settings: { dictationMode: "speech" },
+  settings: { dictationMode: "speech", interactionMode: "browse-default" },
   selectedProjectId: null,
   chatSessionId: null,
   chatCursor: 0,
@@ -89,19 +89,27 @@ function openSettings() {
   const selected = document.querySelector(`input[name="dictationMode"][value="${state.settings.dictationMode}"]`)
     || document.querySelector('input[name="dictationMode"][value="speech"]');
   selected.checked = true;
+  const interaction = document.querySelector(`input[name="interactionMode"][value="${state.settings.interactionMode}"]`)
+    || document.querySelector('input[name="interactionMode"][value="browse-default"]');
+  interaction.checked = true;
   $("#settingsError").textContent = "";
   $("#settingsDialog").showModal();
 }
 
 async function saveSettings(event) {
   event.preventDefault();
-  const input = document.querySelector('input[name="dictationMode"]:checked');
+  const dictationInput = document.querySelector('input[name="dictationMode"]:checked');
+  const interactionInput = document.querySelector('input[name="interactionMode"]:checked');
   const button = $("#saveSettings");
   $("#settingsError").textContent = "";
   setBusy(button, true, "Saving…");
   try {
     const result = await api("/api/settings", {
-      method: "POST", body: { dictationMode: input ? input.value : "speech" },
+      method: "POST",
+      body: {
+        dictationMode: dictationInput ? dictationInput.value : "speech",
+        interactionMode: interactionInput ? interactionInput.value : "browse-default",
+      },
     });
     state.settings = result.settings;
     $("#settingsDialog").close();
@@ -399,7 +407,7 @@ async function initialize() {
     state.providers = data.providers;
     state.projects = data.projects;
     state.system = data.system;
-    state.settings = data.settings || { dictationMode: "speech" };
+    state.settings = data.settings || { dictationMode: "speech", interactionMode: "browse-default" };
     if (state.projects.length) state.selectedProjectId = state.projects[0].id;
     renderStatus();
     renderProjects();

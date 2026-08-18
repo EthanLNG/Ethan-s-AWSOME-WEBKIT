@@ -80,7 +80,7 @@
   touch-action: none;
   z-index: 1;
 }
-.wk-draw.pass { pointer-events: none; }   /* Alt held: use the page underneath */
+.wk-draw.pass { pointer-events: none; }   /* page interaction is currently active */
 
 .wk-rubber {
   position: fixed;

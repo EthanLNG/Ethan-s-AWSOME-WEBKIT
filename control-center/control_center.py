@@ -61,6 +61,24 @@ agent app. The controller will invoke you again for the next transition.
 """
 
 
+DEFAULT_SETTINGS = {
+    "dictationMode": "speech",
+    "interactionMode": "browse-default",
+}
+
+
+def normalized_settings(value):
+    value = value if isinstance(value, dict) else {}
+    dictation_mode = value.get("dictationMode", DEFAULT_SETTINGS["dictationMode"])
+    interaction_mode = value.get("interactionMode", DEFAULT_SETTINGS["interactionMode"])
+    return {
+        "dictationMode": dictation_mode if dictation_mode in ("speech", "voice-note") else "speech",
+        "interactionMode": interaction_mode
+        if interaction_mode in ("browse-default", "draw-default")
+        else "browse-default",
+    }
+
+
 class ControlCenterError(RuntimeError):
     def __init__(self, message, status=400, details=None):
         super().__init__(message)
@@ -124,7 +142,7 @@ class StateStore:
         if not self.path.exists():
             atomic_write_json(self.path, {
                 "version": 1, "providers": [], "projects": [], "sessions": [],
-                "settings": {"dictationMode": "speech"},
+                "settings": dict(DEFAULT_SETTINGS),
             })
 
     def read(self):
@@ -430,6 +448,7 @@ class ProjectManager:
         default_page = self._find_default_page(project_path)
         port_start = self._find_port_block(5311)
         slug = slugify(project_path.name)
+        settings = normalized_settings(self.store.read().get("settings"))
         palette = []
         colors = [
             ("blue", "🔵"), ("red", "🔴"), ("green", "🟢"),
@@ -447,9 +466,8 @@ class ProjectManager:
             "browser": {"mode": "auto", "app_name": "Google Chrome"},
             "feedback_dir": ".webkit/feedback",
             "hotkeys": {"toggle": "KeyC", "dictate": "KeyV"},
-            "dictation": {
-                "mode": self.store.read().get("settings", {}).get("dictationMode", "speech")
-            },
+            "dictation": {"mode": settings["dictationMode"]},
+            "interaction": {"mode": settings["interactionMode"]},
         }
 
     @staticmethod
@@ -835,7 +853,9 @@ class SessionManager:
         env = os.environ.copy()
         env["WK_CONFIG"] = str(config_path)
         env["WK_COLOR_OWNER"] = str(site_root)
-        env["WK_DICTATION_MODE"] = self.store.read().get("settings", {}).get("dictationMode", "speech")
+        settings = normalized_settings(self.store.read().get("settings"))
+        env["WK_DICTATION_MODE"] = settings["dictationMode"]
+        env["WK_INTERACTION_MODE"] = settings["interactionMode"]
         self._claim_lock(config, session["color"], site_root)
         server = worktree / "webkit" / "server" / "preview-server.py"
         runtime.preview_process = subprocess.Popen(
@@ -1063,13 +1083,22 @@ class ControlCenter:
             "projects": self.projects.list_projects(),
             "sessions": state.get("sessions", []),
             "system": self.projects.system_status(),
-            "settings": state.get("settings", {"dictationMode": "speech"}),
+            "settings": normalized_settings(state.get("settings")),
         }
 
     def save_settings(self, settings):
-        mode = (settings or {}).get("dictationMode")
-        if mode not in ("speech", "voice-note"):
+        submitted = settings if isinstance(settings, dict) else {}
+        current = normalized_settings(self.store.read().get("settings"))
+        dictation_mode = submitted.get("dictationMode", current["dictationMode"])
+        interaction_mode = submitted.get("interactionMode", current["interactionMode"])
+        if dictation_mode not in ("speech", "voice-note"):
             raise ControlCenterError("Choose browser speech or agent voice notes.")
-        self.store.update(lambda state: state.update({"settings": {"dictationMode": mode}}))
+        if interaction_mode not in ("browse-default", "draw-default"):
+            raise ControlCenterError("Choose normal website clicks or immediate rectangle drawing.")
+        saved = {
+            "dictationMode": dictation_mode,
+            "interactionMode": interaction_mode,
+        }
+        self.store.update(lambda state: state.update({"settings": saved}))
         refresh = self.sessions.refresh_previews_for_settings()
-        return {"settings": {"dictationMode": mode}, "previews": refresh}
+        return {"settings": saved, "previews": refresh}

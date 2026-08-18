@@ -11,9 +11,9 @@
  * `direction: ltr` below to neutralise that; the free-text fields opt back into
  * auto-detection with `unicode-bidi: plaintext` so Hebrew still types RTL.
  *
- * Look & feel: quiet, neutral, system-font UI that reads as "dev tool", not as
- * part of the design under review. Single accent #2563eb; 10px radii; soft
- * shadows; 0.16s ease transitions (mirrors the abc switcher's feel).
+ * Look & feel: crisp monochrome surfaces shared by every operational element.
+ * White cards, black controls, restrained borders, and compact offset shadows
+ * keep the tool visually separate from the site under review.
  *
  * Geometry contract with the abc switcher: abc buttons stack UP from
  * left:14px/bottom:14px; the webkit row grows RIGHT along y=14 (send at
@@ -26,20 +26,20 @@
 [hidden] { display: none !important; }
 
 :host {
-  --wk-accent: #2563eb;
-  --wk-accent-dim: #1d4fd7;
-  --wk-accent-soft: rgba(37, 99, 235, 0.10);
-  --wk-ink: #1f2430;
-  --wk-muted: #697184;
+  --wk-accent: #111111;
+  --wk-accent-dim: #000000;
+  --wk-accent-soft: rgba(0, 0, 0, 0.07);
+  --wk-ink: #111111;
+  --wk-muted: #666666;
   --wk-paper: #ffffff;
-  --wk-line: #e4e7ee;
-  --wk-danger: #dc2626;
-  --wk-warn: #d97706;
-  --wk-ok: #16a34a;
-  --wk-radius: 10px;
+  --wk-line: #d5d5d5;
+  --wk-danger: #111111;
+  --wk-warn: #444444;
+  --wk-ok: #111111;
+  --wk-radius: 12px;
   --wk-ease: 0.16s ease;
-  --wk-shadow: 0 6px 22px rgba(15, 23, 42, 0.16), 0 1px 3px rgba(15, 23, 42, 0.10);
-  --wk-shadow-soft: 0 2px 10px rgba(15, 23, 42, 0.12);
+  --wk-shadow: 5px 6px 0 rgba(0, 0, 0, 0.14);
+  --wk-shadow-soft: 2px 3px 0 rgba(0, 0, 0, 0.12);
   --wk-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   /* `all:initial` on the host div does NOT reset direction (the shorthand
    * excludes it), so a host page with dir="rtl" would mirror the entire tool:
@@ -96,7 +96,7 @@
   left: 50%;
   bottom: 16px;
   transform: translateX(-50%);
-  background: rgba(31, 36, 48, 0.85);
+  background: #111;
   color: #fff;
   font-size: 12px;
   line-height: 1;
@@ -224,7 +224,7 @@
   position: fixed;
   width: 320px;
   background: var(--wk-paper);
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: var(--wk-radius);
   box-shadow: var(--wk-shadow);
   padding: 10px 12px 12px;
@@ -428,7 +428,7 @@
   min-width: 144px;
   transform: translateX(-50%);
   padding: 5px;
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: 10px;
   background: var(--wk-paper);
   box-shadow: var(--wk-shadow);
@@ -571,7 +571,7 @@
   bottom: 62px;
   transform: translateX(-50%);
   background: var(--wk-paper);
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: 999px;
   box-shadow: var(--wk-shadow-soft);
   color: var(--wk-muted);
@@ -594,13 +594,14 @@
   max-width: calc(100vw - 210px);   flex-wrap: wrap;
   justify-content: center;
   background: var(--wk-paper);
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: 999px;
   box-shadow: var(--wk-shadow);
   padding: 8px 14px;
   pointer-events: auto;
   z-index: 7;
   outline: none;
+  overflow: visible;
 }
 .wk-bar:focus-visible { box-shadow: var(--wk-shadow), 0 0 0 3px var(--wk-accent-soft); }
 .wk-bar-sep { width: 1px; height: 18px; background: var(--wk-line); flex: none; }
@@ -635,13 +636,19 @@
 .wk-dot-i.v-redo { background: var(--wk-warn); border-color: var(--wk-warn); }
 .wk-dot-i.v-delete { background: var(--wk-muted); border-color: var(--wk-muted); }
 
-/* ===== abc chip (the ONLY variant switcher shown during review) =====
+/* ===== A/B variants pill (the ONLY variant switcher shown during review) =====
  * overlay.js hides the page's own .abc-switch button for the scope under
  * review, so this chip carries the whole job: it must read as a pressable
  * control, not a status label. Hence the raised surface, the oversized current
  * letter, the full letter run with the live one lit, and a ⟳ that spins on
  * hover — "click me and the variant changes" has to be legible at a glance. */
 .wk-abc-chip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 32px);
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -653,12 +660,12 @@
   padding: 5px 6px 5px 10px;
   cursor: pointer;
   white-space: nowrap;
-  box-shadow: 0 1px 0 rgba(37, 99, 235, 0.28), var(--wk-shadow-soft);
+  box-shadow: var(--wk-shadow-soft);
   transition: background var(--wk-ease), color var(--wk-ease), border-color var(--wk-ease),
     box-shadow var(--wk-ease), transform var(--wk-ease);
 }
-.wk-abc-chip:hover { background: var(--wk-accent-soft); box-shadow: 0 2px 0 rgba(37, 99, 235, 0.35), var(--wk-shadow); }
-.wk-abc-chip:active { transform: translateY(1px); box-shadow: 0 0 0 rgba(37, 99, 235, 0.28), var(--wk-shadow-soft); }
+.wk-abc-chip:hover { background: var(--wk-accent-soft); box-shadow: var(--wk-shadow); }
+.wk-abc-chip:active { transform: translateX(-50%) translateY(1px); box-shadow: var(--wk-shadow-soft); }
 .wk-abc-chip .wk-chip-flask { font-size: 13px; opacity: 0.85; }
 .wk-abc-chip .wk-chip-letter {
   font: 800 15px/1 var(--wk-font);
@@ -733,7 +740,7 @@
   max-width: min(420px, 70vw);
   transform: translateX(-50%);
   padding: 9px 11px;
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: 9px;
   background: var(--wk-paper);
   color: var(--wk-ink);
@@ -777,7 +784,7 @@
   transform: translateX(-50%);
   width: 340px;
   background: var(--wk-paper);
-  border: 1px solid var(--wk-line);
+  border: 1.5px solid var(--wk-ink);
   border-radius: var(--wk-radius);
   box-shadow: var(--wk-shadow);
   padding: 10px 12px 12px;
@@ -811,8 +818,7 @@
   gap: 10px;
   max-width: min(440px, calc(100vw - 40px));
   background: var(--wk-paper);
-  border: 1px solid var(--wk-line);
-  border-left: 3px solid var(--wk-accent);
+  border: 1.5px solid var(--wk-ink);
   border-radius: var(--wk-radius);
   box-shadow: var(--wk-shadow);
   padding: 10px 12px;

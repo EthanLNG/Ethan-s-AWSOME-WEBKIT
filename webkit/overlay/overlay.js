@@ -1290,7 +1290,7 @@
     const abcWrap = el('div', 'wk-abc');
     const abcHead = el('button', 'wk-abc-head');
     abcHead.type = 'button';
-    abcHead.innerHTML = '<span class="wk-flask">⚗</span><span>Request A/B/C variants</span><span class="wk-caret">▸</span>';
+    abcHead.innerHTML = '<span class="wk-flask">⚗</span><span>Request A/B variants</span><span class="wk-caret">▸</span>';
     const abcBody = el('div', 'wk-abc-body');
     const seg = el('div', 'wk-seg');
     const segModel = el('button', 'wk-seg-btn', 'Model generates');

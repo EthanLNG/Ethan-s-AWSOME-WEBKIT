@@ -69,12 +69,14 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .empty-state { min-height: calc(100vh - 210px); display: flex; flex-direction: column; align-items: flex-start; justify-content: center; max-width: 850px; }
 .empty-state h1 { margin: 0; font-size: clamp(3.5rem, 7.3vw, 8.5rem); line-height: .84; letter-spacing: -.075em; }
 .empty-state > p:not(.eyebrow) { max-width: 620px; margin: 28px 0; color: var(--muted); font-size: 18px; line-height: 1.55; }
-.empty-orbit { position: absolute; top: 11%; right: 8%; width: 220px; height: 220px; border: 2px solid var(--ink); border-radius: 50%; opacity: .16; animation: spin 18s linear infinite; }
-.empty-orbit span { position: absolute; width: 36px; height: 36px; border: 2px solid var(--ink); border-radius: 50%; background: var(--paper); }
-.empty-orbit span:nth-child(1) { left: 17px; top: 12px; background: var(--blue); }
-.empty-orbit span:nth-child(2) { right: -8px; top: 92px; background: var(--orange); }
-.empty-orbit span:nth-child(3) { left: 65px; bottom: -15px; background: var(--green); }
-@keyframes spin { to { transform: rotate(360deg); } }
+.empty-orbit { --orbit-size: clamp(320px, 28vw, 460px); position: absolute; top: 50%; right: clamp(34px, 7vw, 130px); width: var(--orbit-size); height: var(--orbit-size); border: 2px solid color-mix(in srgb, var(--ink) 27%, transparent); border-radius: 50%; animation: orbit-spin 28s linear infinite; }
+.empty-orbit span { --dot-size: clamp(46px, 3.4vw, 62px); position: absolute; top: 50%; left: 50%; width: var(--dot-size); height: var(--dot-size); margin: calc(var(--dot-size) / -2); border: 2px solid var(--ink); border-radius: 50%; box-shadow: inset 0 -5px 0 color-mix(in srgb, var(--ink) 15%, transparent); transform: rotate(var(--angle)) translateX(calc(var(--orbit-size) / 2)); }
+.empty-orbit span:nth-child(1) { --angle: -126deg; background: var(--blue); }
+.empty-orbit span:nth-child(2) { --angle: -54deg; background: var(--red); }
+.empty-orbit span:nth-child(3) { --angle: 18deg; background: var(--green); }
+.empty-orbit span:nth-child(4) { --angle: 90deg; background: var(--orange); }
+.empty-orbit span:nth-child(5) { --angle: 162deg; background: var(--purple); }
+@keyframes orbit-spin { from { transform: translateY(-50%) rotate(0); } to { transform: translateY(-50%) rotate(360deg); } }
 
 .project-view { max-width: 1280px; margin: 0 auto; }
 .project-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 30px; padding-bottom: 36px; border-bottom: 1px solid var(--line); }

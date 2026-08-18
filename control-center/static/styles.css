@@ -172,6 +172,9 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .project-modal label:not(.github-checkbox) { display: grid; gap: 7px; margin: 14px 0; color: var(--muted); font-size: 12px; font-weight: 750; }
 .project-modal input, .project-modal select { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: white; color: var(--ink); outline: none; }
 .project-modal input:focus, .project-modal select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(50,148,226,.13); }
+.folder-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.folder-picker input[readonly] { overflow: hidden; background: #f7f4ed; color: var(--muted); text-overflow: ellipsis; cursor: default; }
+.folder-picker .secondary { padding: 10px 13px; white-space: nowrap; }
 .github-checkbox { display: flex; align-items: center; gap: 9px; margin: 17px 0; font-size: 13px; }
 .modal-error { min-height: 19px; color: #9f2724; font-size: 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }

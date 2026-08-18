@@ -18,6 +18,7 @@ from control_center import (  # noqa: E402
     EventLog,
     ProviderRunner,
     SessionManager,
+    choose_folder,
     slugify,
 )
 
@@ -50,6 +51,25 @@ class ControlCenterTests(unittest.TestCase):
     def test_slugify(self):
         self.assertEqual(slugify("My Cool Site!"), "my-cool-site")
         self.assertEqual(slugify("***"), "website")
+
+    def test_macos_folder_picker_returns_selected_absolute_path(self):
+        selected = self.root / "chosen"
+        selected.mkdir()
+        completed = mock.Mock(returncode=0, stdout=str(selected) + "/\n", stderr="")
+        with mock.patch("control_center.platform.system", return_value="Darwin"), mock.patch(
+            "control_center.subprocess.run", return_value=completed
+        ) as run:
+            self.assertEqual(choose_folder(str(self.root), "Choose a project"), str(selected.resolve()))
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], "osascript")
+        self.assertEqual(command[-2:], ["Choose a project", str(self.root)])
+
+    def test_folder_picker_cancel_is_not_an_error(self):
+        completed = mock.Mock(returncode=0, stdout="__WK_CANCELLED__\n", stderr="")
+        with mock.patch("control_center.platform.system", return_value="Darwin"), mock.patch(
+            "control_center.subprocess.run", return_value=completed
+        ):
+            self.assertIsNone(choose_folder(str(self.root)))
 
     def test_create_project_installs_kit_and_initial_commit(self):
         parent = self.root / "projects"

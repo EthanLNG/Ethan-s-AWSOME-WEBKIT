@@ -109,10 +109,20 @@
       </div>
       <div id="createFields">
         <label>Website name<input id="newName" autocomplete="off" placeholder="My brilliant website"></label>
-        <label>Parent folder<input id="newParent" autocomplete="off" placeholder="~/Projects"></label>
+        <label>Parent folder
+          <span class="folder-picker">
+            <input id="newParent" readonly placeholder="No folder selected">
+            <button class="secondary" type="button" data-folder-target="newParent" data-folder-purpose="parent">Choose folder</button>
+          </span>
+        </label>
       </div>
       <div id="existingFields" hidden>
-        <label>Project folder<input id="existingPath" autocomplete="off" placeholder="~/Projects/my-website"></label>
+        <label>Project folder
+          <span class="folder-picker">
+            <input id="existingPath" readonly placeholder="No folder selected">
+            <button class="secondary" type="button" data-folder-target="existingPath" data-folder-purpose="existing">Choose folder</button>
+          </span>
+        </label>
       </div>
       <label>Agent provider<select id="projectProviderSelect"></select></label>
       <label class="github-checkbox"><input id="githubReminder" type="checkbox" checked><span>Remind me to publish this project to GitHub</span></label>

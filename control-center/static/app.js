@@ -436,6 +436,25 @@ function setProjectMode(mode) {
   $("#saveProject").textContent = mode === "create" ? "Create website" : "Add project";
 }
 
+async function chooseProjectFolder(event) {
+  const button = event.currentTarget;
+  const field = $(`#${button.dataset.folderTarget}`);
+  const errorNode = $("#projectError");
+  errorNode.textContent = "";
+  setBusy(button, true, "Choosing…");
+  try {
+    const result = await api("/api/system/choose-folder", {
+      method: "POST",
+      body: { initial: field.value, purpose: button.dataset.folderPurpose },
+    });
+    if (!result.cancelled && result.path) {
+      field.value = result.path;
+      field.title = result.path;
+    }
+  } catch (error) { errorNode.textContent = error.message; }
+  finally { setBusy(button, false); }
+}
+
 async function saveProject(event) {
   event.preventDefault();
   const button = $("#saveProject");
@@ -512,6 +531,7 @@ document.querySelectorAll("[data-hotkey-setting]").forEach((button) => button.ad
 document.querySelectorAll('input[name="interactionMode"]').forEach((input) => input.addEventListener("change", renderHotkeySettings));
 document.addEventListener("keydown", captureHotkey, true);
 document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("click", () => setProjectMode(button.dataset.projectMode)));
+document.querySelectorAll("[data-folder-target]").forEach((button) => button.addEventListener("click", chooseProjectFolder));
 $("#projectForm").addEventListener("submit", saveProject);
 $("#projectDialogClose").addEventListener("click", () => $("#projectDialog").close());
 $("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").close());

@@ -83,6 +83,74 @@ def valid_hotkey(value):
     )
 
 
+def choose_folder(initial=None, prompt="Choose a folder"):
+    """Open the host OS folder picker and return an absolute path or None.
+
+    Browsers deliberately do not reveal an absolute directory path from a
+    regular file input. The Control Center is local software, so its localhost
+    backend can safely ask the operating system and return only the folder the
+    user explicitly selected.
+    """
+    candidate = Path(initial or "").expanduser()
+    start = candidate if candidate.is_dir() else Path.home()
+    system = platform.system()
+    if system == "Darwin":
+        script = """on run argv
+set promptText to item 1 of argv
+set startPath to POSIX file (item 2 of argv)
+try
+  set selectedFolder to choose folder with prompt promptText default location startPath
+  return POSIX path of selectedFolder
+on error number -128
+  return "__WK_CANCELLED__"
+end try
+end run"""
+        command = ["osascript", "-e", script, prompt, str(start)]
+    elif system == "Windows":
+        script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$picker = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$picker.Description = $args[0]; $picker.SelectedPath = $args[1]; "
+            "if ($picker.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ $picker.SelectedPath } else { '__WK_CANCELLED__' }"
+        )
+        executable = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not executable:
+            raise ControlCenterError("The Windows folder picker is unavailable.", 501)
+        command = [executable, "-NoProfile", "-Command", script, prompt, str(start)]
+    else:
+        zenity = shutil.which("zenity")
+        kdialog = shutil.which("kdialog")
+        if zenity:
+            command = [
+                zenity, "--file-selection", "--directory",
+                "--title={}".format(prompt), "--filename={}/".format(start),
+            ]
+        elif kdialog:
+            command = [kdialog, "--getexistingdirectory", str(start), "--title", prompt]
+        else:
+            raise ControlCenterError(
+                "No native folder picker was found. Install Zenity or KDialog and try again.", 501
+            )
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        raise ControlCenterError("The folder picker timed out. Please try again.", 408)
+    except OSError as exc:
+        raise ControlCenterError("Could not open the folder picker: {}".format(exc), 500)
+    selected = result.stdout.strip()
+    if selected == "__WK_CANCELLED__" or (result.returncode != 0 and not selected):
+        return None
+    if result.returncode != 0:
+        raise ControlCenterError(
+            "The folder picker failed: {}".format(result.stderr.strip() or "unknown error"), 500
+        )
+    selected_path = Path(selected).expanduser().resolve()
+    if not selected_path.is_dir():
+        raise ControlCenterError("The selected folder is no longer available.", 404)
+    return str(selected_path)
+
+
 def normalized_settings(value):
     value = value if isinstance(value, dict) else {}
     dictation_mode = value.get("dictationMode", DEFAULT_SETTINGS["dictationMode"])
@@ -1114,6 +1182,15 @@ class ControlCenter:
             "system": self.projects.system_status(),
             "settings": normalized_settings(state.get("settings")),
         }
+
+    def choose_folder(self, initial=None, purpose=None):
+        prompt = (
+            "Choose the parent folder for the new website"
+            if purpose == "parent"
+            else "Choose an existing website project"
+        )
+        selected = choose_folder(initial, prompt)
+        return {"path": selected, "cancelled": selected is None}
 
     def save_settings(self, settings):
         submitted = settings if isinstance(settings, dict) else {}

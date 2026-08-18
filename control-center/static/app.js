@@ -32,6 +32,7 @@ const state = {
   projectMode: "create",
   confirmCallback: null,
   pendingAttachments: [],
+  projectsSignature: "",
 };
 let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
 let hotkeyCapture = null;
@@ -621,11 +622,16 @@ async function saveProviders() {
 
 async function refreshProjects() {
   const data = await api("/api/projects");
+  const signature = JSON.stringify(data.projects);
+  const changed = signature !== state.projectsSignature;
   state.projects = data.projects;
+  state.projectsSignature = signature;
   if (state.selectedProjectId && !state.projects.some((p) => p.id === state.selectedProjectId)) state.selectedProjectId = null;
   if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
-  renderProjects();
-  renderProjectView();
+  if (changed) {
+    renderProjects();
+    renderProjectView();
+  }
   const session = currentSession();
   if (session) $("#chatStatus").className = `live-dot ${session.status}`;
 }
@@ -635,6 +641,7 @@ async function initialize() {
     const data = await api("/api/bootstrap");
     state.providers = data.providers;
     state.projects = data.projects;
+    state.projectsSignature = JSON.stringify(data.projects);
     state.system = data.system;
     state.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
     if (state.projects.length) state.selectedProjectId = state.projects[0].id;

@@ -98,10 +98,10 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-card.active strong { margin-top: 34px; }
 .color-card.active small { display: inline-block; margin-top: 11px; vertical-align: middle; }
 .color-card.active .emoji,
-.color-card.active small,
 .color-card.active::after { transform-origin: center; will-change: transform; animation: active-circle-pulse 4s ease-in-out infinite; }
-.color-card.active small { transform-origin: left center; }
+.color-card.active small { transform-origin: left center; will-change: transform; animation: active-label-pulse 4s ease-in-out infinite; }
 @keyframes active-circle-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+@keyframes active-label-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.018); } }
 
 .session-list { display: grid; gap: 10px; }
 .session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); cursor: pointer; transition: border-color .15s ease, transform .15s ease; }

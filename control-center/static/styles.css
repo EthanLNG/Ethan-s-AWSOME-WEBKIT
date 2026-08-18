@@ -97,6 +97,9 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-card.active { background: color-mix(in srgb, var(--color) 9%, var(--panel)); }
 .color-card.active strong { margin-top: 34px; }
 .color-card.active small { display: inline-block; margin-top: 11px; vertical-align: middle; }
+.color-card.active .emoji { transform-origin: center; animation: active-circle-pulse 3.2s ease-in-out infinite; }
+.color-card.active::after { transform-origin: center; animation: active-circle-pulse 3.2s ease-in-out infinite .25s; }
+@keyframes active-circle-pulse { 0%, 100% { transform: scale(.96); } 50% { transform: scale(1.07); } }
 
 .session-list { display: grid; gap: 10px; }
 .session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); cursor: pointer; transition: border-color .15s ease, transform .15s ease; }

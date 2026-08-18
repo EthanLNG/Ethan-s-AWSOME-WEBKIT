@@ -122,6 +122,11 @@ Read `.webkit/feedback/<slug>/feedback.json`. Full schema:
           "role": "primary"            // "primary" | "intersecting"
         }
       ],
+      "uiState": {          // null on the normal page; captured for top-layer UI
+        "surfaces": [       // review reopens the same dialog/popover automatically
+          { "kind": "dialog", "selector": "#settingsDialog" }
+        ]
+      },
       "abcState": null,     // snapshot of window.__abc at capture; null when no experiments
                             // live, else a map keyed by scope id, e.g.
                             //   { "cta": { "current": "B", "letters": "AB" } }
@@ -153,7 +158,10 @@ instead of a single change:
 Use `context[]` to find the target: try `context[0].selector` first; if the
 DOM shifted since capture, fall back to the rect + the other context entries.
 The user's `text` is the instruction; the geometry is only there to tell you
-*where*. If `voiceNote` is non-null, transcribe it locally before interpreting
+*where*. A non-null `uiState` means the point was drawn inside a dialog or
+popover. Edit the selected elements normally; the overlay reopens those
+surfaces automatically during review so the user sees the same UI state.
+If `voiceNote` is non-null, transcribe it locally before interpreting
 the request:
 
 ```sh

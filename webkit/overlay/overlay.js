@@ -587,6 +587,22 @@
     });
   }
 
+  function captureUiState() {
+    const surfaces = [];
+    for (const dialog of document.querySelectorAll('dialog[open]')) {
+      const selector = buildSelector(dialog);
+      if (selector) surfaces.push({ kind: 'dialog', selector });
+    }
+    try {
+      for (const popover of document.querySelectorAll(':popover-open')) {
+        if (popover === host) continue;
+        const selector = buildSelector(popover);
+        if (selector) surfaces.push({ kind: 'popover', selector });
+      }
+    } catch (e) { /* :popover-open is unavailable in older browsers */ }
+    return surfaces.length ? { surfaces } : null;
+  }
+
   // ===== abc interop =========================================================
   // Every window.__abc touch is optional-chained: the manager only exists on
   // pages that carry an abc experiment, and its shape is another script's.
@@ -692,6 +708,7 @@
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
       anchor: existing ? (existing.anchor || 'doc') : (draft.anchor || 'doc'),
       context: captureContext(draft.rect),
+      uiState: captureUiState(),
       abcState: snapshotAbc(),
       text: draft.text.trim(),
       voiceNote: draft.voiceNote || null,
@@ -1661,6 +1678,7 @@
     restoreSwap();
     if (!IS_BEFORE) S.side = 'after';
     restorePageAbc();
+    closeAutoOpenedReviewSurfaces();
     bar.hidden = true;
     SS.remove('wk:reviewCursor');
     renderPins();
@@ -1693,6 +1711,7 @@
         "This point's page no longer exists on this side — the agent may have removed or renamed it.");
       return;
     }
+    restoreReviewSurfaces(pt);
     if (S.side === 'before' && !IS_BEFORE) resyncSwap(pt);   // per-point swap container
     renderPins();
     updateBar();
@@ -1914,6 +1933,7 @@
   function markSide(side) {
     S.side = side;
     LS.set('wk:side', side);   // sticky preference; the document is authoritative on load
+    restoreReviewSurfaces(currentPoint());
     updateBar();
   }
 
@@ -2085,6 +2105,40 @@
   }
 
   function currentPoint() { return S.reviewList[S.cursor] || null; }
+
+  let autoOpenedReviewSurfaces = [];
+  function closeAutoOpenedReviewSurfaces() {
+    for (const entry of autoOpenedReviewSurfaces.reverse()) {
+      try {
+        if (entry.kind === 'dialog' && entry.element.open) entry.element.close();
+        else if (entry.kind === 'popover' && entry.element.matches(':popover-open')) entry.element.hidePopover();
+      } catch (e) { /* the page may have replaced the surface */ }
+    }
+    autoOpenedReviewSurfaces = [];
+  }
+  function restoreReviewSurfaces(pt) {
+    closeAutoOpenedReviewSurfaces();
+    const surfaces = pt && pt.uiState && Array.isArray(pt.uiState.surfaces)
+      ? pt.uiState.surfaces
+      : [];
+    for (const surface of surfaces) {
+      if (!surface || !surface.selector) continue;
+      let element = null;
+      try { element = document.querySelector(surface.selector); } catch (e) { continue; }
+      if (!element) continue;
+      try {
+        if (surface.kind === 'dialog' &&
+          typeof HTMLDialogElement !== 'undefined' &&
+          element instanceof HTMLDialogElement && !element.open) {
+          element.showModal();
+          autoOpenedReviewSurfaces.push({ kind: 'dialog', element });
+        } else if (surface.kind === 'popover' && !element.matches(':popover-open')) {
+          element.showPopover();
+          autoOpenedReviewSurfaces.push({ kind: 'popover', element });
+        }
+      } catch (e) { /* surface is no longer openable on this page version */ }
+    }
+  }
   function currentHandled() {
     const pt = currentPoint();
     return pt ? S.handledById.get(pt.id) : null;

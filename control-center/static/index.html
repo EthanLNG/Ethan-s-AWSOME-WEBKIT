@@ -144,8 +144,11 @@
             <b>Drop project references here</b>
             <small>Logos, imagery, design systems, copy, PDFs, whole reference folders, or other useful material. Optional.</small>
             <span class="project-assets-actions">
-              <button class="secondary" id="chooseProjectAssets" type="button">Choose files</button>
-              <button class="secondary" id="chooseProjectFolder" type="button">Choose folder</button>
+              <button class="secondary" id="projectAssetPicker" type="button" aria-expanded="false" aria-controls="projectAssetMenu">Choose files or folder</button>
+              <span class="project-asset-menu" id="projectAssetMenu" hidden>
+                <button type="button" id="chooseProjectAssets"><b>Individual files</b><small>Select one or several files</small></button>
+                <button type="button" id="chooseProjectFolder"><b>Whole folder</b><small>Keep its nested structure</small></button>
+              </span>
             </span>
           </div>
           <div class="project-asset-list" id="projectAssetList" hidden></div>

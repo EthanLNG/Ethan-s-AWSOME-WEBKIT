@@ -258,11 +258,31 @@
   // UI disappearing behind them. Pointer-events still pass through whenever
   // the drawing layer is in browse mode.
   let topLayerRaiseQueued = false;
+  function activeModalDialog() {
+    if (typeof HTMLDialogElement === 'undefined') return null;
+    const openDialogs = [...document.querySelectorAll('dialog[open]')];
+    for (let index = openDialogs.length - 1; index >= 0; index -= 1) {
+      try {
+        if (openDialogs[index].matches(':modal')) return openDialogs[index];
+      } catch (e) { /* :modal is unavailable in older browsers */ }
+    }
+    return null;
+  }
+
   function raiseAboveTopLayer() {
     topLayerRaiseQueued = false;
+    // A showModal() dialog makes every node outside itself inert. Merely
+    // putting WebKit later in the top-layer stack keeps the pill visible, but
+    // its drawing surface still cannot receive pointer events. Temporarily
+    // parent the host inside the active modal so Option-drag works there too;
+    // move it back to <html> as soon as that modal closes.
+    const container = activeModalDialog() || document.documentElement;
+    const moving = host.parentNode !== container;
     if (typeof host.showPopover !== 'function') return;
     try {
-      if (host.matches(':popover-open')) host.hidePopover();
+      if (moving && host.matches(':popover-open')) host.hidePopover();
+      if (moving) container.appendChild(host);
+      else if (host.matches(':popover-open')) host.hidePopover();
       host.showPopover();
     } catch (e) { /* older browser or a transient detached host */ }
   }
@@ -279,7 +299,10 @@
   // A tidy-minded host page (or a framework re-render) may remove foreign
   // nodes from the tree — quietly re-append ourselves.
   new MutationObserver((records) => {
-    if (!host.isConnected) document.documentElement.appendChild(host);
+    if (!host.isConnected) {
+      document.documentElement.appendChild(host);
+      queueTopLayerRaise();
+    }
     if (records.some((record) => record.type === 'attributes' &&
       typeof HTMLDialogElement !== 'undefined' &&
       record.target instanceof HTMLDialogElement && record.target.open)) {

@@ -1020,14 +1020,30 @@ $("#projectBack").addEventListener("click", () => {
   $("#projectError").textContent = "";
   renderProjectWizard();
 });
+function setProjectAssetMenu(open) {
+  $("#projectAssetMenu").hidden = !open;
+  $("#projectAssetPicker").setAttribute("aria-expanded", String(open));
+}
+$("#projectAssetPicker").addEventListener("click", (event) => {
+  event.stopPropagation();
+  setProjectAssetMenu($("#projectAssetMenu").hidden);
+});
 $("#chooseProjectAssets").addEventListener("click", (event) => {
   event.stopPropagation();
+  setProjectAssetMenu(false);
   $("#projectAssets").click();
 });
 $("#chooseProjectFolder").addEventListener("click", (event) => {
   event.stopPropagation();
+  setProjectAssetMenu(false);
   $("#projectFolder").click();
 });
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".project-assets-actions")) setProjectAssetMenu(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("#projectAssetMenu").hidden) setProjectAssetMenu(false);
+}, true);
 $("#projectAssets").addEventListener("change", async (event) => {
   await addProjectAssets(event.target.files || []);
   event.target.value = "";

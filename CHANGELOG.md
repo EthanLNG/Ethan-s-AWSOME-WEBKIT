@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.7.0 (2026-08-18) — Custom preview shortcuts
+
+- The Control Center now lets each user record any non-modifier key for opening
+  the feedback tool and starting or stopping voice input.
+- All three website controls—open/close, voice, and Option—stay visible in the
+  Control Center top bar and are explained together in Settings.
+- Shortcut preferences persist locally, flow into new project configs, and
+  restart active previews with environment overrides.
+- Removed the redundant bottom-left **Add or create** button. Project creation
+  remains available from the clear top-bar **+ Project** action; the website
+  overlay remains keyboard-only with no corner launcher.
+
 ## v0.6.1 (2026-08-18) — Click-first website interaction
 
 - Feedback mode now leaves the website directly clickable by default. Hold

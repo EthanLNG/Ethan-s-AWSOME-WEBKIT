@@ -64,18 +64,42 @@ agent app. The controller will invoke you again for the next transition.
 DEFAULT_SETTINGS = {
     "dictationMode": "speech",
     "interactionMode": "browse-default",
+    "toggleHotkey": "KeyC",
+    "dictateHotkey": "KeyV",
 }
+
+HOTKEY_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
+MODIFIER_HOTKEYS = {
+    "AltLeft", "AltRight", "ControlLeft", "ControlRight",
+    "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight", "Escape",
+}
+
+
+def valid_hotkey(value):
+    return (
+        isinstance(value, str)
+        and HOTKEY_CODE.fullmatch(value) is not None
+        and value not in MODIFIER_HOTKEYS
+    )
 
 
 def normalized_settings(value):
     value = value if isinstance(value, dict) else {}
     dictation_mode = value.get("dictationMode", DEFAULT_SETTINGS["dictationMode"])
     interaction_mode = value.get("interactionMode", DEFAULT_SETTINGS["interactionMode"])
+    toggle_hotkey = value.get("toggleHotkey", DEFAULT_SETTINGS["toggleHotkey"])
+    dictate_hotkey = value.get("dictateHotkey", DEFAULT_SETTINGS["dictateHotkey"])
+    toggle_hotkey = toggle_hotkey if valid_hotkey(toggle_hotkey) else "KeyC"
+    dictate_hotkey = dictate_hotkey if valid_hotkey(dictate_hotkey) else "KeyV"
+    if dictate_hotkey == toggle_hotkey:
+        dictate_hotkey = "KeyC" if toggle_hotkey == "KeyV" else "KeyV"
     return {
         "dictationMode": dictation_mode if dictation_mode in ("speech", "voice-note") else "speech",
         "interactionMode": interaction_mode
         if interaction_mode in ("browse-default", "draw-default")
         else "browse-default",
+        "toggleHotkey": toggle_hotkey,
+        "dictateHotkey": dictate_hotkey,
     }
 
 
@@ -465,7 +489,10 @@ class ProjectManager:
             "palette": palette,
             "browser": {"mode": "auto", "app_name": "Google Chrome"},
             "feedback_dir": ".webkit/feedback",
-            "hotkeys": {"toggle": "KeyC", "dictate": "KeyV"},
+            "hotkeys": {
+                "toggle": settings["toggleHotkey"],
+                "dictate": settings["dictateHotkey"],
+            },
             "dictation": {"mode": settings["dictationMode"]},
             "interaction": {"mode": settings["interactionMode"]},
         }
@@ -856,6 +883,8 @@ class SessionManager:
         settings = normalized_settings(self.store.read().get("settings"))
         env["WK_DICTATION_MODE"] = settings["dictationMode"]
         env["WK_INTERACTION_MODE"] = settings["interactionMode"]
+        env["WK_HOTKEY_TOGGLE"] = settings["toggleHotkey"]
+        env["WK_HOTKEY_DICTATE"] = settings["dictateHotkey"]
         self._claim_lock(config, session["color"], site_root)
         server = worktree / "webkit" / "server" / "preview-server.py"
         runtime.preview_process = subprocess.Popen(
@@ -1091,13 +1120,21 @@ class ControlCenter:
         current = normalized_settings(self.store.read().get("settings"))
         dictation_mode = submitted.get("dictationMode", current["dictationMode"])
         interaction_mode = submitted.get("interactionMode", current["interactionMode"])
+        toggle_hotkey = submitted.get("toggleHotkey", current["toggleHotkey"])
+        dictate_hotkey = submitted.get("dictateHotkey", current["dictateHotkey"])
         if dictation_mode not in ("speech", "voice-note"):
             raise ControlCenterError("Choose browser speech or agent voice notes.")
         if interaction_mode not in ("browse-default", "draw-default"):
             raise ControlCenterError("Choose normal website clicks or immediate rectangle drawing.")
+        if not valid_hotkey(toggle_hotkey) or not valid_hotkey(dictate_hotkey):
+            raise ControlCenterError("Choose a regular key—not a modifier or Escape—for each shortcut.")
+        if toggle_hotkey == dictate_hotkey:
+            raise ControlCenterError("Open/close and dictation need different shortcut keys.")
         saved = {
             "dictationMode": dictation_mode,
             "interactionMode": interaction_mode,
+            "toggleHotkey": toggle_hotkey,
+            "dictateHotkey": dictate_hotkey,
         }
         self.store.update(lambda state: state.update({"settings": saved}))
         refresh = self.sessions.refresh_previews_for_settings()

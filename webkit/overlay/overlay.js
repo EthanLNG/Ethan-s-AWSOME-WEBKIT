@@ -75,10 +75,15 @@
   // overrides from the config's `hotkeys` block; these are the defaults.
   const HOTKEY_TOGGLE = DS.wkHotkeyToggle || 'KeyC';
   const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'KeyV';
-  const keyLabel = (code) => code === 'Backquote' ? '`'
-    : /^Key[A-Z]$/.test(code) ? code.slice(3)
+  const KEY_LABELS = {
+    Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
+    Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
+    Space: 'Space', Enter: '↵', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
+  };
+  const keyLabel = (code) => KEY_LABELS[code]
+    || (/^Key[A-Z]$/.test(code) ? code.slice(3)
       : /^Digit[0-9]$/.test(code) ? code.slice(5)
-        : code;
+        : code);
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
   const MIC_TITLE = DICTATION_MODE === 'voice-note'

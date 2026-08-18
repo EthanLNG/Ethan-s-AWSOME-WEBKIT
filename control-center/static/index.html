@@ -12,6 +12,11 @@
       <span class="brand-mark" aria-hidden="true">W</span>
       <span><strong>AWESOME</strong><small>WEBKIT</small></span>
     </button>
+    <button class="shortcut-guide" id="shortcutGuide" type="button" aria-label="Preview shortcuts; open settings">
+      <span><kbd id="guideToggleKey">C</kbd><small>Tool</small></span>
+      <span><kbd id="guideDictateKey">V</kbd><small>Voice</small></span>
+      <span><kbd>⌥</kbd><small id="guideOptionAction">Draw</small></span>
+    </button>
     <div class="system-status" id="systemStatus" aria-live="polite"></div>
     <button class="secondary small" id="settingsButton" type="button">Settings</button>
     <button class="secondary small" id="installShortcutButton" type="button">Desktop shortcut</button>
@@ -22,7 +27,6 @@
     <aside class="project-rail">
       <p class="eyebrow">Projects</p>
       <nav id="projectList" aria-label="Website projects"></nav>
-      <button class="rail-add" id="railAddButton" type="button">Add or create</button>
     </aside>
 
     <section class="workspace" id="workspace">
@@ -133,19 +137,38 @@
     <form method="dialog" id="settingsForm">
       <button class="dialog-close" id="settingsDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Control Center settings</p>
-      <h2>How should the mic work?</h2>
-      <p>Choose one mode for all WebKit previews opened by this Control Center.</p>
-      <div class="settings-options">
-        <label>
-          <input type="radio" name="dictationMode" value="speech">
-          <span><b>Browser speech-to-text</b><small>Default. Chrome/Google writes recognized words into the note.</small></span>
-        </label>
-        <label id="voiceNoteOption">
-          <input type="radio" name="dictationMode" value="voice-note">
-          <span><b>Agent voice notes</b><small>Records audio with no browser transcription. The agent transcribes it locally with Whisper.</small></span>
-        </label>
+      <h2>Preview shortcuts</h2>
+      <p>These are the only three controls you need on the website. Click either letter shortcut to change it.</p>
+      <div class="hotkey-options">
+        <button class="hotkey-picker" type="button" data-hotkey-setting="toggleHotkey">
+          <span><b>Open / close feedback</b><small>Click, then press your preferred key</small></span>
+          <kbd id="settingsToggleKey">C</kbd>
+        </button>
+        <button class="hotkey-picker" type="button" data-hotkey-setting="dictateHotkey">
+          <span><b>Start / stop voice</b><small>Click, then press your preferred key</small></span>
+          <kbd id="settingsDictateKey">V</kbd>
+        </button>
+        <div class="hotkey-picker fixed">
+          <span><b id="settingsOptionAction">Draw a rectangle</b><small>Hold while dragging on the website</small></span>
+          <kbd>⌥</kbd>
+        </div>
       </div>
-      <p class="capability-note" id="voiceCapability"></p>
+      <p class="capability-note shortcut-note">Shortcuts pause while you type in a text field, so the selected letters remain typable.</p>
+      <div class="settings-section">
+        <h2>How should the mic work?</h2>
+        <p>Choose one mode for all WebKit previews opened by this Control Center.</p>
+        <div class="settings-options">
+          <label>
+            <input type="radio" name="dictationMode" value="speech">
+            <span><b>Browser speech-to-text</b><small>Default. Chrome/Google writes recognized words into the note.</small></span>
+          </label>
+          <label id="voiceNoteOption">
+            <input type="radio" name="dictationMode" value="voice-note">
+            <span><b>Agent voice notes</b><small>Records audio with no browser transcription. The agent transcribes it locally with Whisper.</small></span>
+          </label>
+        </div>
+        <p class="capability-note" id="voiceCapability"></p>
+      </div>
       <div class="settings-section">
         <h2>How should the website behave?</h2>
         <p>Choose what a normal click does while the feedback overlay is open.</p>

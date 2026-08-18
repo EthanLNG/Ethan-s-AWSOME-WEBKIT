@@ -265,10 +265,25 @@ _HOTKEY_CODE = re.compile(r"^[A-Za-z0-9]+$")
 _HOTKEYS = CONFIG.get("hotkeys", {})
 if not isinstance(_HOTKEYS, dict):
     _HOTKEYS = {}
+_HOTKEY_VALUES = {}
+_HOTKEY_RESERVED = {
+    "AltLeft", "AltRight", "ControlLeft", "ControlRight", "Escape",
+    "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight",
+}
+for _name, _default in (("toggle", "KeyC"), ("dictate", "KeyV")):
+    _value = os.environ.get("WK_HOTKEY_{}".format(_name.upper()), _HOTKEYS.get(_name, _default))
+    if (
+        not isinstance(_value, str)
+        or not _HOTKEY_CODE.fullmatch(_value)
+        or _value in _HOTKEY_RESERVED
+    ):
+        _value = _default
+    _HOTKEY_VALUES[_name] = _value
+if _HOTKEY_VALUES["dictate"] == _HOTKEY_VALUES["toggle"]:
+    _HOTKEY_VALUES["dictate"] = "KeyC" if _HOTKEY_VALUES["toggle"] == "KeyV" else "KeyV"
 _HOTKEY_ATTRS = "".join(
-    ' data-wk-hotkey-{}="{}"'.format(name, _HOTKEYS[name])
+    ' data-wk-hotkey-{}="{}"'.format(name, _HOTKEY_VALUES[name])
     for name in ("toggle", "dictate")
-    if isinstance(_HOTKEYS.get(name), str) and _HOTKEY_CODE.match(_HOTKEYS[name])
 )
 _DICTATION = CONFIG.get("dictation", {})
 if not isinstance(_DICTATION, dict):

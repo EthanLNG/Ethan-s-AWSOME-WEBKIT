@@ -59,13 +59,14 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.6.1")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.7.0")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
         self.assertEqual(config["default_page"], "index.html")
         self.assertEqual(config["dictation"]["mode"], "speech")
         self.assertEqual(config["interaction"]["mode"], "browse-default")
+        self.assertEqual(config["hotkeys"], {"toggle": "KeyC", "dictate": "KeyV"})
         log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=project_path, text=True, capture_output=True, check=True)
         self.assertEqual(log.stdout.strip(), "Create website with AWESOME WEBKIT")
         self.assertFalse(subprocess.run(["git", "status", "--porcelain"], cwd=project_path, text=True, capture_output=True, check=True).stdout)
@@ -128,9 +129,13 @@ class ControlCenterTests(unittest.TestCase):
             result = self.app.save_settings({
                 "dictationMode": "voice-note",
                 "interactionMode": "draw-default",
+                "toggleHotkey": "Backquote",
+                "dictateHotkey": "KeyD",
             })
         self.assertEqual(result["settings"]["dictationMode"], "voice-note")
         self.assertEqual(result["settings"]["interactionMode"], "draw-default")
+        self.assertEqual(result["settings"]["toggleHotkey"], "Backquote")
+        self.assertEqual(result["settings"]["dictateHotkey"], "KeyD")
         self.assertEqual(self.app.bootstrap()["settings"]["dictationMode"], "voice-note")
         self.assertEqual(self.app.bootstrap()["settings"]["interactionMode"], "draw-default")
         self.assertEqual(result["previews"], {"restarted": 2, "deferred": 1})
@@ -149,7 +154,25 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(self.app.bootstrap()["settings"], {
             "dictationMode": "voice-note",
             "interactionMode": "browse-default",
+            "toggleHotkey": "KeyC",
+            "dictateHotkey": "KeyV",
         })
+
+    def test_hotkey_settings_reject_reserved_or_duplicate_keys(self):
+        with self.assertRaisesRegex(Exception, "not a modifier or Escape"):
+            self.app.save_settings({"toggleHotkey": "AltLeft"})
+        with self.assertRaisesRegex(Exception, "different shortcut keys"):
+            self.app.save_settings({"toggleHotkey": "KeyV", "dictateHotkey": "KeyV"})
+
+    def test_custom_hotkeys_flow_into_new_project_config(self):
+        (self.root / "index.html").write_text("<title>Hotkeys</title>", encoding="utf-8")
+        self.app.store.update(lambda state: state.update({"settings": {
+            "toggleHotkey": "Slash",
+            "dictateHotkey": "Space",
+        }}))
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6351):
+            config = self.app.projects._make_config(self.root)
+        self.assertEqual(config["hotkeys"], {"toggle": "Slash", "dictate": "Space"})
 
     def test_voice_transcription_status_requires_local_engine(self):
         with mock.patch("control_center.shutil.which", return_value=None):

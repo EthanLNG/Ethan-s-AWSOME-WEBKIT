@@ -6,17 +6,30 @@ const COLORS = [
   { slug: "purple", emoji: "🟣", hex: "#9b6bd6" },
 ];
 
+const DEFAULT_SETTINGS = {
+  dictationMode: "speech",
+  interactionMode: "browse-default",
+  toggleHotkey: "KeyC",
+  dictateHotkey: "KeyV",
+};
+const RESERVED_HOTKEYS = new Set([
+  "AltLeft", "AltRight", "ControlLeft", "ControlRight",
+  "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight", "Escape",
+]);
+
 const state = {
   providers: [],
   projects: [],
   system: {},
-  settings: { dictationMode: "speech", interactionMode: "browse-default" },
+  settings: { ...DEFAULT_SETTINGS },
   selectedProjectId: null,
   chatSessionId: null,
   chatCursor: 0,
   projectMode: "create",
   confirmCallback: null,
 };
+let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
+let hotkeyCapture = null;
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -41,6 +54,66 @@ function setBusy(button, busy, label) {
   if (!button.dataset.label) button.dataset.label = button.textContent;
   button.disabled = busy;
   button.textContent = busy ? label : button.dataset.label;
+}
+
+function hotkeyLabel(code) {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  return ({ Backquote: "`", Space: "Space", Enter: "↵", ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→" })[code] || code;
+}
+
+function renderShortcutGuide() {
+  $("#guideToggleKey").textContent = hotkeyLabel(state.settings.toggleHotkey || "KeyC");
+  $("#guideDictateKey").textContent = hotkeyLabel(state.settings.dictateHotkey || "KeyV");
+  const optionAction = state.settings.interactionMode === "draw-default" ? "Click" : "Draw";
+  $("#guideOptionAction").textContent = optionAction;
+}
+
+function renderHotkeySettings() {
+  $("#settingsToggleKey").textContent = hotkeyLabel(hotkeyDraft.toggleHotkey);
+  $("#settingsDictateKey").textContent = hotkeyLabel(hotkeyDraft.dictateHotkey);
+  const selectedInteraction = document.querySelector('input[name="interactionMode"]:checked');
+  const interactionMode = selectedInteraction ? selectedInteraction.value : state.settings.interactionMode;
+  $("#settingsOptionAction").textContent = interactionMode === "draw-default"
+    ? "Use the website"
+    : "Draw a rectangle";
+  document.querySelectorAll("[data-hotkey-setting]").forEach((button) => {
+    const listening = button.dataset.hotkeySetting === hotkeyCapture;
+    button.classList.toggle("listening", listening);
+    button.querySelector("small").textContent = listening
+      ? "Press a key now · Escape cancels"
+      : "Click, then press your preferred key";
+  });
+}
+
+function beginHotkeyCapture(event) {
+  hotkeyCapture = event.currentTarget.dataset.hotkeySetting;
+  $("#settingsError").textContent = "";
+  renderHotkeySettings();
+}
+
+function captureHotkey(event) {
+  if (!hotkeyCapture || !$("#settingsDialog").open) return;
+  event.preventDefault();
+  event.stopPropagation();
+  if (event.code === "Escape") {
+    hotkeyCapture = null;
+    renderHotkeySettings();
+    return;
+  }
+  if (!event.code || event.code === "Unidentified" || RESERVED_HOTKEYS.has(event.code)) {
+    $("#settingsError").textContent = "Choose a regular key—not a modifier or Escape.";
+    return;
+  }
+  const otherSetting = hotkeyCapture === "toggleHotkey" ? "dictateHotkey" : "toggleHotkey";
+  if (hotkeyDraft[otherSetting] === event.code) {
+    $("#settingsError").textContent = "Open/close and voice need different keys.";
+    return;
+  }
+  hotkeyDraft[hotkeyCapture] = event.code;
+  hotkeyCapture = null;
+  $("#settingsError").textContent = "";
+  renderHotkeySettings();
 }
 
 function renderStatus() {
@@ -92,6 +165,12 @@ function openSettings() {
   const interaction = document.querySelector(`input[name="interactionMode"][value="${state.settings.interactionMode}"]`)
     || document.querySelector('input[name="interactionMode"][value="browse-default"]');
   interaction.checked = true;
+  hotkeyDraft = {
+    toggleHotkey: state.settings.toggleHotkey || "KeyC",
+    dictateHotkey: state.settings.dictateHotkey || "KeyV",
+  };
+  hotkeyCapture = null;
+  renderHotkeySettings();
   $("#settingsError").textContent = "";
   $("#settingsDialog").showModal();
 }
@@ -109,9 +188,12 @@ async function saveSettings(event) {
       body: {
         dictationMode: dictationInput ? dictationInput.value : "speech",
         interactionMode: interactionInput ? interactionInput.value : "browse-default",
+        toggleHotkey: hotkeyDraft.toggleHotkey,
+        dictateHotkey: hotkeyDraft.dictateHotkey,
       },
     });
     state.settings = result.settings;
+    renderShortcutGuide();
     $("#settingsDialog").close();
     const restarted = result.previews.restarted || 0;
     const deferred = result.previews.deferred || 0;
@@ -407,9 +489,10 @@ async function initialize() {
     state.providers = data.providers;
     state.projects = data.projects;
     state.system = data.system;
-    state.settings = data.settings || { dictationMode: "speech", interactionMode: "browse-default" };
+    state.settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}) };
     if (state.projects.length) state.selectedProjectId = state.projects[0].id;
     renderStatus();
+    renderShortcutGuide();
     renderProjects();
     renderProjectView();
     if (!state.providers.length) $("#providerDialog").showModal();
@@ -419,15 +502,20 @@ async function initialize() {
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
 
 $("#homeButton").addEventListener("click", () => { state.selectedProjectId = null; renderProjects(); });
-[$("#addProjectButton"), $("#railAddButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
+[$("#addProjectButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
 $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
 $("#settingsButton").addEventListener("click", openSettings);
+$("#shortcutGuide").addEventListener("click", openSettings);
 $("#settingsForm").addEventListener("submit", saveSettings);
+document.querySelectorAll("[data-hotkey-setting]").forEach((button) => button.addEventListener("click", beginHotkeyCapture));
+document.querySelectorAll('input[name="interactionMode"]').forEach((input) => input.addEventListener("change", renderHotkeySettings));
+document.addEventListener("keydown", captureHotkey, true);
 document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("click", () => setProjectMode(button.dataset.projectMode)));
 $("#projectForm").addEventListener("submit", saveProject);
 $("#projectDialogClose").addEventListener("click", () => $("#projectDialog").close());
 $("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").close());
+$("#settingsDialog").addEventListener("close", () => { hotkeyCapture = null; });
 $("#closeChat").addEventListener("click", () => { $("#chatDrawer").hidden = true; state.chatSessionId = null; });
 $("#chatForm").addEventListener("submit", sendChat);
 $("#mergeButton").addEventListener("click", () => askConfirm("merge"));

@@ -36,16 +36,20 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .brand strong, .brand small { display: block; letter-spacing: -.02em; }
 .brand strong { font-size: 15px; line-height: 1; }
 .brand small { margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .16em; }
+.shortcut-guide { display: flex; align-items: center; gap: 10px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; }
+.shortcut-guide > span { display: flex; align-items: center; gap: 4px; }
+.shortcut-guide kbd, .hotkey-picker kbd { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 7px; border: 1px solid #bbb3a6; border-radius: 7px; background: white; box-shadow: 0 2px 0 #cfc7ba; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 850; }
+.shortcut-guide small { color: var(--muted); font-size: 10px; font-weight: 750; }
 .system-status { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); color: var(--muted); font-size: 12px; }
 .status-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #aaa; }
 .status-pill.ok::before { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent); }
 .status-pill.missing::before { background: var(--red); }
 
-.primary, .secondary, .danger, .rail-add, .icon-button {
+.primary, .secondary, .danger, .icon-button {
   border: 1.5px solid var(--ink); border-radius: 12px; padding: 11px 16px; background: var(--ink); color: white; font-weight: 750; cursor: pointer; transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
 }
-.primary:hover, .secondary:hover, .danger:hover, .rail-add:hover { transform: translateY(-2px); box-shadow: 3px 4px 0 rgba(23,23,23,.17); }
+.primary:hover, .secondary:hover, .danger:hover { transform: translateY(-2px); box-shadow: 3px 4px 0 rgba(23,23,23,.17); }
 .primary:disabled, .secondary:disabled, .danger:disabled { cursor: wait; opacity: .5; transform: none; box-shadow: none; }
 .primary.small, .secondary.small { padding: 9px 14px; }
 .primary.full { width: 100%; margin-top: 12px; }
@@ -60,7 +64,6 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .project-link:hover, .project-link.active { background: var(--panel); box-shadow: inset 0 0 0 1px var(--line); }
 .project-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--ink); color: white; font-size: 12px; font-weight: 900; text-transform: uppercase; }
 .project-link span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
-.rail-add { margin-top: auto; width: 100%; background: transparent; color: var(--ink); border-style: dashed; }
 
 .workspace { position: relative; min-width: 0; overflow: auto; padding: 48px clamp(28px, 5vw, 78px) 90px; }
 .empty-state { min-height: calc(100vh - 210px); display: flex; flex-direction: column; align-items: flex-start; justify-content: center; max-width: 850px; }
@@ -141,6 +144,15 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .provider-options b, .provider-options small { display: block; }
 .provider-options small { margin-top: 5px; color: var(--muted); }
 .settings-modal form { max-height: min(760px, calc(100vh - 48px)); overflow-y: auto; }
+.hotkey-options { display: grid; gap: 10px; margin: 24px 0 14px; }
+.hotkey-picker { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 13px 15px; border: 1.5px solid var(--line); border-radius: 15px; background: var(--panel); text-align: left; cursor: pointer; }
+.hotkey-picker:hover { border-color: var(--ink); }
+.hotkey-picker.listening { border-color: var(--blue); background: #edf7ff; box-shadow: 4px 4px 0 var(--blue); }
+.hotkey-picker.fixed { cursor: default; }
+.hotkey-picker.fixed:hover { border-color: var(--line); }
+.hotkey-picker b, .hotkey-picker small { display: block; }
+.hotkey-picker small { margin-top: 4px; color: var(--muted); line-height: 1.35; }
+.shortcut-note { margin-bottom: 0 !important; }
 .settings-options { display: grid; gap: 10px; margin: 24px 0 14px; }
 .settings-options label { cursor: pointer; }
 .settings-options input { position: absolute; opacity: 0; }
@@ -166,6 +178,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .toast { position: fixed; z-index: 50; left: 50%; bottom: 22px; max-width: min(560px, calc(100vw - 40px)); transform: translateX(-50%); padding: 12px 18px; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: white; box-shadow: 4px 5px 0 rgba(23,23,23,.14); font-size: 13px; }
 
 @media (max-width: 980px) {
+  .shortcut-guide small { display: none; }
   .shell { grid-template-columns: 190px minmax(0, 1fr); }
   .project-rail { padding-inline: 10px; }
   .color-grid { grid-template-columns: repeat(3, 1fr); }
@@ -177,6 +190,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
   .topbar { position: sticky; top: 0; z-index: 10; }
   .brand { min-width: 0; }
   .brand span:last-child, .system-status { display: none; }
+  #installShortcutButton { display: none; }
   .shell { height: auto; min-height: calc(100vh - 76px); display: block; }
   .project-rail { display: none; }
   .workspace { overflow: visible; padding: 38px 20px 90px; }

@@ -22,8 +22,9 @@ tab strip.
 - **Feedback overlay** — press **C** on the live page, then hold **Option** while
   dragging to draw a rectangle. Normal clicks keep using the website underneath, so
   the feedback tool never blocks ordinary interaction. Per-point notes and **live
-  speech-to-text** (press **V**) let you dictate feedback instead of typing it. Both
-  shortcuts switch off while a text field
+  speech-to-text** (press **V**) let you dictate feedback instead of typing it. C and V
+  are defaults—the Control Center lets you replace either with your preferred key.
+  Both shortcuts switch off while a text field
   is focused, so `C` and `V` remain typable. Dictation has an explicit persistent
   English/עברית recognition selector. Nothing of the kit sits on the page at rest — no
   button, no badge — so what you look at is your design, not a tool around it.
@@ -77,8 +78,9 @@ one of the five colors to start an isolated Git worktree, background agent, and
 stamped preview. The chat stays collapsed until you want it; submitted rectangle
 feedback from the website wakes the matching CLI automatically.
 
-The top-bar **Settings** button controls microphone and website interaction
-modes. Browser speech-to-text remains the default. **Agent voice notes** instead
+The Control Center top bar always shows the three preview controls: open/close,
+voice, and Option. **Settings** lets you remap the first two and controls microphone
+and website interaction modes. Browser speech-to-text remains the default. **Agent voice notes** instead
 stores the original recording with the feedback point and has the background
 agent transcribe it with a local Whisper installation; Settings reports whether
 that private, on-device transcription engine is ready. Website clicks pass

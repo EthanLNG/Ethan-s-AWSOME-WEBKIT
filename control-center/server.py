@@ -107,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"project": project}, 201)
             elif path == "/api/sessions/start":
                 session = self.server.app.sessions.start_session(
-                    body.get("projectId", ""), body.get("color", "")
+                    body.get("projectId", ""), body.get("color", ""), body.get("reasoningEffort", "medium")
                 )
                 self._json({"session": session}, 201)
             elif path.startswith("/api/sessions/"):
@@ -116,7 +116,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ControlCenterError("Session route not found.", 404)
                 session_id, action = parts[2], parts[3]
                 if action == "message":
-                    self._json(self.server.app.sessions.send_message(session_id, body.get("message", "")), 202)
+                    self._json(self.server.app.sessions.send_message(
+                        session_id, body.get("message", ""), body.get("attachments")
+                    ), 202)
+                elif action == "reasoning":
+                    self._json(self.server.app.sessions.set_reasoning(
+                        session_id, body.get("reasoningEffort", "")
+                    ))
                 elif action == "merge":
                     self._json(self.server.app.sessions.merge(session_id))
                 elif action == "discard":
@@ -153,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             raise ControlCenterError("Invalid Content-Length.")
-        if length > 1024 * 1024:
+        if length > 30 * 1024 * 1024:
             raise ControlCenterError("Request is too large.", 413)
         raw = self.rfile.read(length) if length else b"{}"
         try:

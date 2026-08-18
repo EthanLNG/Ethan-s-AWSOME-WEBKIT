@@ -7,6 +7,7 @@ exposed by ``ControlCenter`` through ``server.py``.
 """
 
 import json
+import base64
 import os
 import platform
 import queue
@@ -838,6 +839,7 @@ class ProviderRunner:
         provider = self.session["provider"]
         worktree = self.session["worktree"]
         thread_id = self.session.get("threadId")
+        reasoning = self.session.get("reasoningEffort", "medium")
         env = os.environ.copy()
         env["WK_CONTROL_CENTER"] = "1"
         env["WK_SESSION_COLOR"] = self.session["color"]
@@ -846,9 +848,15 @@ class ProviderRunner:
             if not executable:
                 raise ControlCenterError("Codex CLI is not installed.", 409)
             if thread_id:
-                command = [executable, "exec", "resume", "--json", thread_id, prompt]
+                command = [
+                    executable, "exec", "resume", "--json", "-c",
+                    'model_reasoning_effort="{}"'.format(reasoning), thread_id, prompt,
+                ]
             else:
-                command = [executable, "exec", "--json", "--sandbox", "workspace-write", prompt]
+                command = [
+                    executable, "exec", "--json", "--sandbox", "workspace-write", "-c",
+                    'model_reasoning_effort="{}"'.format(reasoning), prompt,
+                ]
         else:
             executable = shutil.which("claude")
             if not executable:
@@ -859,7 +867,7 @@ class ProviderRunner:
                 self.persist_thread(thread_id)
             command = [
                 executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--permission-mode", "auto",
+                "--permission-mode", "auto", "--effort", reasoning,
             ]
             if self.session.get("hasRun"):
                 command.extend(["--resume", thread_id])
@@ -1051,7 +1059,7 @@ class SessionManager:
             sessions = [s for s in sessions if s.get("projectId") == project_id]
         return sessions
 
-    def start_session(self, project_id, color):
+    def start_session(self, project_id, color, reasoning_effort="medium"):
         project = self.projects.get_project(project_id)
         project_path = Path(project["path"])
         if not project_path.is_dir():
@@ -1075,6 +1083,9 @@ class SessionManager:
             if color not in palette:
                 raise ControlCenterError("That color is not configured for this project.", 404)
             provider = project["provider"]
+            allowed_efforts = ("low", "medium", "high", "xhigh") if provider == "codex" else ("low", "medium", "high", "xhigh", "max")
+            if reasoning_effort not in allowed_efforts:
+                raise ControlCenterError("Choose a supported {} reasoning level.".format(provider), 409)
             if not self.projects.system_status()[provider]["installed"]:
                 raise ControlCenterError("{} CLI is not installed.".format(provider), 409)
 
@@ -1102,6 +1113,7 @@ class SessionManager:
                 "status": "active",
                 "threadId": None,
                 "hasRun": False,
+                "reasoningEffort": reasoning_effort,
                 "createdAt": utc_now(),
             }
             runtime = SessionRuntime(self, session)
@@ -1170,13 +1182,49 @@ class SessionManager:
                 raise ControlCenterError("{} is already in use by another worktree.".format(color.capitalize()), 409)
         (lock / "owner").write_text(str(Path(owner).resolve()) + "\n", encoding="utf-8")
 
-    def send_message(self, session_id, message):
+    def send_message(self, session_id, message, attachments=None):
         message = (message or "").strip()
-        if not message:
+        attachments = attachments if isinstance(attachments, list) else []
+        if not message and not attachments:
             raise ControlCenterError("Message cannot be empty.")
         runtime = self._runtime(session_id)
+        saved = []
+        if attachments:
+            folder = Path(runtime.session["worktree"]) / ".webkit" / "chat-attachments" / session_id
+            folder.mkdir(parents=True, exist_ok=True)
+            for item in attachments[:20]:
+                if not isinstance(item, dict):
+                    continue
+                name = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(str(item.get("name") or "attachment")).name).strip("-.") or "attachment"
+                try:
+                    data = base64.b64decode(item.get("data") or "", validate=True)
+                except (ValueError, TypeError):
+                    raise ControlCenterError("An attachment was not valid base64 data.")
+                if len(data) > 20 * 1024 * 1024:
+                    raise ControlCenterError("Each attachment must be 20 MB or smaller.", 413)
+                target = folder / (uuid.uuid4().hex[:8] + "-" + name)
+                target.write_bytes(data)
+                saved.append(str(target))
+        if saved:
+            prefix = "Attached local files (inspect these paths as part of the request):\n" + "\n".join("- " + path for path in saved)
+            message = prefix + ("\n\n" + message if message else "")
         runtime.enqueue(message, "chat")
-        return {"queued": True}
+        return {"queued": True, "attachments": saved}
+
+    def set_reasoning(self, session_id, effort):
+        session = self._get_session(session_id)
+        allowed = ("low", "medium", "high", "xhigh") if session["provider"] == "codex" else ("low", "medium", "high", "xhigh", "max")
+        if effort not in allowed:
+            raise ControlCenterError("Choose a supported reasoning level.", 409)
+        def mutate(state):
+            for item in state.get("sessions", []):
+                if item["id"] == session_id:
+                    item["reasoningEffort"] = effort
+        self.store.update(mutate)
+        session["reasoningEffort"] = effort
+        if session_id in self.runtimes:
+            self.runtimes[session_id].session["reasoningEffort"] = effort
+        return {"reasoningEffort": effort}
 
     def events(self, session_id, after=0):
         self._get_session(session_id)

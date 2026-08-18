@@ -16,6 +16,10 @@ const RESERVED_HOTKEYS = new Set([
   "AltLeft", "AltRight", "ControlLeft", "ControlRight",
   "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight", "Escape",
 ]);
+const REASONING_LEVELS = {
+  codex: ["low", "medium", "high", "xhigh"],
+  claude: ["low", "medium", "high", "xhigh", "max"],
+};
 
 const state = {
   providers: [],
@@ -27,6 +31,7 @@ const state = {
   chatCursor: 0,
   projectMode: "create",
   confirmCallback: null,
+  pendingAttachments: [],
 };
 let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
 let hotkeyCapture = null;
@@ -54,6 +59,21 @@ function setBusy(button, busy, label) {
   if (!button.dataset.label) button.dataset.label = button.textContent;
   button.disabled = busy;
   button.textContent = busy ? label : button.dataset.label;
+}
+
+function reasoningLevels(provider) {
+  return REASONING_LEVELS[provider] || REASONING_LEVELS.codex;
+}
+
+function fillReasoning(select, provider, value) {
+  select.replaceChildren();
+  reasoningLevels(provider).forEach((level) => {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = level === "xhigh" ? "Extra high" : level[0].toUpperCase() + level.slice(1);
+    select.appendChild(option);
+  });
+  select.value = reasoningLevels(provider).includes(value) ? value : "medium";
 }
 
 function hotkeyLabel(code) {
@@ -264,6 +284,8 @@ function renderProjectView() {
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
+  const defaultEffort = localStorage.getItem(`wkcc:reasoning:${project.provider}`) || "medium";
+  fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
   const active = (project.sessions || []).filter((session) => ["active", "busy", "merging", "error"].includes(session.status));
   const byColor = new Map(active.map((session) => [session.color, session]));
   const grid = $("#colorGrid");
@@ -281,6 +303,7 @@ function renderProjectView() {
     title.textContent = color.slug;
     const hint = document.createElement("small");
     hint.textContent = session ? `${session.provider} · ${session.status}` : "Start isolated agent";
+    hint.dataset.working = String(!!session && ["busy", "merging"].includes(session.status));
     card.append(emoji, title, hint);
     if (session) {
       const live = document.createElement("span");
@@ -341,7 +364,7 @@ async function startColor(color, button) {
   setBusy(button, true, "Starting…");
   try {
     const { session } = await api("/api/sessions/start", {
-      method: "POST", body: { projectId: project.id, color },
+      method: "POST", body: { projectId: project.id, color, reasoningEffort: $("#newAgentReasoning").value },
     });
     if (previewTab) previewTab.location.replace(session.previewUrl);
     else toast(`Preview ready at ${session.previewUrl}. Allow popups to open it automatically.`);
@@ -360,6 +383,10 @@ function openSession(session) {
   $("#chatColor").textContent = `${session.emoji} ${session.color} worktree`;
   $("#chatTitle").textContent = session.provider === "codex" ? "Codex" : "Claude Code";
   $("#chatStatus").className = `live-dot ${session.status}`;
+  $("#chatReasoningLabel").textContent = session.provider === "codex" ? "Codex reasoning" : "Claude effort";
+  fillReasoning($("#chatReasoning"), session.provider, session.reasoningEffort || "medium");
+  state.pendingAttachments = [];
+  renderAttachments();
   $("#chatEvents").replaceChildren();
   pollEvents();
 }
@@ -370,6 +397,54 @@ function currentSession() {
     if (session) return session;
   }
   return null;
+}
+
+function renderAttachments() {
+  const list = $("#attachmentList");
+  list.replaceChildren();
+  list.hidden = state.pendingAttachments.length === 0;
+  state.pendingAttachments.forEach((item, index) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "attachment-chip";
+    chip.textContent = `${item.name} ×`;
+    chip.title = "Remove attachment";
+    chip.addEventListener("click", () => {
+      state.pendingAttachments.splice(index, 1);
+      renderAttachments();
+    });
+    list.appendChild(chip);
+  });
+}
+
+async function addChatFiles(files) {
+  const incoming = [...files].filter((file) => file && file.size);
+  for (const file of incoming) {
+    if (file.size > 20 * 1024 * 1024) {
+      toast(`${file.name} is larger than 20 MB.`);
+      continue;
+    }
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    state.pendingAttachments.push({ name: file.name || "pasted-file", type: file.type || "application/octet-stream", data });
+  }
+  renderAttachments();
+}
+
+async function changeChatReasoning() {
+  const session = currentSession();
+  if (!session) return;
+  try {
+    const result = await api(`/api/sessions/${session.id}/reasoning`, {
+      method: "POST", body: { reasoningEffort: $("#chatReasoning").value },
+    });
+    session.reasoningEffort = result.reasoningEffort;
+    toast(`${session.provider === "codex" ? "Codex reasoning" : "Claude effort"} set to ${result.reasoningEffort}.`);
+  } catch (error) { toast(error.message); }
 }
 
 async function pollEvents() {
@@ -396,12 +471,16 @@ async function sendChat(event) {
   event.preventDefault();
   const input = $("#chatInput");
   const message = input.value.trim();
-  if (!message || !state.chatSessionId) return;
-  const button = $("#chatForm button");
+  if ((!message && !state.pendingAttachments.length) || !state.chatSessionId) return;
+  const button = $("#chatForm button.primary");
   setBusy(button, true, "Queued");
   try {
-    await api(`/api/sessions/${state.chatSessionId}/message`, { method: "POST", body: { message } });
+    await api(`/api/sessions/${state.chatSessionId}/message`, {
+      method: "POST", body: { message, attachments: state.pendingAttachments },
+    });
     input.value = "";
+    state.pendingAttachments = [];
+    renderAttachments();
     setTimeout(pollEvents, 150);
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }
@@ -575,6 +654,34 @@ $("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").c
 $("#settingsDialog").addEventListener("close", () => { hotkeyCapture = null; });
 $("#closeChat").addEventListener("click", () => { $("#chatDrawer").hidden = true; state.chatSessionId = null; });
 $("#chatForm").addEventListener("submit", sendChat);
+$("#newAgentReasoning").addEventListener("change", () => {
+  const project = selectedProject();
+  if (project) localStorage.setItem(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
+});
+$("#chatReasoning").addEventListener("change", changeChatReasoning);
+$("#attachButton").addEventListener("click", () => $("#chatFiles").click());
+$("#chatFiles").addEventListener("change", async (event) => {
+  await addChatFiles(event.target.files || []);
+  event.target.value = "";
+});
+$("#chatForm").addEventListener("dragover", (event) => {
+  event.preventDefault();
+  $("#chatForm").classList.add("dragging");
+});
+$("#chatForm").addEventListener("dragleave", () => $("#chatForm").classList.remove("dragging"));
+$("#chatForm").addEventListener("drop", async (event) => {
+  event.preventDefault();
+  $("#chatForm").classList.remove("dragging");
+  await addChatFiles(event.dataTransfer?.files || []);
+});
+$("#chatInput").addEventListener("paste", async (event) => {
+  const files = [...(event.clipboardData?.items || [])]
+    .filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
+  if (files.length) {
+    event.preventDefault();
+    await addChatFiles(files);
+  }
+});
 $("#mergeButton").addEventListener("click", () => askConfirm("merge"));
 $("#discardButton").addEventListener("click", () => askConfirm("discard"));
 $("#confirmAction").addEventListener("click", () => state.confirmCallback && state.confirmCallback());

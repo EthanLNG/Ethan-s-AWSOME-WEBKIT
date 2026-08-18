@@ -119,13 +119,16 @@ function captureHotkey(event) {
 function renderStatus() {
   const target = $("#systemStatus");
   target.replaceChildren();
-  ["git", "codex", "claude"].forEach((name) => {
+  const visibleTools = ["git", ...state.providers].filter((name, index, tools) => (
+    tools.indexOf(name) === index && !(state.system[name] || {}).installed
+  ));
+  visibleTools.forEach((name) => {
     const info = state.system[name] || { installed: false };
-    const pill = document.createElement(info.installed || name !== "git" ? "span" : "button");
-    pill.className = `status-pill ${info.installed ? "ok" : "missing"}`;
-    pill.textContent = `${name === "claude" ? "Claude" : name[0].toUpperCase() + name.slice(1)} ${info.installed ? "ready" : "missing"}`;
+    const pill = document.createElement(name === "git" ? "button" : "span");
+    pill.className = "status-pill missing";
+    pill.textContent = `${name === "claude" ? "Claude" : name[0].toUpperCase() + name.slice(1)} missing`;
     pill.title = info.version || info.path || "Not found on PATH";
-    if (!info.installed && name === "git") pill.addEventListener("click", installGit);
+    if (name === "git") pill.addEventListener("click", installGit);
     target.appendChild(pill);
   });
 }
@@ -165,6 +168,15 @@ function openSettings() {
   const interaction = document.querySelector(`input[name="interactionMode"][value="${state.settings.interactionMode}"]`)
     || document.querySelector('input[name="interactionMode"][value="browse-default"]');
   interaction.checked = true;
+  document.querySelectorAll('input[name="settingsProvider"]').forEach((input) => {
+    input.checked = state.providers.includes(input.value);
+  });
+  $("#settingsCodexStatus").textContent = state.system.codex?.installed
+    ? "Ready on this computer"
+    : "CLI not found — install it before adding";
+  $("#settingsClaudeStatus").textContent = state.system.claude?.installed
+    ? "Ready on this computer"
+    : "CLI not found — install it before adding";
   hotkeyDraft = {
     toggleHotkey: state.settings.toggleHotkey || "KeyC",
     dictateHotkey: state.settings.dictateHotkey || "KeyV",
@@ -179,10 +191,16 @@ async function saveSettings(event) {
   event.preventDefault();
   const dictationInput = document.querySelector('input[name="dictationMode"]:checked');
   const interactionInput = document.querySelector('input[name="interactionMode"]:checked');
+  const providers = [...document.querySelectorAll('input[name="settingsProvider"]:checked')]
+    .map((input) => input.value);
   const button = $("#saveSettings");
   $("#settingsError").textContent = "";
   setBusy(button, true, "Saving…");
   try {
+    const providerResult = await api("/api/providers", {
+      method: "POST",
+      body: { providers },
+    });
     const result = await api("/api/settings", {
       method: "POST",
       body: {
@@ -192,7 +210,9 @@ async function saveSettings(event) {
         dictateHotkey: hotkeyDraft.dictateHotkey,
       },
     });
+    state.providers = providerResult.providers;
     state.settings = result.settings;
+    renderStatus();
     renderShortcutGuide();
     $("#settingsDialog").close();
     const restarted = result.previews.restarted || 0;

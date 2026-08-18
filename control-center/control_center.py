@@ -975,8 +975,8 @@ class SessionRuntime:
         self.worker.start()
         self.watcher.start()
 
-    def enqueue(self, prompt, source):
-        self.jobs.put({"prompt": prompt, "source": source})
+    def enqueue(self, prompt, source, display=None):
+        self.jobs.put({"prompt": prompt, "source": source, "display": display})
 
     def _work_loop(self):
         while not self.stop_event.is_set():
@@ -989,7 +989,8 @@ class SessionRuntime:
             self.manager._set_session_status(
                 self.session["id"], "merging" if job["source"] == "merge" else "busy"
             )
-            self.log.append("user" if job["source"] == "chat" else "system", job["prompt"], job["source"])
+            shown = job["display"] if job.get("display") is not None else job["prompt"]
+            self.log.append("user" if job["source"] == "chat" else "system", shown, job["source"])
             runner = ProviderRunner(
                 self.session,
                 self.log,
@@ -1205,10 +1206,14 @@ class SessionManager:
                 target = folder / (uuid.uuid4().hex[:8] + "-" + name)
                 target.write_bytes(data)
                 saved.append(str(target))
+        display_message = message
         if saved:
             prefix = "Attached local files (inspect these paths as part of the request):\n" + "\n".join("- " + path for path in saved)
             message = prefix + ("\n\n" + message if message else "")
-        runtime.enqueue(message, "chat")
+            display_message = (display_message + "\n" if display_message else "") + "📎 {} attachment{}".format(
+                len(saved), "" if len(saved) == 1 else "s"
+            )
+        runtime.enqueue(message, "chat", display=display_message)
         return {"queued": True, "attachments": saved}
 
     def set_reasoning(self, session_id, effort):

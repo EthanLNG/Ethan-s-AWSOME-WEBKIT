@@ -285,11 +285,15 @@
       record.target instanceof HTMLDialogElement && record.target.open)) {
       queueTopLayerRaise();
     }
+    if (records.some((record) => record.type === 'attributes' &&
+      (record.attributeName === 'hidden' || record.attributeName === 'open'))) {
+      requestAnimationFrame(() => { if (!S.card) renderPins(); });
+    }
   }).observe(document.documentElement, {
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ['open'],
+    attributeFilter: ['open', 'hidden'],
   });
 
   // If the fetch fails there is no "unstyled but working" fallback: pointer-events
@@ -673,6 +677,18 @@
     } catch (e) { /* ignore */ }
     return 'doc';
   }
+  function pointSurfaceVisible(p) {
+    const sel = p.context && p.context[0] && p.context[0].selector;
+    if (!sel) return true;
+    try {
+      const matches = document.querySelectorAll(sel);
+      if (matches.length !== 1) return true;
+      const node = matches[0];
+      const style = getComputedStyle(node);
+      return node.isConnected && style.display !== 'none' && style.visibility !== 'hidden' &&
+        node.getClientRects().length > 0;
+    } catch (e) { return true; }
+  }
   // → {box, fixed:true} in viewport coords for viewport-anchored points, else null
   function pinBox(p) {
     if (p.anchor !== 'viewport') return null;
@@ -758,6 +774,7 @@
     if (S.reviewing) {
       S.reviewList.forEach((p, i) => {
         if (p.page !== page) return;
+        if (!pointSurfaceVisible(p)) return;
         const va = pinBox(p);
         const box = va ? va.box : correctedRect(p);
         const v = S.verdicts[p.id];
@@ -769,6 +786,7 @@
     }
     for (const p of S.points) {
       if (p.page !== page) continue;
+      if (!pointSurfaceVisible(p)) continue;
       const va = pinBox(p);
       addPin(p.number, va ? va.box : p.rect, 'queued', () => {
         if (IS_BEFORE || S.card) return;
@@ -1623,6 +1641,15 @@
       }
     } else if (S.phase === 'reviewing' && S.review) {
       const key = S.review.batchId + ':' + S.review.round;
+      const reloadKey = 'wk:review-assets:' + key;
+      if (SS.get(reloadKey) !== 'ready') {
+        SS.set(reloadKey, 'ready');
+        // review.json is written only after the point commits. Reload once per
+        // round before exposing review controls so the host document, CSS, and
+        // JS all come from that committed AFTER state rather than a stale DOM.
+        location.reload();
+        return;
+      }
       if (S.reviewing && S.reviewBatchId === S.review.batchId && S.reviewRound !== S.review.round) {
         // next round landed while we watch — re-enter at point 1
         enterReview({ auto: true });

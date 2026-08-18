@@ -312,10 +312,6 @@ function renderProjectView() {
     hint.dataset.working = String(!!session && ["busy", "merging"].includes(session.status));
     card.append(emoji, title, hint);
     if (session) {
-      const live = document.createElement("span");
-      live.className = "active-label";
-      live.textContent = "Open";
-      card.appendChild(live);
       card.addEventListener("click", () => openSessionPreview(session));
     } else {
       card.addEventListener("click", () => startColor(color.slug, card));

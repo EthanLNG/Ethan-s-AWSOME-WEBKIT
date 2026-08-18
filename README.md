@@ -97,7 +97,10 @@ Git commit or install the vendored kit before the first color session. GitHub
 is optional—the UI reminds you to publish useful projects, but local Git is all
 Webkit requires.
 
-Install a clickable desktop shortcut:
+The repository already includes clickable launchers in its top-level folder:
+`AWESOME WEBKIT.command` on macOS, `AWESOME WEBKIT.cmd` on Windows, and
+`launch-control-center.sh` on Linux. The same action is available inside
+**Settings** if you also want a desktop shortcut:
 
 ```sh
 python3 control-center/install-shortcut.py

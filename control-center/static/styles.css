@@ -166,6 +166,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .settings-section { margin-top: 26px; padding-top: 24px; border-top: 1px solid var(--line); }
 .settings-section h2 { font-size: 27px; }
 .settings-section > p { margin: 0; color: var(--muted); line-height: 1.5; }
+.settings-action { width: 100%; margin-top: 14px; }
 .capability-note { margin: 0 0 10px !important; padding: 10px 12px; border-radius: 10px; background: #ece7dd; font-size: 12px; }
 .dialog-close { position: absolute; top: 16px; right: 16px; border: 0; background: none; font-size: 25px; cursor: pointer; }
 .segmented { display: grid; grid-template-columns: 1fr 1fr; margin: 22px 0; padding: 4px; border-radius: 12px; background: #ece7dd; }
@@ -195,7 +196,6 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
   .topbar { position: sticky; top: 0; z-index: 10; }
   .brand { min-width: 0; }
   .brand span:last-child, .system-status { display: none; }
-  #installShortcutButton { display: none; }
   .shell { height: auto; min-height: calc(100vh - 76px); display: block; }
   .project-rail { display: none; }
   .workspace { overflow: visible; padding: 38px 20px 90px; }

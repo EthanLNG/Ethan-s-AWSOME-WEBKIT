@@ -19,7 +19,6 @@
     </button>
     <div class="system-status" id="systemStatus" aria-live="polite"></div>
     <button class="secondary small" id="settingsButton" type="button">Settings</button>
-    <button class="secondary small" id="installShortcutButton" type="button">Desktop shortcut</button>
     <button class="primary small" id="addProjectButton" type="button">+ Project</button>
   </header>
 
@@ -194,6 +193,11 @@
             <span><b>Draw rectangles immediately</b><small>Legacy mode. Hold Option when you want to click the website underneath.</small></span>
           </label>
         </div>
+      </div>
+      <div class="settings-section">
+        <h2>Open AWESOME WEBKIT</h2>
+        <p>A clickable launcher is included in the AWESOME WEBKIT folder. You can also put a copy on your desktop.</p>
+        <button class="secondary settings-action" id="installShortcutButton" type="button">Install desktop shortcut</button>
       </div>
       <div class="modal-error" id="settingsError"></div>
       <button class="primary full" id="saveSettings" type="submit">Save settings</button>

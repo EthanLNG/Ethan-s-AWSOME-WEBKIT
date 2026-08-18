@@ -47,6 +47,9 @@
             <p class="path" id="projectPath"></p>
           </div>
           <div class="project-heading-actions">
+            <button class="secondary seed-onboarding-button" id="seedOnboardingButton" type="button" hidden>
+              Continue seed onboarding
+            </button>
             <button class="primary github-push" id="pushGithubButton" type="button" hidden>
               <span aria-hidden="true">↑</span> <span id="pushGithubLabel">Push to GitHub</span>
             </button>
@@ -111,19 +114,46 @@
     <form method="dialog" id="projectForm">
       <button class="dialog-close" id="projectDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Website project</p>
-      <h2>Create or bring your own</h2>
-      <div class="segmented" role="tablist">
+      <h2 id="projectDialogTitle">Create or bring your own</h2>
+      <div class="segmented" id="projectModeTabs" role="tablist">
         <button type="button" class="active" data-project-mode="create">Create new</button>
         <button type="button" data-project-mode="existing">Use existing</button>
       </div>
       <div id="createFields">
-        <label>Website name<input id="newName" autocomplete="off" placeholder="My brilliant website"></label>
-        <label>Parent folder
-          <span class="folder-picker">
-            <input id="newParent" readonly placeholder="No folder selected">
-            <button class="secondary" type="button" data-folder-target="newParent" data-folder-purpose="parent">Choose folder</button>
-          </span>
-        </label>
+        <div class="onboarding-progress" aria-label="New project onboarding progress">
+          <span class="active" data-onboarding-dot="1">1</span><i></i><span data-onboarding-dot="2">2</span><i></i><span data-onboarding-dot="3">3</span>
+        </div>
+        <div data-create-step="1">
+          <p class="step-kicker">The basics</p>
+          <label>Website name<input id="newName" autocomplete="off" placeholder="My brilliant website"></label>
+          <label>Parent folder
+            <span class="folder-picker">
+              <input id="newParent" readonly placeholder="No folder selected">
+              <button class="secondary" type="button" data-folder-target="newParent" data-folder-purpose="parent">Choose folder</button>
+            </span>
+          </label>
+        </div>
+        <div data-create-step="2" hidden>
+          <p class="step-kicker">Optional context</p>
+          <label>Describe the brand or design language
+            <textarea id="newBrandBrief" rows="5" placeholder="Personality, audience, visual references, colors to use or avoid, feelings the site should create…"></textarea>
+          </label>
+          <div class="project-assets" id="projectAssetsDropzone" tabindex="0">
+            <input id="projectAssets" type="file" multiple hidden>
+            <b>Drop project references here</b>
+            <small>Logos, imagery, design systems, copy, PDFs, or other useful files. Optional.</small>
+            <button class="secondary" id="chooseProjectAssets" type="button">Choose files</button>
+          </div>
+          <div class="project-asset-list" id="projectAssetList" hidden></div>
+        </div>
+        <div data-create-step="3" hidden>
+          <p class="step-kicker">Explore directions</p>
+          <div class="seed-count-card">
+            <label for="newSeedCount">How many seeds should the agent create?</label>
+            <div><button type="button" id="seedMinus" aria-label="One fewer seed">−</button><input id="newSeedCount" type="number" min="2" max="20" value="10"><button type="button" id="seedPlus" aria-label="One more seed">+</button></div>
+            <p>Each seed explores a genuinely different visual direction. Ten is a useful default.</p>
+          </div>
+        </div>
       </div>
       <div id="existingFields" hidden>
         <label>Project folder
@@ -133,10 +163,39 @@
           </span>
         </label>
       </div>
-      <label>Agent provider<select id="projectProviderSelect"></select></label>
-      <p class="capability-note">GitHub is the default: WebKit detects an existing remote or creates a private repository when GitHub CLI is connected.</p>
+      <label id="projectProviderField">Agent provider<select id="projectProviderSelect"></select></label>
+      <p class="capability-note" id="projectGithubNote">GitHub is the default: WebKit detects an existing remote or creates a private repository when GitHub CLI is connected.</p>
       <div class="modal-error" id="projectError"></div>
-      <button class="primary full" id="saveProject" type="submit">Create website</button>
+      <div class="project-wizard-actions">
+        <button class="secondary" id="projectBack" type="button" hidden>Back</button>
+        <button class="primary" id="saveProject" type="submit">Continue</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="seedDialog" class="modal seed-modal">
+    <form method="dialog">
+      <button class="dialog-close" id="seedDialogClose" type="button" aria-label="Close">×</button>
+      <p class="eyebrow" id="seedDialogEyebrow">Creating directions</p>
+      <h2 id="seedDialogTitle">Your seeds are growing.</h2>
+      <p id="seedDialogText">The agent is building distinct visual approaches in an isolated worktree.</p>
+      <div class="seed-loading" id="seedLoading"><span></span><span></span><span></span></div>
+      <div class="seed-review" id="seedReview" hidden>
+        <div class="seed-browser">
+          <div class="seed-list" id="seedList"></div>
+          <div class="seed-preview-wrap">
+            <div class="seed-preview-head"><strong id="seedPreviewTitle"></strong><button class="secondary" id="openSeedPreview" type="button">Open full preview</button></div>
+            <iframe class="seed-preview" id="seedPreview" title="Selected website seed preview"></iframe>
+            <p id="seedPreviewSummary"></p>
+          </div>
+        </div>
+        <label class="seed-combination">What should the final website take from the selected seeds? <span>Optional</span>
+          <textarea id="seedCombinationNotes" rows="3" placeholder="For example: Seed 2's typography, Seed 6's navigation, and Seed 9's warmer palette."></textarea>
+        </label>
+        <div class="modal-error" id="seedError"></div>
+        <button class="primary full" id="finishSeeds" type="button">Build from selected seeds</button>
+      </div>
+      <button class="secondary full seed-chat-button" id="openSeedChat" type="button" hidden>Open agent chat</button>
     </form>
   </dialog>
 

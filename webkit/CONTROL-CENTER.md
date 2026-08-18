@@ -37,5 +37,11 @@ work normally. Commit any file changes before exiting so the worktree remains
 mergeable; use a concise message beginning `wk(<slug>): chat —`. If the message
 only asks a question, make no commit.
 
+For a new-project seed generation or seed finalization job, follow the explicit
+onboarding prompt supplied by the controller. Seeds stay in the controller's
+isolated worktree until the user chooses a direction. Do not merge, push, or
+remove the worktree; the controller performs that lifecycle after the final
+ready marker.
+
 The ordinary `SETUP.md` + `LOOP.md` workflow remains canonical when
 `WK_CONTROL_CENTER` is absent. Nothing in this file changes agent-app usage.

@@ -1,5 +1,6 @@
 import io
 import json
+import base64
 import os
 import subprocess
 import sys
@@ -79,7 +80,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.7.0")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.0")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -90,6 +91,86 @@ class ControlCenterTests(unittest.TestCase):
         log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=project_path, text=True, capture_output=True, check=True)
         self.assertEqual(log.stdout.strip(), "Create website with AWESOME WEBKIT")
         self.assertFalse(subprocess.run(["git", "status", "--porcelain"], cwd=project_path, text=True, capture_output=True, check=True).stdout)
+
+    def test_new_project_onboarding_saves_optional_context_and_starts_seeds(self):
+        parent = self.root / "projects"
+        parent.mkdir()
+        fake_session = {"id": "seed-session", "kind": "seeds", "status": "busy"}
+        onboarding = {
+            "brief": "Warm, editorial, confident. Avoid generic startup gradients.",
+            "seedCount": 7,
+            "assets": [{
+                "name": "brand mark.svg",
+                "type": "image/svg+xml",
+                "data": base64.b64encode(b"<svg></svg>").decode("ascii"),
+            }],
+        }
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6316), mock.patch.object(
+            self.app.projects, "_ensure_github_repo"
+        ), mock.patch.object(
+            self.app.sessions, "start_seed_session", return_value=fake_session
+        ) as start:
+            result = self.app.create_project("Seeded Site", str(parent), "codex", onboarding)
+        project_path = Path(result["project"]["path"])
+        self.assertIn("Warm, editorial", (project_path / "project-context" / "BRAND-AND-DESIGN.md").read_text())
+        self.assertEqual(
+            (project_path / "project-context" / "assets" / "brand-mark.svg").read_bytes(),
+            b"<svg></svg>",
+        )
+        self.assertEqual(result["seedSession"], fake_session)
+        start.assert_called_once_with(result["project"]["id"], 7, onboarding["brief"])
+
+    def test_seed_manifest_can_be_reviewed_and_combination_is_queued(self):
+        parent = self.root / "projects"
+        parent.mkdir()
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6317), mock.patch.object(
+            self.app.projects, "_ensure_github_repo"
+        ):
+            project = self.app.projects.create_project("Directions", str(parent), "codex")
+        worktree = Path(project["path"])
+        seed_root = worktree / "seed-directions"
+        for seed_id in ("seed-01", "seed-02"):
+            folder = seed_root / seed_id
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / "index.html").write_text("<title>{}</title>".format(seed_id), encoding="utf-8")
+        (seed_root / "manifest.json").write_text(json.dumps({"version": 1, "seeds": [
+            {"id": "seed-01", "title": "Editorial", "direction": "Type-led", "summary": "Quiet", "path": "seed-directions/seed-01/index.html"},
+            {"id": "seed-02", "title": "Kinetic", "direction": "Motion-led", "summary": "Bold", "path": "seed-directions/seed-02/index.html"},
+        ]}), encoding="utf-8")
+        subprocess.run(["git", "add", "seed-directions"], cwd=worktree, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Generate design seeds"], cwd=worktree,
+            check=True, capture_output=True,
+        )
+        session = {
+            "id": "seed-review", "projectId": project["id"], "projectName": project["name"],
+            "provider": "codex", "color": "blue", "emoji": "🔵", "port": 6317,
+            "branch": "webkit/blue/seed-review", "worktree": str(worktree),
+            "previewUrl": "http://127.0.0.1:6317/index.html", "feedbackDir": ".webkit/feedback",
+            "status": "active", "threadId": None, "hasRun": True, "kind": "seeds",
+            "seedCount": 2, "createdAt": "2026-08-18T00:00:00Z",
+        }
+        self.app.store.update(lambda state: (
+            state.setdefault("sessions", []).append(session),
+            next(item for item in state["projects"] if item["id"] == project["id"]).update({
+                "onboarding": {"status": "review", "sessionId": session["id"], "seedCount": 2}
+            }),
+        ))
+        status = self.app.sessions.seed_status(session["id"])
+        self.assertTrue(status["ready"])
+        self.assertEqual([item["id"] for item in status["seeds"]], ["seed-01", "seed-02"])
+        runtime = mock.Mock()
+        runtime.session = session
+        self.app.sessions.runtimes[session["id"]] = runtime
+        result = self.app.sessions.choose_seeds(
+            session["id"], ["seed-01", "seed-02"], "Editorial type with kinetic navigation"
+        )
+        self.assertTrue(result["queued"])
+        prompt = runtime.enqueue.call_args.args[0]
+        self.assertIn("Editorial type with kinetic navigation", prompt)
+        self.assertIn("seed-01", prompt)
+        self.assertIn("seed-02", prompt)
+        self.assertEqual(self.app.projects.get_project(project["id"])["onboarding"]["status"], "finalizing")
 
     def test_add_existing_initializes_git_and_claude_entrypoint(self):
         project_path = self.root / "legacy-site"

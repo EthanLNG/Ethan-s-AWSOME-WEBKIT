@@ -65,6 +65,9 @@ class Handler(BaseHTTPRequestHandler):
                 session_id = parsed.path.split("/")[3]
                 after = query.get("after", ["0"])[0]
                 self._json(self.server.app.sessions.events(session_id, int(after)))
+            elif parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/seeds"):
+                session_id = parsed.path.split("/")[3]
+                self._json(self.server.app.sessions.seed_status(session_id))
             elif parsed.path.startswith("/api/"):
                 self._json({"error": "API route not found."}, 404)
             else:
@@ -96,10 +99,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/system/install-shortcut":
                 self._json(self.server.app.projects.install_shortcut())
             elif path == "/api/projects/create":
-                project = self.server.app.projects.create_project(
-                    body.get("name", ""), body.get("parent", ""), body.get("provider", "")
+                result = self.server.app.create_project(
+                    body.get("name", ""), body.get("parent", ""), body.get("provider", ""),
+                    body.get("onboarding"),
                 )
-                self._json({"project": project}, 201)
+                self._json(result, 201)
             elif path == "/api/projects/existing":
                 project = self.server.app.projects.add_existing(
                     body.get("path", ""), body.get("provider", "")
@@ -110,6 +114,11 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) != 4:
                     raise ControlCenterError("Project route not found.", 404)
                 self._json(self.server.app.projects.push_project(parts[2]))
+            elif path.startswith("/api/projects/") and path.endswith("/seeds-start"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    raise ControlCenterError("Project route not found.", 404)
+                self._json(self.server.app.start_project_seeds(parts[2]), 201)
             elif path == "/api/sessions/start":
                 session = self.server.app.sessions.start_session(
                     body.get("projectId", ""), body.get("color", ""), body.get("reasoningEffort", "medium")
@@ -130,6 +139,10 @@ class Handler(BaseHTTPRequestHandler):
                     ))
                 elif action == "merge":
                     self._json(self.server.app.sessions.merge(session_id))
+                elif action == "seeds-select":
+                    self._json(self.server.app.sessions.choose_seeds(
+                        session_id, body.get("selected"), body.get("notes", "")
+                    ), 202)
                 elif action == "discard":
                     self._json(self.server.app.sessions.discard(session_id, body.get("confirmation")))
                 else:

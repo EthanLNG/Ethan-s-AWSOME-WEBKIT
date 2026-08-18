@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.0 (2026-08-18) — Seeded project onboarding
+
+- Added optional new-project brand briefs and reference-file uploads.
+- Added configurable multi-direction seed generation (10 seeds by default) in
+  an isolated agent worktree.
+- Added in-app seed previews, multi-selection, and instructions for combining
+  parts from several directions into one production website.
+- Added automatic seed finalization, merge, cleanup, and GitHub sync.
+- Added an automatic one-click GitHub push action whenever local main is ahead.
+- Refined the operational overlay into a monochrome system, with draggable
+  feedback cards and editable multi-rectangle feedback points.
+
 ## v0.7.0 (2026-08-18) — Custom preview shortcuts
 
 - The Control Center now lets each user record any non-modifier key for opening

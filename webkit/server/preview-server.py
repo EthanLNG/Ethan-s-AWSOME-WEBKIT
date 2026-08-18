@@ -540,7 +540,9 @@ class Handler(SimpleHTTPRequestHandler):
         with open(path, "rb") as f:
             body = f.read()
         try:
-            body = inject(stamp(body.decode("utf-8")), "after").encode("utf-8")
+            html = stamp(body.decode("utf-8"))
+            seed_preview = parse_qs(urlparse(self.path).query).get("wk_seed_preview", [""])[0] == "1"
+            body = (html if seed_preview else inject(html, "after")).encode("utf-8")
         except UnicodeDecodeError:
             pass
         self.send_response(200)

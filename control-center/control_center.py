@@ -371,7 +371,7 @@ class ProjectManager:
                 return dict(project)
         raise ControlCenterError("Unknown project.", 404)
 
-    def create_project(self, name, parent, provider):
+    def create_project(self, name, parent, provider, onboarding=None):
         self._validate_provider(provider)
         self._require_git()
         if not (name or "").strip():
@@ -390,6 +390,7 @@ class ProjectManager:
         if not index.exists():
             index.write_text(self._starter_html(name.strip() or safe_name), encoding="utf-8")
         self._install_kit(project_path, provider)
+        self._save_project_context(project_path, onboarding or {})
         run_command(["git", "add", "-A"], cwd=project_path)
         run_command(["git", "commit", "-m", "Create website with AWESOME WEBKIT"], cwd=project_path)
         self._ensure_github_repo(project_path, safe_name, "main")
@@ -397,6 +398,47 @@ class ProjectManager:
             project_path, name.strip() or safe_name, provider,
             source_path=project_path, base_branch="main", target_branch="main", managed=False,
         )
+
+    @staticmethod
+    def _save_project_context(project_path, onboarding):
+        if not isinstance(onboarding, dict):
+            onboarding = {}
+        brief = str(onboarding.get("brief") or "").strip()[:20000]
+        assets = onboarding.get("assets") if isinstance(onboarding.get("assets"), list) else []
+        if not brief and not assets:
+            return
+        folder = Path(project_path) / "project-context"
+        folder.mkdir(parents=True, exist_ok=True)
+        if brief:
+            (folder / "BRAND-AND-DESIGN.md").write_text(
+                "# Brand and design direction\n\n" + brief + "\n", encoding="utf-8"
+            )
+        asset_folder = folder / "assets"
+        total = 0
+        used_names = set()
+        for item in assets[:40]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                data = base64.b64decode(item.get("data") or "", validate=True)
+            except (ValueError, TypeError):
+                raise ControlCenterError("A project reference was not valid base64 data.")
+            total += len(data)
+            if len(data) > 15 * 1024 * 1024 or total > 20 * 1024 * 1024:
+                raise ControlCenterError(
+                    "Project references must be 15 MB each and 20 MB total or smaller.", 413
+                )
+            raw_name = Path(str(item.get("name") or "reference")).name
+            name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-.") or "reference"
+            stem, suffix = Path(name).stem, Path(name).suffix
+            candidate = name
+            index = 2
+            while candidate.lower() in used_names:
+                candidate = "{}-{}{}".format(stem, index, suffix)
+                index += 1
+            used_names.add(candidate.lower())
+            asset_folder.mkdir(parents=True, exist_ok=True)
+            (asset_folder / candidate).write_bytes(data)
 
     def add_existing(self, path, provider):
         self._validate_provider(provider)
@@ -1038,7 +1080,8 @@ class SessionRuntime:
             if job is None:
                 break
             self.manager._set_session_status(
-                self.session["id"], "merging" if job["source"] == "merge" else "busy"
+                self.session["id"],
+                "merging" if job["source"] in ("merge", "seed-finalize") else "busy",
             )
             shown = job["display"] if job.get("display") is not None else job["prompt"]
             self.log.append("user" if job["source"] == "chat" else "system", shown, job["source"])
@@ -1052,11 +1095,33 @@ class SessionRuntime:
                 runner.run(job["prompt"])
                 if job["source"] == "merge":
                     self.manager._complete_agent_merge(self.session["id"])
+                elif job["source"] == "seed-generation":
+                    self.manager._complete_seed_generation(self.session["id"])
+                elif job["source"] == "seed-finalize":
+                    self.manager._complete_seed_onboarding(self.session["id"])
+                elif self.session.get("kind") == "seeds" and self.session.get("seedStage") == "finalizing":
+                    marker = Path(self.session["worktree"]) / ".webkit" / "seed-selection.json"
+                    if marker.exists():
+                        self.manager._complete_seed_onboarding(self.session["id"])
+                    else:
+                        self.manager._set_session_status(self.session["id"], "active")
+                elif self.session.get("kind") == "seeds" and self.session.get("seedStage") == "generating":
+                    self.manager._set_session_status(self.session["id"], "active")
+                    status = self.manager.seed_status(self.session["id"])
+                    if status.get("ready"):
+                        self.manager._complete_seed_generation(self.session["id"])
                 else:
                     self.manager._set_session_status(self.session["id"], "active")
             except Exception as exc:
                 self.log.append("system", str(exc), "error")
                 self.manager._set_session_status(self.session["id"], "error", str(exc))
+                if job["source"] in ("seed-generation", "seed-finalize"):
+                    self.manager._set_project_onboarding(self.session["projectId"], {
+                        "status": "error",
+                        "sessionId": self.session["id"],
+                        "seedCount": self.session.get("seedCount", 10),
+                        "message": str(exc),
+                    })
             finally:
                 self.jobs.task_done()
 
@@ -1180,6 +1245,299 @@ class SessionManager:
             runtime.log.append("system", "{} {} session started in an isolated worktree.".format(entry["emoji"], provider), "status")
             runtime.start()
             return dict(session)
+
+    def start_seed_session(self, project_id, seed_count=10, brief=""):
+        project = self.projects.get_project(project_id)
+        project_path = Path(project["path"])
+        config = json.loads((project_path / "webkit" / "webkit.config.json").read_text(encoding="utf-8"))
+        palette = [entry.get("slug") for entry in config.get("palette", []) if entry.get("slug")]
+        active_colors = {
+            session.get("color") for session in self.store.read().get("sessions", [])
+            if session.get("status") in ("active", "busy", "merging", "error")
+        }
+        lock_dir = Path(config.get("lock_dir", "/tmp/webkit-agent-colors"))
+        color = next((
+            slug for slug in palette
+            if slug not in active_colors and not (lock_dir / (slug + ".lock")).exists()
+        ), None)
+        if not color:
+            raise ControlCenterError(
+                "All five colors are busy. Finish or discard one agent before generating seeds.", 409
+            )
+        try:
+            seed_count = int(seed_count)
+        except (TypeError, ValueError):
+            seed_count = 10
+        seed_count = max(2, min(20, seed_count))
+        session = self.start_session(project_id, color, "high")
+        session_id = session["id"]
+
+        def mark_session(state):
+            for item in state.get("sessions", []):
+                if item["id"] == session_id:
+                    item["kind"] = "seeds"
+                    item["seedCount"] = seed_count
+                    item["seedStage"] = "generating"
+            for item in state.get("projects", []):
+                if item["id"] == project_id:
+                    item["onboarding"] = {
+                        "status": "generating",
+                        "sessionId": session_id,
+                        "seedCount": seed_count,
+                    }
+        self.store.update(mark_session)
+        runtime = self._runtime(session_id)
+        runtime.session["kind"] = "seeds"
+        runtime.session["seedCount"] = seed_count
+        runtime.session["seedStage"] = "generating"
+        context_note = (
+            "The user's optional brand/design note is:\n{}\n".format(str(brief).strip())
+            if str(brief).strip() else
+            "The user did not provide a written brand/design note. Infer carefully from the project name and any files.\n"
+        )
+        prompt = """Create {count} genuinely different website design seeds for `{name}`.
+
+This is an onboarding exploration inside an isolated worktree. Do not replace
+the production `index.html` yet. Read every useful file under `project-context/`
+before designing. {context}
+
+Build {count} polished, browser-ready, responsive static directions under
+`seed-directions/seed-01/index.html` through `seed-directions/seed-{last}/index.html`.
+Each seed must be a meaningfully different art direction, layout system,
+typographic attitude, palette, and interaction idea—not a recolor. Use the
+provided assets when relevant. Keep every direction self-contained and usable
+through the existing local preview server without a build step.
+
+Finally write `seed-directions/manifest.json` with this exact shape:
+{{"version":1,"seeds":[{{"id":"seed-01","title":"short name","direction":"one-line art direction","summary":"what makes it distinct","path":"seed-directions/seed-01/index.html"}}]}}
+Include one entry for every seed, validate that every path opens, then commit
+all seed work. Do not merge, push, or modify the controller checkout.
+""".format(
+            count=seed_count,
+            last=str(seed_count).zfill(2),
+            name=project["name"],
+            context=context_note,
+        )
+        def save_generation_prompt(state):
+            for item in state.get("sessions", []):
+                if item["id"] == session_id:
+                    item["seedPrompt"] = prompt
+                    break
+        self.store.update(save_generation_prompt)
+        runtime.session["seedPrompt"] = prompt
+        runtime.enqueue(prompt, "seed-generation", display="Generating {} distinct design seeds…".format(seed_count))
+        return self._get_session(session_id)
+
+    def seed_status(self, session_id):
+        session = self._get_session(session_id)
+        if session.get("kind") != "seeds":
+            raise ControlCenterError("This is not a seed onboarding session.", 409)
+        project = self.projects.get_project(session["projectId"])
+        onboarding = project.get("onboarding") or {}
+        if onboarding.get("status") == "complete":
+            return {"status": "complete", "complete": True, "ready": False, "seeds": []}
+        worktree = Path(session["worktree"])
+        manifest_path = worktree / "seed-directions" / "manifest.json"
+        result = {
+            "status": onboarding.get("status") or session.get("status", "generating"),
+            "sessionStatus": session.get("status"),
+            "complete": False,
+            "ready": False,
+            "error": session.get("error"),
+            "seeds": [],
+        }
+        if not manifest_path.exists():
+            return result
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return result
+        base = worktree.resolve()
+        seen = set()
+        seeds = []
+        for raw in manifest.get("seeds", [])[:20]:
+            if not isinstance(raw, dict):
+                continue
+            seed_id = str(raw.get("id") or "").strip()
+            rel = str(raw.get("path") or "").lstrip("/")
+            target = (worktree / rel).resolve()
+            try:
+                inside = target.is_relative_to(base)
+            except AttributeError:
+                inside = str(target).startswith(str(base) + os.sep)
+            if not seed_id or seed_id in seen or not inside or not target.is_file():
+                continue
+            seen.add(seed_id)
+            seeds.append({
+                "id": seed_id,
+                "title": str(raw.get("title") or seed_id)[:100],
+                "direction": str(raw.get("direction") or "")[:240],
+                "summary": str(raw.get("summary") or "")[:500],
+                "path": rel,
+                "previewUrl": "http://127.0.0.1:{}/{}?wk_seed_preview=1".format(session["port"], rel),
+            })
+        expected = int(session.get("seedCount") or 0)
+        result["seeds"] = seeds
+        clean = run_command(["git", "status", "--porcelain"], cwd=worktree, check=False)
+        result["ready"] = (
+            len(seeds) >= expected >= 2
+            and session.get("status") != "busy"
+            and clean.returncode == 0
+            and not clean.stdout.strip()
+        )
+        if result["ready"]:
+            result["status"] = "review"
+        return result
+
+    def choose_seeds(self, session_id, selected, notes=""):
+        session = self._get_session(session_id)
+        if session.get("status") in ("busy", "merging"):
+            raise ControlCenterError("Wait for the seed agent to finish first.", 409)
+        status = self.seed_status(session_id)
+        if not status["ready"]:
+            raise ControlCenterError("The seed directions are not ready yet.", 409)
+        allowed = {seed["id"]: seed for seed in status["seeds"]}
+        selected_ids = []
+        for value in selected if isinstance(selected, list) else []:
+            value = str(value)
+            if value in allowed and value not in selected_ids:
+                selected_ids.append(value)
+        if not selected_ids:
+            raise ControlCenterError("Choose at least one seed to continue.")
+        runtime = self._runtime(session_id)
+        project = self.projects.get_project(session["projectId"])
+        marker = Path(session["worktree"]) / ".webkit" / "seed-selection.json"
+        marker.unlink(missing_ok=True)
+        selected_lines = "\n".join(
+            "- {id}: {title} — {summary}".format(**allowed[seed_id]) for seed_id in selected_ids
+        )
+        notes = str(notes or "").strip()[:12000]
+        prompt = """Turn the chosen onboarding seed direction into the production website.
+
+Chosen seeds:
+{selected}
+
+Combination notes from the user:
+{notes}
+
+Inspect those seed pages and all `project-context/` references. If several
+seeds were chosen, combine only their strongest relevant parts according to
+the notes; produce one coherent design system, not a collage. Replace the real
+production site starting at `{default_page}` with the finished responsive
+website. Move any needed assets into sensible production locations and remove
+the entire `seed-directions/` exploration folder when finished.
+
+Commit all intended work. Merge the local base branch `{base}` into this branch
+and resolve conflicts carefully. Do not merge, push, delete this worktree, or
+change the controller checkout yourself. When the branch is clean and ready,
+write exactly {{"status":"ready","message":"ready to finish onboarding"}}
+to `{marker}`. If user input is required, write
+{{"status":"conflict","message":"<short question>"}} instead.
+""".format(
+            selected=selected_lines,
+            notes=notes or "No extra notes; preserve the clearest chosen direction.",
+            default_page=json.loads(
+                (Path(session["worktree"]) / "webkit" / "webkit.config.json").read_text(encoding="utf-8")
+            ).get("default_page", "index.html"),
+            base=project.get("baseBranch", "main"),
+            marker=str(marker),
+        )
+        def save_finalize_prompt(state):
+            for item in state.get("sessions", []):
+                if item["id"] == session_id:
+                    item["seedFinalizePrompt"] = prompt
+                    break
+        self.store.update(save_finalize_prompt)
+        runtime.session["seedFinalizePrompt"] = prompt
+        self._set_seed_stage(session_id, "finalizing")
+        self._set_project_onboarding(project["id"], {
+            "status": "finalizing",
+            "sessionId": session_id,
+            "seedCount": session.get("seedCount", len(status["seeds"])),
+            "selected": selected_ids,
+        })
+        runtime.enqueue(prompt, "seed-finalize", display="Building the chosen seed direction into the website…")
+        self._set_session_status(session_id, "merging")
+        return {"queued": True, "selected": selected_ids}
+
+    def _set_project_onboarding(self, project_id, value):
+        def mutate(state):
+            for project in state.get("projects", []):
+                if project["id"] == project_id:
+                    project["onboarding"] = dict(value)
+                    return
+        self.store.update(mutate)
+
+    def _set_seed_stage(self, session_id, stage):
+        def mutate(state):
+            for session in state.get("sessions", []):
+                if session["id"] == session_id:
+                    session["seedStage"] = stage
+                    break
+        self.store.update(mutate)
+        if session_id in self.runtimes:
+            self.runtimes[session_id].session["seedStage"] = stage
+
+    def _complete_seed_generation(self, session_id):
+        session = self._get_session(session_id)
+        self._set_session_status(session_id, "active")
+        status = self.seed_status(session_id)
+        if not status["ready"]:
+            raise ControlCenterError(
+                "The agent finished without a complete, valid seed manifest. Open its chat to continue.", 409
+            )
+        self._set_project_onboarding(session["projectId"], {
+            "status": "review",
+            "sessionId": session_id,
+            "seedCount": session.get("seedCount", len(status["seeds"])),
+        })
+        self._set_seed_stage(session_id, "review")
+        EventLog(self.store.state_dir, session_id).append(
+            "system", "The design seeds are ready to review in the Control Center.", "status"
+        )
+
+    def _complete_seed_onboarding(self, session_id):
+        session = self._get_session(session_id)
+        project = self.projects.get_project(session["projectId"])
+        worktree = Path(session["worktree"])
+        marker = worktree / ".webkit" / "seed-selection.json"
+        try:
+            result = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ControlCenterError("The seed agent did not return a valid finish result: {}".format(exc), 409)
+        marker.unlink(missing_ok=True)
+        if result.get("status") != "ready":
+            message = result.get("message") or "The seed agent needs a decision before it can finish."
+            self._set_project_onboarding(project["id"], {
+                "status": "error", "sessionId": session_id, "message": message,
+            })
+            raise ControlCenterError(message, 409)
+        if run_command(["git", "status", "--porcelain"], cwd=worktree).stdout.strip():
+            raise ControlCenterError("The seed agent reported ready, but its worktree is not clean.", 409)
+        project_path = Path(project["path"])
+        if run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip():
+            raise ControlCenterError("The main checkout has uncommitted changes.", 409)
+        run_command(["git", "merge", "--ff-only", session["branch"]], cwd=project_path)
+        github = self.projects.push_to_github(project)
+        runtime = self.runtimes.get(session_id)
+        if runtime:
+            self._release(runtime)
+        if worktree.exists():
+            run_command(["git", "worktree", "remove", str(worktree)], cwd=project_path)
+        run_command(["git", "branch", "-d", session["branch"]], cwd=project_path)
+        self._set_session_status(session_id, "merged")
+        self._set_seed_stage(session_id, "complete")
+        self._set_project_onboarding(project["id"], {
+            "status": "complete",
+            "selected": (project.get("onboarding") or {}).get("selected", []),
+            "completedAt": utc_now(),
+            "githubPushed": bool(github.get("pushed")),
+        })
+        EventLog(self.store.state_dir, session_id).append(
+            "system", "Seed onboarding finished and merged into {}{}.".format(
+                project.get("baseBranch", "main"), "; GitHub updated" if github.get("pushed") else ""
+            ), "status"
+        )
 
     def _claim_and_preview(self, runtime, config):
         session = runtime.session
@@ -1414,6 +1772,26 @@ fast-forward, GitHub push, and lifecycle cleanup after your ready signal.
                 self._set_session_status(session["id"], "active")
                 runtime.start()
                 runtime.log.append("system", "Session recovered after Control Center restart.", "status")
+                if session.get("kind") == "seeds":
+                    project = self.projects.get_project(session["projectId"])
+                    onboarding = project.get("onboarding") or {}
+                    if session.get("seedStage") == "finalizing" and session.get("seedFinalizePrompt"):
+                        runtime.enqueue(
+                            session["seedFinalizePrompt"], "seed-finalize",
+                            display="Resuming the selected seed build after restart…",
+                        )
+                    elif session.get("seedStage") == "generating":
+                        status = self.seed_status(session["id"])
+                        if status.get("ready"):
+                            self._set_project_onboarding(session["projectId"], {
+                                "status": "review", "sessionId": session["id"],
+                                "seedCount": session.get("seedCount", len(status.get("seeds", []))),
+                            })
+                        elif session.get("seedPrompt"):
+                            runtime.enqueue(
+                                session["seedPrompt"], "seed-generation",
+                                display="Resuming seed generation after restart…",
+                            )
             except Exception as exc:
                 self._set_session_status(session["id"], "error", str(exc))
 
@@ -1489,6 +1867,38 @@ class ControlCenter:
             "system": self.projects.system_status(),
             "settings": normalized_settings(state.get("settings")),
         }
+
+    def create_project(self, name, parent, provider, onboarding=None):
+        onboarding = onboarding if isinstance(onboarding, dict) else {}
+        project = self.projects.create_project(name, parent, provider, onboarding)
+        try:
+            session = self.sessions.start_seed_session(
+                project["id"], onboarding.get("seedCount", 10), onboarding.get("brief", "")
+            )
+            project = self.projects.get_project(project["id"])
+            return {"project": project, "seedSession": session}
+        except Exception as exc:
+            self.sessions._set_project_onboarding(project["id"], {
+                "status": "error", "message": str(exc), "seedCount": onboarding.get("seedCount", 10),
+            })
+            project = self.projects.get_project(project["id"])
+            return {"project": project, "seedSession": None, "seedError": str(exc)}
+
+    def start_project_seeds(self, project_id):
+        project = self.projects.get_project(project_id)
+        onboarding = project.get("onboarding") or {}
+        session_id = onboarding.get("sessionId")
+        if session_id:
+            try:
+                session = self.sessions._get_session(session_id)
+                if session.get("status") in ("active", "busy", "merging", "error"):
+                    return {"seedSession": session}
+            except ControlCenterError:
+                pass
+        session = self.sessions.start_seed_session(
+            project_id, onboarding.get("seedCount", 10), ""
+        )
+        return {"seedSession": session}
 
     def choose_folder(self, initial=None, purpose=None):
         prompt = (

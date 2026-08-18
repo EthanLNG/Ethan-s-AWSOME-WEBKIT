@@ -73,7 +73,12 @@ authenticated on your computer; no API keys are stored by Webkit.
 ```
 
 On first launch, choose Codex, Claude Code, or both, then add an existing
-website or create a starter website. Every project chooses one provider. Pick
+website or create a starter website. New-site onboarding can optionally collect
+a brand/design brief, logos, imagery, design-system files, copy, PDFs, and other
+references. It then asks how many distinct design seeds to explore (10 by
+default). The agent builds them in an isolated worktree; the Control Center lets
+you preview every direction, select one or several, and describe which parts to
+combine before the chosen direction becomes the production site. Every project chooses one provider. Pick
 one of the five colors to start an isolated Git worktree, background agent, and
 stamped preview. The chat stays collapsed until you want it; submitted rectangle
 feedback from the website wakes the matching CLI automatically.
@@ -103,7 +108,8 @@ automatically; when GitHub CLI is authenticated, new websites are created as
 private repositories. Accepted color work is merged in the managed checkout
 and pushed to GitHub `main`. If GitHub is not connected, work still merges
 locally and the UI asks the user to connect GitHub to their coding agent (or
-run `gh auth login`).
+run `gh auth login`). When local `main` has committed work that is not on
+GitHub, a one-click **Push to GitHub** button appears automatically.
 
 The repository already includes clickable launchers in its top-level folder:
 `AWESOME WEBKIT.command` on macOS, `AWESOME WEBKIT.cmd` on Windows, and

@@ -46,9 +46,9 @@
             <h1 id="projectName"></h1>
             <p class="path" id="projectPath"></p>
           </div>
-          <div class="github-note">
-            <span aria-hidden="true">↗</span>
-            <div><strong>Back it up on GitHub</strong><small>Optional, but recommended once the idea matters.</small></div>
+          <div class="github-note" id="githubNote">
+            <span id="githubNoteIcon" aria-hidden="true">↗</span>
+            <div><strong id="githubNoteTitle">GitHub sync</strong><small id="githubNoteText"></small></div>
           </div>
         </div>
 
@@ -126,7 +126,7 @@
         </label>
       </div>
       <label>Agent provider<select id="projectProviderSelect"></select></label>
-      <label class="github-checkbox"><input id="githubReminder" type="checkbox" checked><span>Remind me to publish this project to GitHub</span></label>
+      <p class="capability-note">GitHub is the default: WebKit detects an existing remote or creates a private repository when GitHub CLI is connected.</p>
       <div class="modal-error" id="projectError"></div>
       <button class="primary full" id="saveProject" type="submit">Create website</button>
     </form>
@@ -206,6 +206,10 @@
         <h2>Open AWESOME WEBKIT</h2>
         <p>A clickable launcher is included in the AWESOME WEBKIT folder. You can also put a copy on your desktop.</p>
         <button class="secondary settings-action" id="installShortcutButton" type="button">Install desktop shortcut</button>
+      </div>
+      <div class="settings-section">
+        <h2>GitHub sync</h2>
+        <p id="githubConnectionStatus"></p>
       </div>
       <div class="modal-error" id="settingsError"></div>
       <button class="primary full" id="saveSettings" type="submit">Save settings</button>

@@ -297,8 +297,21 @@ class ProjectManager:
             "git": self._tool_status("git", ["git", "--version"]),
             "codex": self._tool_status("codex", ["codex", "--version"]),
             "claude": self._tool_status("claude", ["claude", "--version"]),
+            "github": self._github_cli_status(),
             "platform": platform.system().lower(),
             "voiceTranscription": self._voice_engine_status(),
+        }
+
+    @staticmethod
+    def _github_cli_status():
+        executable = shutil.which("gh")
+        if not executable:
+            return {"installed": False, "authenticated": False, "path": None}
+        result = run_command([executable, "auth", "status", "--hostname", "github.com"], check=False, timeout=15)
+        return {
+            "installed": True,
+            "authenticated": result.returncode == 0,
+            "path": executable,
         }
 
     @staticmethod
@@ -343,6 +356,7 @@ class ProjectManager:
         for project in state.get("projects", []):
             item = dict(project)
             item["exists"] = Path(project["path"]).is_dir()
+            item["github"] = self.github_status(project["path"])
             item["sessions"] = [
                 s for s in state.get("sessions", [])
                 if s.get("projectId") == project["id"] and s.get("status") in ("active", "busy", "error")
@@ -377,53 +391,92 @@ class ProjectManager:
         self._install_kit(project_path, provider)
         run_command(["git", "add", "-A"], cwd=project_path)
         run_command(["git", "commit", "-m", "Create website with AWESOME WEBKIT"], cwd=project_path)
-        return self._register(project_path, name.strip() or safe_name, provider)
+        self._ensure_github_repo(project_path, safe_name, "main")
+        return self._register(
+            project_path, name.strip() or safe_name, provider,
+            source_path=project_path, base_branch="main", target_branch="main", managed=False,
+        )
 
     def add_existing(self, path, provider):
         self._validate_provider(provider)
         self._require_git()
         if not (path or "").strip():
             raise ControlCenterError("Choose an existing project folder.")
-        project_path = Path(path).expanduser().resolve()
-        if not project_path.is_dir():
+        selected_path = Path(path).expanduser().resolve()
+        if not selected_path.is_dir():
             raise ControlCenterError("Project folder does not exist.", 404)
-        git_root = self._git_root(project_path)
-        if git_root and git_root != project_path:
+        git_root = self._git_root(selected_path)
+        if git_root and git_root != selected_path:
             raise ControlCenterError(
                 "Choose the Git repository root, not a folder inside it: {}".format(git_root), 409
             )
         was_git = git_root is not None
         if was_git:
-            dirty = run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip()
-            if dirty:
-                raise ControlCenterError("Commit or stash the project's existing changes before adding it.", 409)
+            existing = self._registered_source(git_root)
+            if existing:
+                def update_provider(state):
+                    for project in state.get("projects", []):
+                        if project["id"] == existing["id"]:
+                            project["provider"] = provider
+                            break
+                self.store.update(update_provider)
+                return self.get_project(existing["id"])
+            project_id = uuid.uuid4().hex[:12]
+            project_path, base_branch = self._create_controller_checkout(git_root, project_id)
         else:
+            project_id = None
+            project_path = selected_path
+            base_branch = "main"
             self._git_init(project_path)
-        self._ensure_main_branch(project_path)
-        self._ensure_git_identity(project_path)
-        changed = self._install_kit(project_path, provider)
-        if changed or not was_git:
-            run_command(["git", "add", "-A"], cwd=project_path)
-            staged = run_command(["git", "diff", "--cached", "--quiet"], cwd=project_path, check=False)
-            if staged.returncode != 0:
-                message = "Initialize website and AWESOME WEBKIT" if not was_git else "Install AWESOME WEBKIT"
-                run_command(["git", "commit", "-m", message], cwd=project_path)
-        return self._register(project_path, project_path.name, provider)
+            self._ensure_main_branch(project_path)
+        try:
+            self._ensure_git_identity(project_path)
+            changed = self._install_kit(project_path, provider)
+            if changed or not was_git:
+                run_command(["git", "add", "-A"], cwd=project_path)
+                staged = run_command(["git", "diff", "--cached", "--quiet"], cwd=project_path, check=False)
+                if staged.returncode != 0:
+                    message = "Initialize website and AWESOME WEBKIT" if not was_git else "Install AWESOME WEBKIT"
+                    run_command(["git", "commit", "-m", message], cwd=project_path)
+            self._ensure_github_repo(project_path, git_root.name if git_root else project_path.name, base_branch)
+            return self._register(
+                project_path,
+                git_root.name if git_root else project_path.name,
+                provider,
+                source_path=git_root or project_path,
+                base_branch=base_branch,
+                target_branch="main",
+                managed=was_git,
+                project_id=project_id,
+            )
+        except Exception:
+            if was_git:
+                run_command(["git", "worktree", "remove", "--force", str(project_path)], cwd=git_root, check=False)
+                run_command(["git", "branch", "-D", base_branch], cwd=git_root, check=False)
+            raise
 
-    def _register(self, project_path, name, provider):
+    def _register(
+        self, project_path, name, provider, source_path=None, base_branch="main",
+        target_branch="main", managed=False, project_id=None,
+    ):
         project_path = str(Path(project_path).resolve())
+        source_path = str(Path(source_path or project_path).resolve())
 
         def mutate(state):
             for project in state.get("projects", []):
-                if project["path"] == project_path:
+                if project["path"] == project_path or project.get("sourcePath") == source_path:
                     project["provider"] = provider
                     project["name"] = name
                     return dict(project)
             project = {
-                "id": uuid.uuid4().hex[:12],
+                "id": project_id or uuid.uuid4().hex[:12],
                 "name": name,
-                "slug": slugify(Path(project_path).name),
+                "slug": slugify(name),
                 "path": project_path,
+                "sourcePath": source_path,
+                "baseBranch": base_branch,
+                "targetBranch": target_branch,
+                "managedCheckout": bool(managed),
                 "provider": provider,
                 "createdAt": utc_now(),
             }
@@ -431,6 +484,121 @@ class ProjectManager:
             return dict(project)
 
         return self.store.update(mutate)
+
+    def _registered_source(self, source_path):
+        source_path = str(Path(source_path).resolve())
+        for project in self.store.read().get("projects", []):
+            if project.get("sourcePath", project.get("path")) == source_path:
+                return dict(project)
+        return None
+
+    def _create_controller_checkout(self, git_root, project_id):
+        slug = slugify(Path(git_root).name)
+        branch = "webkit/control-center/{}-{}".format(slug, project_id[:6])
+        checkout = self.store.state_dir / "projects" / (slug + "-" + project_id[:6])
+        checkout.parent.mkdir(parents=True, exist_ok=True)
+        base_ref = self._main_ref(git_root)
+        run_command(
+            ["git", "worktree", "add", "-b", branch, str(checkout), base_ref],
+            cwd=git_root,
+        )
+        return checkout.resolve(), branch
+
+    @staticmethod
+    def _main_ref(path):
+        for ref in ("main", "origin/main"):
+            exists = run_command(
+                ["git", "rev-parse", "--verify", "--quiet", ref], cwd=path, check=False
+            )
+            if exists.returncode == 0:
+                return ref
+        return "HEAD"
+
+    @staticmethod
+    def github_status(path):
+        if not Path(path).is_dir():
+            return {"connected": False, "remote": None, "url": None}
+        remotes = run_command(["git", "remote"], cwd=path, check=False)
+        if remotes.returncode != 0:
+            return {"connected": False, "remote": None, "url": None}
+        for remote in remotes.stdout.splitlines():
+            remote = remote.strip()
+            if not remote:
+                continue
+            result = run_command(["git", "remote", "get-url", remote], cwd=path, check=False)
+            url = result.stdout.strip() if result.returncode == 0 else ""
+            if re.search(r"(^|[/:@])github\.com[/:]", url, re.IGNORECASE):
+                return {"connected": True, "remote": remote, "url": url}
+        return {"connected": False, "remote": None, "url": None}
+
+    def _ensure_github_repo(self, project_path, repo_name, branch):
+        status = self.github_status(project_path)
+        if status["connected"]:
+            run_command(
+                ["git", "push", status["remote"], "{}:main".format(branch)],
+                cwd=project_path, check=False, timeout=120,
+            )
+            return status
+        cli = self._github_cli_status()
+        if not cli["authenticated"]:
+            return status
+        existing = run_command(["git", "remote"], cwd=project_path, check=False).stdout.splitlines()
+        remote = "github" if "origin" in existing else "origin"
+        created = run_command(
+            [cli["path"], "repo", "create", slugify(repo_name), "--private", "--source", ".", "--remote", remote],
+            cwd=project_path, check=False, timeout=120,
+        )
+        if created.returncode != 0:
+            return status
+        run_command(
+            ["git", "push", "-u", remote, "{}:main".format(branch)],
+            cwd=project_path, check=False, timeout=120,
+        )
+        return self.github_status(project_path)
+
+    def sync_from_github(self, project):
+        project_path = Path(project["path"])
+        status = self.github_status(project_path)
+        if not status["connected"]:
+            return {"connected": False, "synced": False}
+        target = project.get("targetBranch", "main")
+        fetched = run_command(
+            ["git", "fetch", status["remote"], target], cwd=project_path, check=False, timeout=120
+        )
+        if fetched.returncode != 0:
+            return {"connected": True, "synced": False, "error": fetched.stderr.strip()}
+        remote_ref = "{}/{}".format(status["remote"], target)
+        remote_is_ancestor = run_command(
+            ["git", "merge-base", "--is-ancestor", remote_ref, "HEAD"], cwd=project_path, check=False
+        )
+        if remote_is_ancestor.returncode == 0:
+            return {"connected": True, "synced": True}
+        merged = run_command(
+            ["git", "merge", "--no-edit", remote_ref, "-m", "Sync GitHub main into AWESOME WEBKIT"],
+            cwd=project_path, check=False, timeout=120,
+        )
+        if merged.returncode != 0:
+            run_command(["git", "merge", "--abort"], cwd=project_path, check=False)
+            return {"connected": True, "synced": False, "error": merged.stderr.strip()}
+        return {"connected": True, "synced": True}
+
+    def push_to_github(self, project):
+        project_path = Path(project["path"])
+        status = self.github_status(project_path)
+        if not status["connected"]:
+            return {"connected": False, "pushed": False}
+        base = project.get("baseBranch", "main")
+        target = project.get("targetBranch", "main")
+        result = run_command(
+            ["git", "push", status["remote"], "{}:{}".format(base, target)],
+            cwd=project_path, check=False, timeout=120,
+        )
+        return {
+            "connected": True,
+            "pushed": result.returncode == 0,
+            "remote": status["remote"],
+            "error": None if result.returncode == 0 else (result.stderr.strip() or result.stdout.strip()),
+        }
 
     def _validate_provider(self, provider):
         enabled = self.store.read().get("providers", [])
@@ -889,10 +1057,14 @@ class SessionManager:
                     return session
             dirty = run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip()
             if dirty:
-                raise ControlCenterError("The main project has uncommitted changes. Commit or stash them first.", 409)
+                raise ControlCenterError("The Control Center checkout has uncommitted changes.", 409)
             current_branch = run_command(["git", "branch", "--show-current"], cwd=project_path).stdout.strip()
-            if current_branch != "main":
-                raise ControlCenterError("Open the project repository on its main branch before starting color sessions.", 409)
+            base_branch = project.get("baseBranch", "main")
+            if current_branch != base_branch:
+                raise ControlCenterError("The Control Center checkout is not on its managed base branch.", 409)
+            sync = self.projects.sync_from_github(project)
+            if sync.get("connected") and sync.get("error"):
+                raise ControlCenterError("GitHub main could not be synced: {}".format(sync["error"]), 409)
             config = json.loads((project_path / "webkit" / "webkit.config.json").read_text(encoding="utf-8"))
             palette = {entry["slug"]: entry for entry in config.get("palette", [])}
             if color not in palette:
@@ -906,7 +1078,7 @@ class SessionManager:
             branch = "webkit/{}/{}-{}".format(color, stamp, session_id[:6])
             worktree = self.store.state_dir / "worktrees" / project["slug"] / (color + "-" + session_id[:6])
             worktree.parent.mkdir(parents=True, exist_ok=True)
-            run_command(["git", "worktree", "add", "-b", branch, str(worktree), "main"], cwd=project_path)
+            run_command(["git", "worktree", "add", "-b", branch, str(worktree), base_branch], cwd=project_path)
             entry = palette[color]
             default_page = str(config.get("default_page", "index.html")).lstrip("/")
             preview_url = "http://127.0.0.1:{}/{}".format(entry["port"], default_page)
@@ -1016,9 +1188,13 @@ class SessionManager:
             raise ControlCenterError("The color worktree has uncommitted changes. Ask the agent to commit them first.", 409)
         project_path = Path(project["path"])
         if run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip():
-            raise ControlCenterError("Main has uncommitted changes. Commit or stash them before merging.", 409)
-        if run_command(["git", "branch", "--show-current"], cwd=project_path).stdout.strip() != "main":
-            raise ControlCenterError("The project repository must be on main to merge.", 409)
+            raise ControlCenterError("The Control Center checkout has uncommitted changes.", 409)
+        base_branch = project.get("baseBranch", "main")
+        if run_command(["git", "branch", "--show-current"], cwd=project_path).stdout.strip() != base_branch:
+            raise ControlCenterError("The Control Center checkout is not on its managed base branch.", 409)
+        sync = self.projects.sync_from_github(project)
+        if sync.get("connected") and sync.get("error"):
+            raise ControlCenterError("GitHub main could not be synced: {}".format(sync["error"]), 409)
         self._set_session_status(session_id, "merging")
         if runtime:
             runtime.stop()
@@ -1039,13 +1215,18 @@ class SessionManager:
                     raise ControlCenterError(message, 409)
             self._set_session_status(session_id, "error", str(exc))
             raise
+        github = self.projects.push_to_github(project)
         if runtime:
             self._release(runtime)
         if worktree.exists():
             run_command(["git", "worktree", "remove", str(worktree)], cwd=project_path)
         run_command(["git", "branch", "-d", session["branch"]], cwd=project_path)
         self._set_session_status(session_id, "merged")
-        return {"merged": True, "branch": "main"}
+        return {
+            "merged": True,
+            "branch": project.get("targetBranch", "main"),
+            "github": github,
+        }
 
     def _restart_runtime(self, session):
         worktree = Path(session["worktree"])

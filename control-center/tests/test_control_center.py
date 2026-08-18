@@ -114,12 +114,55 @@ class ControlCenterTests(unittest.TestCase):
         subprocess.run(["git", "add", "-A"], cwd=project_path, check=True)
         subprocess.run(["git", "commit", "-m", "Old project"], cwd=project_path, check=True, capture_output=True)
         with mock.patch.object(self.app.projects, "_find_port_block", return_value=6331):
-            self.app.projects.add_existing(str(project_path), "codex")
-        self.assertEqual((project_path / "webkit" / "SETUP.md").read_text(), "local setup\n")
-        self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        agents = (project_path / "AGENTS.md").read_text()
+            project = self.app.projects.add_existing(str(project_path), "codex")
+        managed_path = Path(project["path"])
+        self.assertTrue(project["managedCheckout"])
+        self.assertNotEqual(managed_path, project_path)
+        self.assertEqual((managed_path / "webkit" / "SETUP.md").read_text(), "local setup\n")
+        self.assertTrue((managed_path / "webkit" / "CONTROL-CENTER.md").exists())
+        agents = (managed_path / "AGENTS.md").read_text()
         self.assertIn("Older pointer.", agents)
         self.assertIn("## Webkit Control Center", agents)
+
+    def test_add_existing_accepts_an_already_checked_out_feature_worktree(self):
+        repo = self.root / "checked-out-repo"
+        repo.mkdir()
+        (repo / "index.html").write_text("<title>Main</title>", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "Initial"], cwd=repo, check=True, capture_output=True)
+        feature_checkout = self.root / "feature-checkout"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", "feature/test", str(feature_checkout), "main"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6336):
+            project = self.app.projects.add_existing(str(feature_checkout), "codex")
+        managed_path = Path(project["path"])
+        self.assertTrue(project["managedCheckout"])
+        self.assertEqual(Path(project["sourcePath"]), feature_checkout.resolve())
+        self.assertTrue(project["baseBranch"].startswith("webkit/control-center/"))
+        self.assertEqual(
+            subprocess.run(
+                ["git", "branch", "--show-current"], cwd=managed_path,
+                text=True, capture_output=True, check=True,
+            ).stdout.strip(),
+            project["baseBranch"],
+        )
+
+    def test_github_remote_is_detected_without_network_access(self):
+        repo = self.root / "github-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:example/site.git"],
+            cwd=repo, check=True,
+        )
+        status = self.app.projects.github_status(repo)
+        self.assertTrue(status["connected"])
+        self.assertEqual(status["remote"], "origin")
 
     def test_add_existing_rejects_a_subfolder_of_another_repository(self):
         parent_repo = self.root / "parent-repo"

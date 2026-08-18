@@ -92,10 +92,18 @@ Each color session has two explicit finish actions:
 - **Merge to main** merges the color branch and closes its worktree.
 - **Discard work** permanently deletes the unmerged color branch and worktree.
 
-Agents never work directly on `main`. Project onboarding may create an initial
-Git commit or install the vendored kit before the first color session. GitHub
-is optional—the UI reminds you to publish useful projects, but local Git is all
-Webkit requires.
+Agents never work directly on `main`. Existing repositories are imported into
+a dedicated Control Center worktree branch, so a project can be selected even
+when its normal checkout (or a Codex/Claude worktree) is already open. Color
+agents branch from that managed checkout instead of depending on the user's
+currently checked-out branch.
+
+GitHub is the default sync path. Existing GitHub remotes are detected
+automatically; when GitHub CLI is authenticated, new websites are created as
+private repositories. Accepted color work is merged in the managed checkout
+and pushed to GitHub `main`. If GitHub is not connected, work still merges
+locally and the UI asks the user to connect GitHub to their coding agent (or
+run `gh auth login`).
 
 The repository already includes clickable launchers in its top-level folder:
 `AWESOME WEBKIT.command` on macOS, `AWESOME WEBKIT.cmd` on Windows, and

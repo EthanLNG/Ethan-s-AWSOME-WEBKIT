@@ -83,6 +83,8 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .project-heading h1 { margin: 0; font-size: clamp(3rem, 6vw, 6.5rem); line-height: .9; letter-spacing: -.065em; }
 .path { max-width: 720px; margin: 14px 0 0; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .github-note { display: flex; gap: 12px; width: 285px; padding: 15px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); }
+.github-note.connected { border-color: color-mix(in srgb, var(--green) 55%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--panel)); }
+.github-note.missing { border-color: color-mix(in srgb, var(--orange) 55%, var(--line)); background: color-mix(in srgb, var(--orange) 8%, var(--panel)); }
 .github-note > span { font-size: 22px; }
 .github-note strong, .github-note small { display: block; }
 .github-note small { margin-top: 4px; color: var(--muted); line-height: 1.35; }
@@ -179,7 +181,6 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .folder-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .folder-picker input[readonly] { overflow: hidden; background: #f7f4ed; color: var(--muted); text-overflow: ellipsis; cursor: default; }
 .folder-picker .secondary { padding: 10px 13px; white-space: nowrap; }
-.github-checkbox { display: flex; align-items: center; gap: 9px; margin: 17px 0; font-size: 13px; }
 .modal-error { min-height: 19px; color: #9f2724; font-size: 12px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
 .toast { position: fixed; z-index: 50; left: 50%; bottom: 22px; max-width: min(560px, calc(100vw - 40px)); transform: translateX(-50%); padding: 12px 18px; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: white; box-shadow: 4px 5px 0 rgba(23,23,23,.14); font-size: 13px; }

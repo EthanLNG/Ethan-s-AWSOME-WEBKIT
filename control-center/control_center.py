@@ -122,7 +122,10 @@ class StateStore:
         self.lock = threading.RLock()
         self.state_dir.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            atomic_write_json(self.path, {"version": 1, "providers": [], "projects": [], "sessions": []})
+            atomic_write_json(self.path, {
+                "version": 1, "providers": [], "projects": [], "sessions": [],
+                "settings": {"dictationMode": "speech"},
+            })
 
     def read(self):
         with self.lock:
@@ -185,6 +188,19 @@ class ProjectManager:
             "codex": self._tool_status("codex", ["codex", "--version"]),
             "claude": self._tool_status("claude", ["claude", "--version"]),
             "platform": platform.system().lower(),
+            "voiceTranscription": self._voice_engine_status(),
+        }
+
+    @staticmethod
+    def _voice_engine_status():
+        if shutil.which("whisper"):
+            return {"available": True, "engine": "local Whisper"}
+        if shutil.which("whisper-cli") and os.environ.get("WHISPER_MODEL"):
+            return {"available": True, "engine": "local whisper.cpp"}
+        return {
+            "available": False,
+            "engine": None,
+            "help": "Install local Whisper before using agent voice notes.",
         }
 
     @staticmethod
@@ -431,6 +447,9 @@ class ProjectManager:
             "browser": {"mode": "auto", "app_name": "Google Chrome"},
             "feedback_dir": ".webkit/feedback",
             "hotkeys": {"toggle": "KeyC", "dictate": "KeyV"},
+            "dictation": {
+                "mode": self.store.read().get("settings", {}).get("dictationMode", "speech")
+            },
         }
 
     @staticmethod
@@ -816,6 +835,7 @@ class SessionManager:
         env = os.environ.copy()
         env["WK_CONFIG"] = str(config_path)
         env["WK_COLOR_OWNER"] = str(site_root)
+        env["WK_DICTATION_MODE"] = self.store.read().get("settings", {}).get("dictationMode", "speech")
         self._claim_lock(config, session["color"], site_root)
         server = worktree / "webkit" / "server" / "preview-server.py"
         runtime.preview_process = subprocess.Popen(
@@ -977,6 +997,20 @@ class SessionManager:
         for runtime in list(self.runtimes.values()):
             self._release(runtime)
 
+    def refresh_previews_for_settings(self):
+        restarted = 0
+        deferred = 0
+        for session_id, runtime in list(self.runtimes.items()):
+            session = self._get_session(session_id)
+            if session.get("status") == "busy":
+                deferred += 1
+                continue
+            runtime.stop()
+            self.runtimes.pop(session_id, None)
+            self._restart_runtime(session)
+            restarted += 1
+        return {"restarted": restarted, "deferred": deferred}
+
     def _runtime(self, session_id):
         runtime = self.runtimes.get(session_id)
         if not runtime:
@@ -1029,4 +1063,13 @@ class ControlCenter:
             "projects": self.projects.list_projects(),
             "sessions": state.get("sessions", []),
             "system": self.projects.system_status(),
+            "settings": state.get("settings", {"dictationMode": "speech"}),
         }
+
+    def save_settings(self, settings):
+        mode = (settings or {}).get("dictationMode")
+        if mode not in ("speech", "voice-note"):
+            raise ControlCenterError("Choose browser speech or agent voice notes.")
+        self.store.update(lambda state: state.update({"settings": {"dictationMode": mode}}))
+        refresh = self.sessions.refresh_previews_for_settings()
+        return {"settings": {"dictationMode": mode}, "previews": refresh}

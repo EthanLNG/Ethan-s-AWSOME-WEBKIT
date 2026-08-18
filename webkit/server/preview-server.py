@@ -270,6 +270,12 @@ _HOTKEY_ATTRS = "".join(
     for name in ("toggle", "dictate")
     if isinstance(_HOTKEYS.get(name), str) and _HOTKEY_CODE.match(_HOTKEYS[name])
 )
+_DICTATION = CONFIG.get("dictation", {})
+if not isinstance(_DICTATION, dict):
+    _DICTATION = {}
+_DICTATION_MODE = os.environ.get("WK_DICTATION_MODE", _DICTATION.get("mode", "speech"))
+if _DICTATION_MODE not in ("speech", "voice-note"):
+    _DICTATION_MODE = "speech"
 
 
 def inject(html, mode):
@@ -277,8 +283,8 @@ def inject(html, mode):
         return html
     tag = (
         '<script src="/__wk/overlay.js" defer data-wk-color="{}" '
-        'data-wk-emoji="{}" data-wk-mode="{}"{}></script>'.format(
-            SLUG, COLOR, mode, _HOTKEY_ATTRS
+        'data-wk-emoji="{}" data-wk-mode="{}" data-wk-dictation-mode="{}"{}></script>'.format(
+            SLUG, COLOR, mode, _DICTATION_MODE, _HOTKEY_ATTRS
         )
     )
     matches = list(_BODY_CLOSE.finditer(html)) or list(_HTML_CLOSE.finditer(html))
@@ -420,6 +426,12 @@ def _rewrite_before_html(html):
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 _MAX_BODY = 2 * 1024 * 1024
+_MAX_VOICE_BODY = 25 * 1024 * 1024
+_VOICE_ID = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
+_VOICE_TYPES = {
+    "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/mp4": ".m4a",
+    "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav",
+}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -654,9 +666,76 @@ class Handler(SimpleHTTPRequestHandler):
     def _wk_post(self, raw):
         if raw == "/__wk/feedback":
             return self._wk_feedback()
+        if raw == "/__wk/voice-note":
+            return self._wk_voice_note()
+        if raw == "/__wk/voice-note/delete":
+            return self._wk_voice_note_delete()
         if raw == "/__wk/verdicts":
             return self._wk_verdicts()
         return self._send_json(404, {"error": "unknown webkit endpoint: " + raw})
+
+    def _wk_voice_note(self):
+        if FEEDBACK_DIR is None:
+            return self._send_json(503, {"error": "not a git repository — feedback loop disabled"})
+        note_id = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+        if not _VOICE_ID.match(note_id):
+            return self._send_json(400, {"error": "invalid voice-note id"})
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        extension = _VOICE_TYPES.get(content_type)
+        if not extension:
+            return self._send_json(415, {"error": "unsupported voice-note audio type"})
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            return self._send_json(411, {"error": "Content-Length required"})
+        if length <= 0:
+            return self._send_json(400, {"error": "voice note is empty"})
+        if length > _MAX_VOICE_BODY:
+            return self._send_json(413, {"error": "voice note exceeds 25 MB"})
+        body = self.rfile.read(length)
+        if len(body) != length:
+            return self._send_json(400, {"error": "voice note upload was incomplete"})
+        directory = os.path.join(FEEDBACK_DIR, "voice-notes")
+        os.makedirs(directory, exist_ok=True)
+        filename = note_id + extension
+        path = os.path.join(directory, filename)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix="." + filename + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(body)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        relative = os.path.relpath(path, GIT_ROOT).replace(os.sep, "/")
+        return self._send_json(201, {
+            "ok": True,
+            "voiceNote": {"path": relative, "mimeType": content_type, "bytes": length},
+        })
+
+    def _wk_voice_note_delete(self):
+        incoming = self._read_json_body()
+        if incoming is None:
+            return
+        relative = incoming.get("path")
+        if not isinstance(relative, str):
+            return self._send_json(400, {"error": "voice-note path is required"})
+        directory = os.path.realpath(os.path.join(FEEDBACK_DIR, "voice-notes"))
+        candidate = os.path.realpath(os.path.join(GIT_ROOT, relative))
+        try:
+            inside = os.path.commonpath((directory, candidate)) == directory
+        except ValueError:
+            inside = False
+        if not inside or not _VOICE_ID.match(os.path.splitext(os.path.basename(candidate))[0]):
+            return self._send_json(400, {"error": "invalid voice-note path"})
+        try:
+            os.unlink(candidate)
+        except FileNotFoundError:
+            pass
+        return self._send_json(200, {"ok": True})
 
     def _read_json_body(self):
         """Read+parse the POST body. Returns the object, or None after having

@@ -288,6 +288,15 @@
 }
 .wk-mic.armed { color: var(--wk-danger); border-color: var(--wk-danger); }
 .wk-mic.error { color: var(--wk-danger); border-color: var(--wk-danger); background: rgba(220, 38, 38, 0.08); }
+.wk-mic.uploading { color: var(--wk-accent); border-color: var(--wk-accent); animation: wk-pulse 1s ease infinite; }
+.wk-voice-status {
+  margin-left: auto;
+  color: var(--wk-muted);
+  font: 600 10px/1 var(--wk-font);
+  white-space: nowrap;
+}
+.wk-voice-status.ready { color: var(--wk-ok); }
+.wk-voice-status:not([hidden]) + .wk-speech-lang { margin-left: 0; }
 
 /* textarea + interim-dictation ghost. The ghost mirrors the textarea's metrics
  * exactly; committed text is painted transparent so only the gray interim tail
@@ -379,6 +388,20 @@
 }
 .wk-seg-btn:hover { color: var(--wk-ink); }
 .wk-seg-btn.active { background: var(--wk-accent); color: #fff; }
+
+.wk-scope-wrap { position: relative; align-self: stretch; display: flex; }
+.wk-scope-btn {
+  width: 27px;
+  padding: 0 3px;
+  border: 1px solid var(--wk-line);
+  border-radius: 7px;
+  background: var(--wk-paper);
+  color: var(--wk-muted);
+  font: 700 11px/1 var(--wk-font);
+  cursor: pointer;
+}
+.wk-scope-btn:hover { color: var(--wk-accent); border-color: var(--wk-accent); }
+.wk-scope-btn.site { color: #fff; border-color: var(--wk-accent); background: var(--wk-accent); }
 
 .wk-step-row { gap: 6px; }
 .wk-step-label { font-size: 12px; color: var(--wk-muted); margin-right: auto; }

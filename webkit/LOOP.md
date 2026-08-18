@@ -125,6 +125,9 @@ Read `.webkit/feedback/<slug>/feedback.json`. Full schema:
                             //   { "cta": { "current": "B", "letters": "AB" } }
                             // Informational: it tells you what the user was LOOKING AT.
       "text": "make this button bigger and bolder",
+      "voiceNote": null,    // or {"path":".webkit/feedback/blue/voice-notes/voice-….webm",
+                            //     "mimeType":"audio/webm", "bytes":12345,
+                            //     "durationMs":4200, "language":"en"}; text may be empty
       "abcRequest": null,   // see below
       "status": "new"       // the overlay ALWAYS writes "new". "redo" only exists if
                             // YOU set it when re-queuing a point into a later round
@@ -148,7 +151,18 @@ instead of a single change:
 Use `context[]` to find the target: try `context[0].selector` first; if the
 DOM shifted since capture, fall back to the rect + the other context entries.
 The user's `text` is the instruction; the geometry is only there to tell you
-*where*.
+*where*. If `voiceNote` is non-null, transcribe it locally before interpreting
+the request:
+
+```sh
+python3 webkit/scripts/transcribe-voice-note.py <voiceNote.path> --language <voiceNote.language>
+```
+
+Treat that output as the point's instruction (combined with any typed `text`).
+Do not skip, guess, or claim to have heard the recording if the helper reports
+that local Whisper is unavailable; report the concrete setup error instead.
+After a successful transcription, remove the source audio file—the transcript
+is now in your working context and WebKit does not retain private recordings.
 
 ## Step 3 — BEFORE REF
 
@@ -268,7 +282,8 @@ Read `.webkit/feedback/<slug>/verdicts.json`. Full schema:
       "pointId": "…",
       "verdict": "accept",        // "accept" | "delete" | "redo"
       "chosenLetter": "C",        // present iff accepting an abc point — the winner
-      "redoText": "…"             // present iff verdict is "redo" — the new instruction
+      "redoText": "…",            // typed redo instruction; may be empty with a voice note
+      "redoVoiceNote": null        // same shape and local-transcription rule as point.voiceNote
     }
   ]
 }
@@ -293,7 +308,8 @@ Per verdict:
   newest first). If the point was abc: that *is* the abandon — but if a plain
   revert won't cleanly remove the experiment (later commits touched the same
   lines), do an explicit abandon per abc skill §6 instead, as its own commit.
-- **redo** — re-edit per `redoText` (a correction on top of your attempt — do
+- **redo** — locally transcribe `redoVoiceNote` when present, then re-edit per
+  that transcript plus `redoText` (a correction on top of your attempt — do
   not revert first unless the redo text says to start over), new commit(s),
   same message format with the **next** round number.
 

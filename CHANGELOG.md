@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.0 (2026-08-18) — Point-scoped review and private agent voice notes
+
+- Before/after now defaults to the current feedback target. A compact arrow
+  button beside the toggle switches to whole-website comparison and back.
+- Added Control Center Settings with browser speech-to-text as the default and
+  an optional Agent voice-note mode.
+- Voice-note mode records and stores the original audio per feedback point;
+  background agents transcribe it with the bundled local-Whisper bridge. The UI
+  verifies that a local engine is available and never silently uploads audio.
+- Added voice-note upload validation, size limits, schema documentation, and
+  English/Hebrew language hints for local transcription.
+
 ## v0.5.1 (2026-08-18) — Bilingual dictation and typing-safe hotkeys
 
 - `C` and `V` now remain ordinary characters while any text field is focused,

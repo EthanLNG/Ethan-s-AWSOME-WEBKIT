@@ -140,6 +140,15 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .provider-options input:checked + span { border-color: var(--ink); background: #edf7ff; box-shadow: 4px 4px 0 var(--blue); }
 .provider-options b, .provider-options small { display: block; }
 .provider-options small { margin-top: 5px; color: var(--muted); }
+.dictation-options { display: grid; gap: 10px; margin: 24px 0 14px; }
+.dictation-options label { cursor: pointer; }
+.dictation-options input { position: absolute; opacity: 0; }
+.dictation-options span { display: block; padding: 16px 18px; border: 1.5px solid var(--line); border-radius: 15px; }
+.dictation-options input:checked + span { border-color: var(--ink); background: #edf7ff; box-shadow: 4px 4px 0 var(--blue); }
+.dictation-options b, .dictation-options small { display: block; }
+.dictation-options small { margin-top: 5px; color: var(--muted); line-height: 1.4; }
+.dictation-options label.disabled { cursor: not-allowed; opacity: .52; }
+.capability-note { margin: 0 0 10px !important; padding: 10px 12px; border-radius: 10px; background: #ece7dd; font-size: 12px; }
 .dialog-close { position: absolute; top: 16px; right: 16px; border: 0; background: none; font-size: 25px; cursor: pointer; }
 .segmented { display: grid; grid-template-columns: 1fr 1fr; margin: 22px 0; padding: 4px; border-radius: 12px; background: #ece7dd; }
 .segmented button { padding: 9px; border: 0; border-radius: 9px; background: transparent; font-weight: 750; cursor: pointer; }

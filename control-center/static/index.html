@@ -13,6 +13,7 @@
       <span><strong>AWESOME</strong><small>WEBKIT</small></span>
     </button>
     <div class="system-status" id="systemStatus" aria-live="polite"></div>
+    <button class="secondary small" id="settingsButton" type="button">Settings</button>
     <button class="secondary small" id="installShortcutButton" type="button">Desktop shortcut</button>
     <button class="primary small" id="addProjectButton" type="button">+ Project</button>
   </header>
@@ -95,7 +96,7 @@
 
   <dialog id="projectDialog" class="modal project-modal">
     <form method="dialog" id="projectForm">
-      <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+      <button class="dialog-close" id="projectDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Website project</p>
       <h2>Create or bring your own</h2>
       <div class="segmented" role="tablist">
@@ -125,6 +126,28 @@
         <button class="secondary" value="cancel">Cancel</button>
         <button class="danger" id="confirmAction" type="button">Confirm</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="settingsDialog" class="modal settings-modal">
+    <form method="dialog" id="settingsForm">
+      <button class="dialog-close" id="settingsDialogClose" type="button" aria-label="Close">×</button>
+      <p class="eyebrow">Control Center settings</p>
+      <h2>How should the mic work?</h2>
+      <p>Choose one mode for all WebKit previews opened by this Control Center.</p>
+      <div class="dictation-options">
+        <label>
+          <input type="radio" name="dictationMode" value="speech">
+          <span><b>Browser speech-to-text</b><small>Default. Chrome/Google writes recognized words into the note.</small></span>
+        </label>
+        <label id="voiceNoteOption">
+          <input type="radio" name="dictationMode" value="voice-note">
+          <span><b>Agent voice notes</b><small>Records audio with no browser transcription. The agent transcribes it locally with Whisper.</small></span>
+        </label>
+      </div>
+      <p class="capability-note" id="voiceCapability"></p>
+      <div class="modal-error" id="settingsError"></div>
+      <button class="primary full" id="saveSettings" type="submit">Save settings</button>
     </form>
   </dialog>
 

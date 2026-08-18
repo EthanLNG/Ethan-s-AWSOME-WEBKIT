@@ -25,10 +25,9 @@ tab strip.
   is focused, so `C` and `V` remain typable. Dictation has an explicit persistent
   English/עברית recognition selector. Nothing of the kit sits on the page at rest — no
   button, no badge — so what you look at is your design, not a tool around it.
-- **Before/after toggle from git** — the review bar swaps the reviewed section in place
-  between the pre-round commit (served straight out of `git show`) and the current state
-  — no page reload, stylesheets included so CSS-only changes show — scroll
-  position preserved.
+- **Point-first before/after from git** — the review bar compares only the exact
+  feedback target by default. Its adjacent arrow button switches to a full-site
+  snapshot when you want to inspect every change together.
 - **Accept / delete / redo verdict loop** — verdict each point in the browser; the agent
   keeps, reverts, or re-does the matching commit and comes back for another round.
 - **ABC lettered variants** — any feedback point can request N variants (described by you,
@@ -76,6 +75,12 @@ one of the five colors to start an isolated Git worktree, background agent, and
 stamped preview. The chat stays collapsed until you want it; normal rectangle
 feedback on the website wakes the matching CLI automatically.
 
+The top-bar **Settings** button controls the microphone mode. Browser
+speech-to-text remains the default. **Agent voice notes** instead stores the
+original recording with the feedback point and has the background agent
+transcribe it with a local Whisper installation; Settings reports whether that
+private, on-device transcription engine is ready.
+
 Each color session has two explicit finish actions:
 
 - **Merge to main** merges the color branch and closes its worktree.
@@ -107,9 +112,12 @@ live A/B experiment already on it) built to exercise every part of the loop.
 - **git** — the before/after toggle and the verdict loop are built on commits.
 - **Python 3.7+** — the preview server and helpers are stdlib-only; no pip installs, no
   Node at runtime.
-- **A Chromium-based browser** — the overlay's mic uses Chrome's live speech recognition
+- **A Chromium-based browser** — the default mic mode uses Chrome's live speech recognition
   (`webkitSpeechRecognition`) and explicitly requests English (`en-US`) or Hebrew
   (`he-IL`) from the user's selector. Everything except dictation works in other browsers.
+- **Local Whisper (optional)** — required only for the Control Center's Agent
+  voice-note setting. WebKit never silently uploads recordings to a third-party
+  transcription API.
 - **macOS + Google Chrome** for automatic tab management (stale tabs closed, fresh tab
   opened and focused per design). On other platforms/browsers the kit degrades
   gracefully: it prints the URL and you open it yourself.

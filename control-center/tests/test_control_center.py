@@ -59,11 +59,12 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.5.1")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.6.0")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
         self.assertEqual(config["default_page"], "index.html")
+        self.assertEqual(config["dictation"]["mode"], "speech")
         log = subprocess.run(["git", "log", "-1", "--pretty=%s"], cwd=project_path, text=True, capture_output=True, check=True)
         self.assertEqual(log.stdout.strip(), "Create website with AWESOME WEBKIT")
         self.assertFalse(subprocess.run(["git", "status", "--porcelain"], cwd=project_path, text=True, capture_output=True, check=True).stdout)
@@ -117,6 +118,27 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual((lock_dir / "red.lock" / "owner").read_text().strip(), str(owner.resolve()))
         with self.assertRaises(Exception):
             SessionManager._claim_lock(config, "red", self.root / "other")
+
+    def test_settings_persist_and_refresh_active_previews(self):
+        with mock.patch.object(
+            self.app.sessions, "refresh_previews_for_settings",
+            return_value={"restarted": 2, "deferred": 1},
+        ) as refresh:
+            result = self.app.save_settings({"dictationMode": "voice-note"})
+        self.assertEqual(result["settings"]["dictationMode"], "voice-note")
+        self.assertEqual(self.app.bootstrap()["settings"]["dictationMode"], "voice-note")
+        self.assertEqual(result["previews"], {"restarted": 2, "deferred": 1})
+        refresh.assert_called_once_with()
+
+    def test_voice_note_setting_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(Exception, "browser speech or agent voice notes"):
+            self.app.save_settings({"dictationMode": "cosmetic-only"})
+
+    def test_voice_transcription_status_requires_local_engine(self):
+        with mock.patch("control_center.shutil.which", return_value=None):
+            status = self.app.projects._voice_engine_status()
+        self.assertFalse(status["available"])
+        self.assertIn("local Whisper", status["help"])
 
     def test_merge_moves_committed_color_work_to_main_and_closes_worktree(self):
         parent = self.root / "projects"

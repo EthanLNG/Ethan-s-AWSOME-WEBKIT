@@ -20,9 +20,11 @@ When the controller invokes you because browser feedback changed, read
 `webkit/LOOP.md` and inspect `.webkit/feedback/<slug>/`.
 
 - `feedback.json` without `review.json`: process the batch through LOOP step 6,
-  including one commit per point and an atomic `review.json`, then **exit**.
+  including local transcription of any `voiceNote`, one commit per point, and
+  an atomic `review.json`, then **exit**.
 - `verdicts.json`: process the verdicts and the round transition through LOOP
-  step 9, then **exit**. If a redo produces another review, publish it and exit.
+  step 9, including any `redoVoiceNote`, then **exit**. If a redo produces
+  another review, publish it and exit.
 - Do **not** run `wait-for-file.sh`. The controller watches and will resume you
   for the next state transition.
 - Do **not** claim/release a color, start/stop a preview server, create/remove a

@@ -85,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/providers":
                 result = self.server.app.projects.save_providers(body.get("providers"))
                 self._json({"providers": result})
+            elif path == "/api/settings":
+                self._json(self.server.app.save_settings(body))
             elif path == "/api/system/install-git":
                 if body.get("confirmed") is not True:
                     raise ControlCenterError("Confirm Git installation first.", 409)

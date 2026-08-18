@@ -10,6 +10,7 @@ const state = {
   providers: [],
   projects: [],
   system: {},
+  settings: { dictationMode: "speech" },
   selectedProjectId: null,
   chatSessionId: null,
   chatCursor: 0,
@@ -75,6 +76,41 @@ async function installShortcut() {
   } finally {
     setBusy(button, false);
   }
+}
+
+function openSettings() {
+  const capability = state.system.voiceTranscription || { available: false };
+  const voiceInput = document.querySelector('input[name="dictationMode"][value="voice-note"]');
+  voiceInput.disabled = !capability.available;
+  $("#voiceNoteOption").classList.toggle("disabled", !capability.available);
+  $("#voiceCapability").textContent = capability.available
+    ? `Ready: ${capability.engine}. Recordings stay on this computer.`
+    : (capability.help || "Install local Whisper to enable agent voice notes.");
+  const selected = document.querySelector(`input[name="dictationMode"][value="${state.settings.dictationMode}"]`)
+    || document.querySelector('input[name="dictationMode"][value="speech"]');
+  selected.checked = true;
+  $("#settingsError").textContent = "";
+  $("#settingsDialog").showModal();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const input = document.querySelector('input[name="dictationMode"]:checked');
+  const button = $("#saveSettings");
+  $("#settingsError").textContent = "";
+  setBusy(button, true, "Saving…");
+  try {
+    const result = await api("/api/settings", {
+      method: "POST", body: { dictationMode: input ? input.value : "speech" },
+    });
+    state.settings = result.settings;
+    $("#settingsDialog").close();
+    const restarted = result.previews.restarted || 0;
+    const deferred = result.previews.deferred || 0;
+    toast(`Settings saved.${restarted ? ` Restarted ${restarted} preview${restarted === 1 ? "" : "s"}.` : ""}${deferred ? ` ${deferred} busy preview will use it next time.` : ""}`);
+  } catch (error) {
+    $("#settingsError").textContent = error.message;
+  } finally { setBusy(button, false); }
 }
 
 function renderProjects() {
@@ -363,6 +399,7 @@ async function initialize() {
     state.providers = data.providers;
     state.projects = data.projects;
     state.system = data.system;
+    state.settings = data.settings || { dictationMode: "speech" };
     if (state.projects.length) state.selectedProjectId = state.projects[0].id;
     renderStatus();
     renderProjects();
@@ -377,8 +414,12 @@ $("#homeButton").addEventListener("click", () => { state.selectedProjectId = nul
 [$("#addProjectButton"), $("#railAddButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
 $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
+$("#settingsButton").addEventListener("click", openSettings);
+$("#settingsForm").addEventListener("submit", saveSettings);
 document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("click", () => setProjectMode(button.dataset.projectMode)));
 $("#projectForm").addEventListener("submit", saveProject);
+$("#projectDialogClose").addEventListener("click", () => $("#projectDialog").close());
+$("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").close());
 $("#closeChat").addEventListener("click", () => { $("#chatDrawer").hidden = true; state.chatSessionId = null; });
 $("#chatForm").addEventListener("submit", sendChat);
 $("#mergeButton").addEventListener("click", () => askConfirm("merge"));

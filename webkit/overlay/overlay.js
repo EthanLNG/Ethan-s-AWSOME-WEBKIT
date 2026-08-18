@@ -9,7 +9,7 @@
  *           data-wk-color="blue" data-wk-emoji="🔵" data-wk-mode="after">
  *
  * The user toggles into "feedback" mode with a single key (default C),
- * draws rectangles over the live site, types or dictates a note per point
+ * draws rectangles over the live site, types, dictates, or records a note per point
  * (optionally requesting A/B/C variants), and sends the batch. The agent picks
  * the batch up from .webkit/feedback/<color>/feedback.json, applies each point
  * as its own git commit, writes review.json, and reopens the tab with
@@ -42,6 +42,8 @@
  *                                    batch, review, verdicts}
  *        phase: collecting | awaiting_agent | reviewing | verdicts_sent
  *   POST /__wk/feedback           ← the batch object (schema below)
+ *   POST /__wk/voice-note?id=…    ← raw audio stored beside the feedback inbox
+ *   POST /__wk/voice-note/delete  ← remove an abandoned/replaced recording
  *   POST /__wk/verdicts           ← the verdicts object (409 on batch mismatch)
  *   GET  /__wk/before/<path>      → the page at review.beforeRef, re-injected
  *                                   with data-wk-mode="before"
@@ -61,6 +63,7 @@
   const COLOR = DS.wkColor || 'unknown';
   const EMOJI = DS.wkEmoji || '⬜';
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
+  const DICTATION_MODE = DS.wkDictationMode === 'voice-note' ? 'voice-note' : 'speech';
 
   // Hotkeys are KeyboardEvent.code values (LAYOUT-INDEPENDENT: this site is
   // Hebrew, so `e.key` would be a different character on every layout).
@@ -75,7 +78,9 @@
         : code;
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
-  const MIC_TITLE = 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL + ' outside a text field';
+  const MIC_TITLE = DICTATION_MODE === 'voice-note'
+    ? 'Record a voice note for the agent — or press ' + DICTATE_LABEL + ' outside a text field'
+    : 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL + ' outside a text field';
 
   const BEFORE_PREFIX = '/__wk/before';
   const LETTERS = 'ABCDEFGHIJ';               // abc request letters, count capped at 10
@@ -170,8 +175,8 @@
 
   function speechLanguageSelect() {
     const select = el('select', 'wk-speech-lang');
-    select.setAttribute('aria-label', 'Dictation language');
-    select.title = 'Speech recognition language';
+    select.setAttribute('aria-label', DICTATION_MODE === 'voice-note' ? 'Voice-note language' : 'Dictation language');
+    select.title = DICTATION_MODE === 'voice-note' ? 'Language hint for local transcription' : 'Speech recognition language';
     const english = el('option', '', 'English');
     english.value = 'en-US';
     const hebrew = el('option', '', 'עברית');
@@ -208,6 +213,7 @@
     deletedIds: new Set(),      // points deleted/sent this session — never resurrect on cross-tab merge
     cursor: 0,
     side: IS_BEFORE ? 'before' : 'after',  // the served document is authoritative
+    compareScope: LS.get('wk:compareScope') === 'site' ? 'site' : 'point',
     sentVerdicts: false,
     abcToggled: new Set(),      // scopeIds the user toggled since review entry
     acceptArmed: null,          // pointId armed for "accept without toggling" confirm
@@ -341,6 +347,11 @@
       throw err;
     }
     return json;
+  }
+
+  function deleteVoiceNote(note) {
+    if (!note || !note.path) return;
+    api('/__wk/voice-note/delete', { path: note.path }).catch(() => { /* best-effort orphan cleanup */ });
   }
 
   // ===== mode toggle =========================================================
@@ -637,6 +648,7 @@
       context: captureContext(draft.rect),
       abcState: snapshotAbc(),
       text: draft.text.trim(),
+      voiceNote: draft.voiceNote || null,
       abcRequest: abcRequestFromDraft(draft),
       status: 'new',
     };
@@ -953,6 +965,114 @@
     return self;
   }
 
+  // Voice-note mode deliberately avoids browser speech recognition. It keeps
+  // the original audio, uploads it into this color's private feedback inbox,
+  // and lets the background agent run the bundled local Whisper helper.
+  function makeVoiceRecorder(btn, langSelect, onSaved, onState) {
+    if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
+      btn.hidden = true;
+      langSelect.hidden = true;
+      return { stop() {}, arm() {}, get on() { return false; }, get uploading() { return false; } };
+    }
+    let recorder = null, stream = null, chunks = [], startedAt = 0;
+    let recording = false, uploading = false, saveOnStop = false;
+
+    function paint() {
+      btn.classList.toggle('on', recording);
+      btn.classList.toggle('uploading', uploading);
+      if (recording) btn.title = 'Recording voice note — click to stop and attach';
+      else if (uploading) btn.title = 'Saving voice note…';
+      else btn.title = MIC_TITLE;
+      onState && onState({ recording, uploading });
+    }
+    function closeStream() {
+      for (const track of stream?.getTracks?.() || []) track.stop();
+      stream = null;
+    }
+    async function upload(blob, durationMs) {
+      uploading = true;
+      paint();
+      const id = 'voice-' + Date.now().toString(36) + '-' + rand4();
+      try {
+        const response = await fetch('/__wk/voice-note?id=' + encodeURIComponent(id), {
+          method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob,
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || ('HTTP ' + response.status));
+        const note = result.voiceNote;
+        note.durationMs = durationMs;
+        note.language = langSelect.value === 'he-IL' ? 'he' : 'en';
+        onSaved(note);
+        toast('Voice note attached — the agent will transcribe it locally.');
+      } catch (error) {
+        toast('Voice note failed to save: ' + error.message, { kind: 'error' });
+      } finally {
+        uploading = false;
+        paint();
+      }
+    }
+    async function start() {
+      if (liveMic && liveMic !== self) liveMic.stop();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+          .find((type) => !MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(type));
+        recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
+        chunks = [];
+        saveOnStop = false;
+        recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
+        recorder.onstop = () => {
+          const shouldSave = saveOnStop;
+          const durationMs = Math.max(0, Date.now() - startedAt);
+          const type = recorder?.mimeType || chunks[0]?.type || 'audio/webm';
+          recording = false;
+          closeStream();
+          paint();
+          if (shouldSave && chunks.length) upload(new Blob(chunks, { type }), durationMs);
+          chunks = [];
+        };
+        recorder.start(250);
+        startedAt = Date.now();
+        recording = true;
+        liveMic = self;
+        paint();
+      } catch (error) {
+        closeStream();
+        recording = false;
+        btn.classList.add('error');
+        btn.title = 'Microphone blocked or unavailable — click to retry';
+        toast('Could not start voice recording: ' + error.message, { kind: 'error' });
+      }
+    }
+    function finish() {
+      if (!recording || !recorder) return;
+      saveOnStop = true;
+      recorder.stop();
+      if (liveMic === self) liveMic = null;
+    }
+    function stop() {
+      saveOnStop = false;
+      if (recording && recorder) recorder.stop();
+      else closeStream();
+      recording = false;
+      if (liveMic === self) liveMic = null;
+      paint();
+    }
+    btn.addEventListener('click', () => recording ? finish() : start());
+    langSelect.addEventListener('change', () => {
+      if (!SPEECH_LANGS.has(langSelect.value)) langSelect.value = 'en-US';
+      speechLang = langSelect.value;
+      LS.set('wk:speechLang', speechLang);
+    });
+    const self = {
+      stop,
+      arm() { btn.classList.add('armed'); },
+      get on() { return recording; },
+      get uploading() { return uploading; },
+    };
+    return self;
+  }
+
   function insertAtCaret(ta, text) {
     const s = ta.selectionStart ?? ta.value.length;
     const before = ta.value.slice(0, s);
@@ -972,6 +1092,7 @@
   function openCard(init) {
     if (S.card || IS_BEFORE) return;
     const editing = init.editId ? S.points.find((p) => p.id === init.editId) : null;
+    const originalVoiceNote = editing && editing.voiceNote ? editing.voiceNote : null;
     const draft = init.draft || {
       page: logicalPath(),
       rect: editing ? { ...editing.rect } : init.rect,
@@ -989,6 +1110,7 @@
         }
         : { open: false, mode: 'model', count: 4, prompts: {} },
       micOn: false,
+      voiceNote: editing ? (editing.voiceNote || null) : null,
       editId: editing ? editing.id : null,
     };
 
@@ -1001,11 +1123,15 @@
     micBtn.title = MIC_TITLE;
     micBtn.innerHTML = micGlyph;
     const langSelect = speechLanguageSelect();
-    head.append(num, title, langSelect, micBtn);
+    const voiceStatus = el('span', 'wk-voice-status');
+    voiceStatus.hidden = DICTATION_MODE !== 'voice-note';
+    head.append(num, title, voiceStatus, langSelect, micBtn);
 
     const taWrap = el('div', 'wk-ta-wrap');
     const ta = el('textarea', 'wk-ta');
-    ta.placeholder = 'What should change here?';
+    ta.placeholder = DICTATION_MODE === 'voice-note'
+      ? 'Type a note, record one, or use both…'
+      : 'What should change here?';
     ta.value = draft.text;
     const ghost = el('div', 'wk-ghost');
     ghost.setAttribute('aria-hidden', 'true');
@@ -1074,7 +1200,24 @@
       ta.addEventListener(evt, () => { syncGhost(); saveDraft(); });
     }
 
-    const mic = makeMic(ta, micBtn, langSelect, (interim) => { syncGhost(interim); saveDraft(); });
+    function paintVoiceStatus(state) {
+      if (DICTATION_MODE !== 'voice-note') return;
+      if (state?.recording) voiceStatus.textContent = 'recording…';
+      else if (state?.uploading) voiceStatus.textContent = 'saving…';
+      else if (draft.voiceNote) voiceStatus.textContent = 'voice attached';
+      else voiceStatus.textContent = 'voice note';
+      voiceStatus.classList.toggle('ready', !!draft.voiceNote);
+    }
+    const mic = DICTATION_MODE === 'voice-note'
+      ? makeVoiceRecorder(micBtn, langSelect, (note) => {
+        if (draft.voiceNote && draft.voiceNote.path !== originalVoiceNote?.path) deleteVoiceNote(draft.voiceNote);
+        draft.voiceNote = note;
+        saveDraft();
+        saveDraft.flush();
+        paintVoiceStatus();
+      }, paintVoiceStatus)
+      : makeMic(ta, micBtn, langSelect, (interim) => { syncGhost(interim); saveDraft(); });
+    paintVoiceStatus();
     if (draft.micOn) mic.arm();
 
     // --- abc panel wiring -----------------------------------------------------
@@ -1121,12 +1264,17 @@
       renderPins();
       updateSendBtn();
     }
-    cancelBtn.addEventListener('click', () => { LS.remove('wk:card'); teardown(); });
+    function cancelDraft() {
+      if (draft.voiceNote && draft.voiceNote.path !== originalVoiceNote?.path) deleteVoiceNote(draft.voiceNote);
+      LS.remove('wk:card'); teardown();
+    }
+    cancelBtn.addEventListener('click', cancelDraft);
     delBtn.addEventListener('click', () => {
       // record the id as deleted BEFORE saving: the merge in savePoints keeps
       // foreign points, so without this the just-removed point (still in LS from
       // its own earlier write, or from another tab) would be resurrected.
       if (editing) { S.deletedIds.add(editing.id); S.points = S.points.filter((p) => p.id !== editing.id); }
+      deleteVoiceNote(draft.voiceNote || originalVoiceNote);
       savePoints();
       savePoints.flush();
       LS.remove('wk:card');
@@ -1136,7 +1284,11 @@
     // Exposed on S.card so Send can flush an open card before shipping the batch.
     function commit() {
       draft.text = ta.value;
-      if (!draft.text.trim()) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
+      if (mic.on || mic.uploading) {
+        toast(mic.on ? 'Stop the recording before saving this point.' : 'Wait for the voice note to finish saving.', { kind: 'warn' });
+        return false;
+      }
+      if (!draft.text.trim() && !draft.voiceNote) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
       const pt = pointFromDraft(draft);
       // update-or-push: if the edited point was sent/deleted meanwhile (findIndex
       // misses), pointFromDraft already minted a fresh id/number, so PUSH it —
@@ -1144,6 +1296,7 @@
       const idx = S.points.findIndex((p) => p.id === pt.id);
       if (idx >= 0) S.points[idx] = pt;
       else S.points.push(pt);
+      if (originalVoiceNote && originalVoiceNote.path !== draft.voiceNote?.path) deleteVoiceNote(originalVoiceNote);
       savePoints();
       savePoints.flush();
       LS.remove('wk:card');
@@ -1157,9 +1310,8 @@
       }
     });
 
-    // micBtn is exposed so the dictate hotkey can drive the SAME click handler
-    // (it owns the one-live-recognition registry and the focus/paint bookkeeping)
-    S.card = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel() { LS.remove('wk:card'); teardown(); } };
+    // micBtn is exposed so the dictate/record hotkey drives the same handler.
+    S.card = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft };
     paintAbc();
     autoGrow();
     positionFrozen();
@@ -1267,7 +1419,9 @@
     // ("type the note, hit Send" must not ship without it); shake+refuse if empty
     if (S.card) {
       const n = S.card.node;
-      if (!S.card.ta.value.trim()) { n.classList.remove('attn'); void n.offsetWidth; n.classList.add('attn'); return; }
+      if (!S.card.ta.value.trim() && !S.card.draft.voiceNote) {
+        n.classList.remove('attn'); void n.offsetWidth; n.classList.add('attn'); return;
+      }
       if (!S.card.commit()) return;
     }
     if (S.phase !== 'collecting' && S.phase !== null) {
@@ -1515,18 +1669,16 @@
   // spot. So we swap like an A/B variant instead — fetch the before document
   // once, lift out the container the current point lives in, and put it in the
   // live DOM, keeping the live node in memory for the way back. Two things make
-  // this honest rather than a half-truth: the page's own stylesheets are pointed
-  // at their /__wk/before/ equivalents (a real bug in this project was CSS-only —
-  // identical HTML, a missing selector), and the reveal/doodle machinery is
-  // nudged so the swapped subtree doesn't land inert. Anything that can't be
-  // resolved falls back to the old full navigation with a toast saying why.
+  // this useful: the reveal/doodle machinery is nudged so the swapped subtree
+  // doesn't land inert. Point scope deliberately leaves the rest of the page
+  // and its stylesheets alone; whole-site scope uses the exact git snapshot.
+  // Anything that cannot be resolved falls back to the full snapshot page.
   const SWAP = {
     doc: null,      // parsed before-document (per logical page)
     docPath: '',
     sel: '',        // selector of the swapped container
     live: null,     // the AFTER node, detached, waiting to go back
     placed: null,   // the BEFORE node currently in the document
-    css: null,      // [{link, href}] stylesheet hrefs we repointed
   };
   let swapBusy = false, swapQueued = null;
 
@@ -1541,10 +1693,9 @@
     return doc;
   }
 
-  // The swap container must exist AND be unique in BOTH documents. context[0] is
-  // the primary element, but a bare <span> is a poor unit to swap — prefer its
-  // nearest section/article/[id], which is what a design change is usually scoped
-  // to and what survives the agent rewriting the innards.
+  // The swap container must exist AND be unique in BOTH documents. Try the
+  // exact element under the feedback rectangle first; only widen to its nearest
+  // stable section/article/[id] if that exact element cannot be matched.
   function resolveSwapTarget(pt, doc) {
     const cands = [];
     for (const c of ((pt && pt.context) || []).slice(0, 4)) {
@@ -1552,9 +1703,9 @@
       let live = null;
       try { live = document.querySelector(c.selector); } catch (e) { continue; }
       if (!live || live === document.body || live === document.documentElement) continue;
+      cands.push(live);
       const anc = live.closest('section, article, [id]');
       if (anc && anc !== live && anc !== document.body) cands.push(anc);
-      cands.push(live);
     }
     const tried = new Set();
     for (const node of cands) {
@@ -1607,6 +1758,46 @@
     if (node && node.isConnected) window.__abc?.relayout?.();
   }
 
+  // A parsed git-snapshot node would otherwise inherit the CURRENT page's CSS,
+  // making CSS-only point changes invisible. Render the snapshot off-screen,
+  // copy its computed styles onto the cloned target, then discard the frame.
+  // The styles become inline on this one subtree, so nothing else on the live
+  // page changes while point scope is active.
+  function copyComputedTree(source, target) {
+    if (!source || !target || source.nodeType !== 1 || target.nodeType !== 1) return;
+    const computed = source.ownerDocument.defaultView.getComputedStyle(source);
+    for (let i = 0; i < computed.length; i++) {
+      const name = computed[i];
+      target.style.setProperty(name, computed.getPropertyValue(name), computed.getPropertyPriority(name));
+    }
+    const sourceKids = source.children, targetKids = target.children;
+    if (sourceKids.length !== targetKids.length) return;
+    for (let i = 0; i < sourceKids.length; i++) copyComputedTree(sourceKids[i], targetKids[i]);
+  }
+
+  async function styledBeforeNode(sel, fallback) {
+    const frame = document.createElement('iframe');
+    frame.setAttribute('aria-hidden', 'true');
+    frame.style.cssText = 'position:fixed;left:-100000px;top:0;width:' + innerWidth +
+      'px;height:' + innerHeight + 'px;visibility:hidden;pointer-events:none;border:0;';
+    frame.src = BEFORE_PREFIX + logicalPath() + '?wk-style-probe=' + Date.now();
+    document.documentElement.appendChild(frame);
+    try {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('before style probe timed out')), 5000);
+        frame.addEventListener('load', () => { clearTimeout(timer); resolve(); }, { once: true });
+        frame.addEventListener('error', () => { clearTimeout(timer); reject(new Error('before style probe failed')); }, { once: true });
+      });
+      let source = null;
+      try { source = frame.contentDocument.querySelector(sel); } catch (e) { /* fallback below */ }
+      const node = document.importNode(source || fallback, true);
+      if (source) copyComputedTree(source, node);
+      return node;
+    } finally {
+      frame.remove();
+    }
+  }
+
   // Keep the eye on the thing being compared. A swap changes the height of the
   // container (and on a scroll-driven page the synthetic scroll/resize above can
   // make the host's own story JS re-snap), so without this the page can end up
@@ -1638,47 +1829,17 @@
     };
   }
 
-  // CSS-only changes are invisible to a DOM swap, so BEFORE also repoints every
-  // same-origin stylesheet at its snapshot. Each candidate is probed first: a
-  // stylesheet added since the beforeRef 404s out of git, and blindly repointing
-  // it would strip the page bare — worse than showing the current one.
-  async function stylesheetsToBefore() {
-    if (SWAP.css) return;
-    const cands = [];
-    for (const link of document.querySelectorAll('link[rel~="stylesheet"][href]')) {
-      const raw = link.getAttribute('href');
-      let u;
-      try { u = new URL(raw, location.href); } catch (e) { continue; }
-      if (u.origin !== location.origin || u.pathname.startsWith('/__wk/')) continue;
-      cands.push({ link, href: raw, to: BEFORE_PREFIX + u.pathname + u.search });
-    }
-    const ok = await Promise.all(cands.map(async (c) => {
-      try { return (await fetch(c.to, { cache: 'no-store' })).ok; } catch (e) { return false; }
-    }));
-    SWAP.css = [];
-    cands.forEach((c, i) => {
-      if (!ok[i]) return;
-      SWAP.css.push({ link: c.link, href: c.href });
-      c.link.setAttribute('href', c.to);
-    });
-  }
-  function stylesheetsToAfter() {
-    for (const c of SWAP.css || []) c.link.setAttribute('href', c.href);
-    SWAP.css = null;
-  }
-
   async function applySwap(pt) {
     const doc = await beforeDocument();
     const t = resolveSwapTarget(pt, doc);
     if (!t) throw new Error('no container shared by both versions');
     const reanchor = anchorViewport(pt);
-    const node = document.importNode(t.incoming, true);
+    const node = await styledBeforeNode(t.sel, t.incoming);
     carryState(t.live, node);
     t.live.replaceWith(node);
     SWAP.sel = t.sel;
     SWAP.live = t.live;
     SWAP.placed = node;
-    await stylesheetsToBefore();
     afterSwapPaint(node);
     reanchor();
   }
@@ -1690,14 +1851,12 @@
       SWAP.placed = null;
       SWAP.live = null;
       SWAP.sel = '';
-      stylesheetsToAfter();
       afterSwapPaint(document.body);
       reanchor();
       return;
     }
     SWAP.placed = SWAP.live = null;
     SWAP.sel = '';
-    stylesheetsToAfter();
   }
 
   function markSide(side) {
@@ -1707,18 +1866,23 @@
   }
 
   // the pre-existing behaviour, kept verbatim as the fallback path
-  function navSide(side) {
+  function navSide(side, pointBeforeOnArrival) {
     LS.set('wk:side', side);
     const pt = S.reviewList[S.cursor];
     SS.setJSON('wk:scroll', { path: logicalPath(), x: Math.round(scrollX), y: Math.round(scrollY) });
     const page = pt ? pt.page : logicalPath();
     navGuarded(physicalPath(page, side) +
       '?wk-review=' + encodeURIComponent(S.reviewBatchId) +
-      (pt ? '&wk-point=' + pt.number : ''),
+      (pt ? '&wk-point=' + pt.number : '') +
+      (pointBeforeOnArrival ? '&wk-point-before=1' : ''),
       "This page isn't in the before snapshot (or the round just ended).");
   }
 
   function setSide(side) {
+    if (S.compareScope === 'site') {
+      if (side !== S.side) navSide(side);
+      return;
+    }
     // A document actually SERVED from /__wk/before is a git snapshot with no
     // live tree to restore — only a navigation can leave it.
     if (IS_BEFORE) { if (side !== S.side) navSide(side); return; }
@@ -1751,10 +1915,7 @@
     const t = resolveSwapTarget(pt, SWAP.doc);
     if (t && t.sel === SWAP.sel) return;
     swapBusy = true;
-    const css = SWAP.css;
-    SWAP.css = null;                 // keep the before stylesheets while we re-swap
     restoreSwap();
-    SWAP.css = css;
     applySwap(pt).catch(() => {
       restoreSwap();
       markSide('after');
@@ -1779,6 +1940,10 @@
     B.after = el('button', 'wk-seg-btn', 'AFTER');
     B.before.type = B.after.type = 'button';
     B.seg.append(B.before, B.after);
+    B.scopeWrap = el('div', 'wk-scope-wrap');
+    B.scope = el('button', 'wk-scope-btn', '▾');
+    B.scope.type = 'button';
+    B.scopeWrap.append(B.scope);
 
     B.abcChip = el('button', 'wk-abc-chip');
     B.abcChip.type = 'button';
@@ -1800,13 +1965,16 @@
     B.wait.hidden = true;
 
     bar.append(B.prev, B.counter, B.dots, B.next, el('span', 'wk-bar-sep'),
-      B.seg, B.abcChip, B.note, el('span', 'wk-bar-sep'),
+      B.seg, B.scopeWrap, B.abcChip, B.note, el('span', 'wk-bar-sep'),
       B.accept, B.redo, B.del, B.dismiss, B.sendv, B.wait);
 
     B.prev.addEventListener('click', () => jumpTo(S.cursor - 1));
     B.next.addEventListener('click', () => jumpTo(S.cursor + 1));
     B.before.addEventListener('click', () => setSide('before'));
     B.after.addEventListener('click', () => setSide('after'));
+    B.scope.addEventListener('click', () => {
+      setCompareScope(S.compareScope === 'point' ? 'site' : 'point');
+    });
     B.accept.addEventListener('click', onAccept);
     B.del.addEventListener('click', () => recordVerdict({ verdict: 'delete' }));
     B.dismiss.addEventListener('click', () => recordVerdict({ verdict: 'delete' }));
@@ -1820,6 +1988,21 @@
       const inst = currentAbcInst();
       if (inst && inst.btn) inst.btn.click();
     });
+  }
+
+  function setCompareScope(scope) {
+    if (scope !== 'point' && scope !== 'site') return;
+    if (scope === S.compareScope) { updateBar(); return; }
+    S.compareScope = scope;
+    LS.set('wk:compareScope', scope);
+    updateBar();
+    if (S.side !== 'before') return;
+    if (scope === 'site' && !IS_BEFORE) {
+      restoreSwap();
+      navSide('before');
+    } else if (scope === 'point' && IS_BEFORE) {
+      navSide('after', true);
+    }
   }
 
   function currentPoint() { return S.reviewList[S.cursor] || null; }
@@ -1874,6 +2057,11 @@
 
     B.before.classList.toggle('active', S.side === 'before');
     B.after.classList.toggle('active', S.side === 'after');
+    B.scope.title = S.compareScope === 'point'
+      ? 'Comparison scope: current feedback point'
+      : 'Comparison scope: whole website';
+    B.scope.setAttribute('aria-label', B.scope.title);
+    B.scope.classList.toggle('site', S.compareScope === 'site');
 
     // abc chip: live current letter, bound to abc:change. This is the ONLY
     // switcher the user should see for the point under review — hidePageAbc
@@ -1983,6 +2171,8 @@
     const ta = el('textarea', 'wk-ta wk-mini-ta');
     ta.placeholder = 'e.g. closer, but make it half the size…';
     ta.value = (existing && existing.redoText) || '';
+    const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
+    let redoVoiceNote = originalRedoVoiceNote;
     const micBtn = el('button', 'wk-mic');
     micBtn.type = 'button';
     micBtn.title = MIC_TITLE;
@@ -1996,16 +2186,30 @@
     actions.append(el('span', 'wk-spacer'), cancel, save);
     node.append(label, row, actions);
     wrap.appendChild(node);
-    const mic = makeMic(ta, micBtn, langSelect, null);
+    const mic = DICTATION_MODE === 'voice-note'
+      ? makeVoiceRecorder(micBtn, langSelect, (note) => {
+        if (redoVoiceNote && redoVoiceNote.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
+        redoVoiceNote = note;
+      }, null)
+      : makeMic(ta, micBtn, langSelect, null);
     function close() { mic.stop(); node.remove(); S.mini = null; }
-    cancel.addEventListener('click', close);
+    function cancelMini() {
+      if (redoVoiceNote && redoVoiceNote.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
+      close();
+    }
+    cancel.addEventListener('click', cancelMini);
     save.addEventListener('click', () => {
       const txt = ta.value.trim();
-      if (!txt) { ta.focus(); return; }
+      if (mic.on || mic.uploading) {
+        toast(mic.on ? 'Stop the recording before saving.' : 'Wait for the voice note to finish saving.', { kind: 'warn' });
+        return;
+      }
+      if (!txt && !redoVoiceNote) { ta.focus(); return; }
+      if (originalRedoVoiceNote && originalRedoVoiceNote.path !== redoVoiceNote?.path) deleteVoiceNote(originalRedoVoiceNote);
       close();
-      recordVerdict({ verdict: 'redo', redoText: txt });
+      recordVerdict({ verdict: 'redo', redoText: txt, redoVoiceNote });
     });
-    S.mini = { node, ta, micBtn, close };
+    S.mini = { node, ta, micBtn, close: cancelMini };
     ta.focus();
   }
 
@@ -2130,6 +2334,7 @@
     const params = new URLSearchParams(location.search);
     const reviewParam = params.get('wk-review');
     const pointParam = parseInt(params.get('wk-point') || '', 10);
+    const pointBeforeOnArrival = params.get('wk-point-before') === '1';
     S.bootReview = reviewParam;   // don't toast an offer for the round we're booting into
 
     setMode(reviewParam ? 'feedback' : (LS.get('wk:mode') === 'feedback' ? 'feedback' : 'evaluate'));
@@ -2151,6 +2356,9 @@
           pointNumber: Number.isFinite(pointParam) ? pointParam : null,
           noScroll: !!sc,   // a restored scroll position wins over re-centering
         });
+        if (pointBeforeOnArrival && !IS_BEFORE && S.compareScope === 'point') {
+          setTimeout(() => setSide('before'), 0);
+        }
       } else if (IS_BEFORE) {
         // serve-then-archive race: the BEFORE snapshot loaded but the round is
         // already gone — hand off to the live AFTER document at the same spot

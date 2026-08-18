@@ -637,7 +637,7 @@ function renderProjectAssets() {
   state.onboardingAssets.forEach((item, index) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = `${item.name} ×`;
+    button.textContent = `${item.path || item.name} ×`;
     button.title = "Remove reference";
     button.addEventListener("click", () => {
       state.onboardingAssets.splice(index, 1);
@@ -649,7 +649,8 @@ function renderProjectAssets() {
 
 async function addProjectAssets(files) {
   let total = state.onboardingAssets.reduce((sum, item) => sum + (item.size || 0), 0);
-  for (const file of [...files].filter((item) => item && item.size)) {
+  const incoming = [...files].filter((item) => item && item.size).slice(0, 500);
+  for (const file of incoming) {
     if (file.size > 15 * 1024 * 1024 || total + file.size > 20 * 1024 * 1024) {
       toast("Project references must be 15 MB each and 20 MB total or smaller.");
       continue;
@@ -660,8 +661,11 @@ async function addProjectAssets(files) {
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
+    const relativePath = String(file.webkitRelativePath || file._relativePath || file.name || "reference")
+      .replaceAll("\\", "/").replace(/^\/+/, "");
     state.onboardingAssets.push({
       name: file.name || "reference",
+      path: relativePath,
       type: file.type || "application/octet-stream",
       size: file.size,
       data,
@@ -669,6 +673,41 @@ async function addProjectAssets(files) {
     total += file.size;
   }
   renderProjectAssets();
+}
+
+function readDroppedEntry(entry, prefix = "") {
+  if (!entry) return Promise.resolve([]);
+  const relativePath = `${prefix}${entry.name}`;
+  if (entry.isFile) {
+    return new Promise((resolve, reject) => entry.file((file) => {
+      Object.defineProperty(file, "_relativePath", { value: relativePath, configurable: true });
+      resolve([file]);
+    }, reject));
+  }
+  if (!entry.isDirectory) return Promise.resolve([]);
+  return new Promise((resolve, reject) => {
+    const reader = entry.createReader();
+    const children = [];
+    const readBatch = () => reader.readEntries(async (batch) => {
+      if (!batch.length) {
+        try {
+          const nested = await Promise.all(children.map((child) => readDroppedEntry(child, `${relativePath}/`)));
+          resolve(nested.flat());
+        } catch (error) { reject(error); }
+        return;
+      }
+      children.push(...batch);
+      readBatch();
+    }, reject);
+    readBatch();
+  });
+}
+
+async function projectFilesFromDrop(dataTransfer) {
+  const entries = [...(dataTransfer?.items || [])]
+    .map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+  if (!entries.length) return [...(dataTransfer?.files || [])];
+  return (await Promise.all(entries.map((entry) => readDroppedEntry(entry)))).flat();
 }
 
 async function chooseProjectFolder(event) {
@@ -717,7 +756,9 @@ async function saveProject(event) {
         onboarding: {
           brief: $("#newBrandBrief").value,
           seedCount: Math.max(2, Math.min(20, Number($("#newSeedCount").value) || 10)),
-          assets: state.onboardingAssets.map(({ name, type, data }) => ({ name, type, data })),
+          assets: state.onboardingAssets.map(({ name, path: relativePath, type, data }) => ({
+            name, path: relativePath, type, data,
+          })),
         },
       }
       : { path: $("#existingPath").value, provider };
@@ -983,7 +1024,15 @@ $("#chooseProjectAssets").addEventListener("click", (event) => {
   event.stopPropagation();
   $("#projectAssets").click();
 });
+$("#chooseProjectFolder").addEventListener("click", (event) => {
+  event.stopPropagation();
+  $("#projectFolder").click();
+});
 $("#projectAssets").addEventListener("change", async (event) => {
+  await addProjectAssets(event.target.files || []);
+  event.target.value = "";
+});
+$("#projectFolder").addEventListener("change", async (event) => {
   await addProjectAssets(event.target.files || []);
   event.target.value = "";
 });
@@ -1003,7 +1052,7 @@ $("#projectAssetsDropzone").addEventListener("dragleave", (event) => event.curre
 $("#projectAssetsDropzone").addEventListener("drop", async (event) => {
   event.preventDefault();
   event.currentTarget.classList.remove("dragging");
-  await addProjectAssets(event.dataTransfer?.files || []);
+  await addProjectAssets(await projectFilesFromDrop(event.dataTransfer));
 });
 $("#seedMinus").addEventListener("click", () => {
   $("#newSeedCount").value = String(Math.max(2, (Number($("#newSeedCount").value) || 10) - 1));

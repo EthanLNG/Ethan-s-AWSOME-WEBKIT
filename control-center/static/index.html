@@ -140,9 +140,13 @@
           </label>
           <div class="project-assets" id="projectAssetsDropzone" tabindex="0">
             <input id="projectAssets" type="file" multiple hidden>
+            <input id="projectFolder" type="file" webkitdirectory directory multiple hidden>
             <b>Drop project references here</b>
-            <small>Logos, imagery, design systems, copy, PDFs, or other useful files. Optional.</small>
-            <button class="secondary" id="chooseProjectAssets" type="button">Choose files</button>
+            <small>Logos, imagery, design systems, copy, PDFs, whole reference folders, or other useful material. Optional.</small>
+            <span class="project-assets-actions">
+              <button class="secondary" id="chooseProjectAssets" type="button">Choose files</button>
+              <button class="secondary" id="chooseProjectFolder" type="button">Choose folder</button>
+            </span>
           </div>
           <div class="project-asset-list" id="projectAssetList" hidden></div>
         </div>

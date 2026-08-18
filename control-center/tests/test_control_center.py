@@ -101,6 +101,7 @@ class ControlCenterTests(unittest.TestCase):
             "seedCount": 7,
             "assets": [{
                 "name": "brand mark.svg",
+                "path": "brand-kit/logos/brand mark.svg",
                 "type": "image/svg+xml",
                 "data": base64.b64encode(b"<svg></svg>").decode("ascii"),
             }],
@@ -114,11 +115,19 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(result["project"]["path"])
         self.assertIn("Warm, editorial", (project_path / "project-context" / "BRAND-AND-DESIGN.md").read_text())
         self.assertEqual(
-            (project_path / "project-context" / "assets" / "brand-mark.svg").read_bytes(),
+            (project_path / "project-context" / "assets" / "brand-kit" / "logos" / "brand-mark.svg").read_bytes(),
             b"<svg></svg>",
         )
         self.assertEqual(result["seedSession"], fake_session)
         start.assert_called_once_with(result["project"]["id"], 7, onboarding["brief"])
+
+    def test_project_reference_folder_cannot_escape_context_directory(self):
+        payload = base64.b64encode(b"private").decode("ascii")
+        with self.assertRaisesRegex(Exception, "unsafe folder path"):
+            self.app.projects._save_project_context(self.root, {
+                "assets": [{"name": "secret.txt", "path": "../secret.txt", "data": payload}]
+            })
+        self.assertFalse((self.root.parent / "secret.txt").exists())
 
     def test_seed_manifest_can_be_reviewed_and_combination_is_queued(self):
         parent = self.root / "projects"

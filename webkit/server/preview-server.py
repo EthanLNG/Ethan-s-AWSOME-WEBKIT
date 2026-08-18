@@ -453,6 +453,7 @@ def _rewrite_before_html(html):
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 _MAX_BODY = 2 * 1024 * 1024
+_MAX_PROXY_BODY = 30 * 1024 * 1024
 _MAX_VOICE_BODY = 25 * 1024 * 1024
 _VOICE_ID = re.compile(r"^[A-Za-z0-9_-]{6,80}$")
 _VOICE_TYPES = {
@@ -573,8 +574,10 @@ class Handler(SimpleHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 return self._send_json(400, {"error": "bad Content-Length"})
-            if length > _MAX_BODY:
-                return self._send_json(413, {"error": "body exceeds 2 MB"})
+            if length > _MAX_PROXY_BODY:
+                return self._send_json(413, {
+                    "error": "Project references are too large to send. Keep the combined upload under 20 MB."
+                })
             body = self.rfile.read(length) if length else b""
         headers = {"Accept": self.headers.get("Accept", "application/json")}
         content_type = self.headers.get("Content-Type")
@@ -587,7 +590,7 @@ class Handler(SimpleHTTPRequestHandler):
             method=method,
         )
         try:
-            response = urllib.request.urlopen(request, timeout=30)
+            response = urllib.request.urlopen(request, timeout=180)
         except urllib.error.HTTPError as exc:
             response = exc
         except (OSError, urllib.error.URLError) as exc:

@@ -416,7 +416,7 @@ class ProjectManager:
         asset_folder = folder / "assets"
         total = 0
         used_names = set()
-        for item in assets[:40]:
+        for item in assets[:500]:
             if not isinstance(item, dict):
                 continue
             try:
@@ -428,17 +428,27 @@ class ProjectManager:
                 raise ControlCenterError(
                     "Project references must be 15 MB each and 20 MB total or smaller.", 413
                 )
-            raw_name = Path(str(item.get("name") or "reference")).name
-            name = re.sub(r"[^A-Za-z0-9._-]+", "-", raw_name).strip("-.") or "reference"
+            raw_path = str(item.get("path") or item.get("name") or "reference").replace("\\", "/")
+            raw_parts = [part for part in raw_path.split("/") if part not in ("", ".")]
+            if not raw_parts or any(part == ".." for part in raw_parts):
+                raise ControlCenterError("A project reference contained an unsafe folder path.")
+            clean_parts = [
+                re.sub(r"[^A-Za-z0-9._-]+", "-", part).strip("-.") or "reference"
+                for part in raw_parts
+            ]
+            name = clean_parts[-1]
             stem, suffix = Path(name).stem, Path(name).suffix
-            candidate = name
+            candidate_parts = clean_parts
+            candidate = "/".join(candidate_parts)
             index = 2
             while candidate.lower() in used_names:
-                candidate = "{}-{}{}".format(stem, index, suffix)
+                candidate_parts = clean_parts[:-1] + ["{}-{}{}".format(stem, index, suffix)]
+                candidate = "/".join(candidate_parts)
                 index += 1
             used_names.add(candidate.lower())
-            asset_folder.mkdir(parents=True, exist_ok=True)
-            (asset_folder / candidate).write_bytes(data)
+            target = asset_folder.joinpath(*candidate_parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
 
     def add_existing(self, path, provider):
         self._validate_provider(provider)

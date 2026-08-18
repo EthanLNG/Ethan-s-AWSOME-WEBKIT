@@ -243,7 +243,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertFalse(status["available"])
         self.assertIn("local Whisper", status["help"])
 
-    def test_merge_moves_committed_color_work_to_main_and_closes_worktree(self):
+    def test_merge_delegates_to_agent_then_fast_forwards_and_closes_worktree(self):
         parent = self.root / "projects"
         parent.mkdir()
         with mock.patch.object(self.app.projects, "_find_port_block", return_value=6341):
@@ -269,8 +269,18 @@ class ControlCenterTests(unittest.TestCase):
             "hasRun": False, "createdAt": "2026-08-18T00:00:00Z",
         }
         self.app.store.update(lambda state: state.setdefault("sessions", []).append(session))
+        runtime = mock.Mock()
+        runtime.session = session
+        self.app.sessions.runtimes["merge-session"] = runtime
         result = self.app.sessions.merge("merge-session")
-        self.assertTrue(result["merged"])
+        self.assertTrue(result["queued"])
+        self.assertTrue(result["agentManaged"])
+        runtime.enqueue.assert_called_once()
+        marker = worktree / ".webkit" / "control-center-merge.json"
+        marker.parent.mkdir(exist_ok=True)
+        marker.write_text('{"status":"ready","message":"ready"}', encoding="utf-8")
+        with mock.patch.object(self.app.sessions, "_release"):
+            self.app.sessions._complete_agent_merge("merge-session")
         self.assertEqual((project_path / "index.html").read_text(), "<title>Merged</title>\n")
         self.assertFalse(worktree.exists())
         branches = subprocess.run(

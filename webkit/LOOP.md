@@ -86,6 +86,11 @@ fix/delete `.webkit/feedback/<slug>/feedback.json`), then wait again.
   send a message while the turn is waiting; handle it normally without losing
   the waiter state.
 
+The user may add rectangles while a review is open. The server folds them into
+the standing `feedback.json` and writes a typed `verdicts.json` interruption
+with `kind:"feedback_update"`. This wakes the same waiter immediately; handle
+it as described in step 8 instead of treating it as user verdicts.
+
 ## Step 2 — READ the batch
 
 Read `.webkit/feedback/<slug>/feedback.json`. Full schema:
@@ -111,6 +116,9 @@ Read `.webkit/feedback/<slug>/feedback.json`. Full schema:
       "page": "/index.html",
       "createdAt": "2026-07-25T14:12:03Z",
       "rect": { "x": 120, "y": 2260, "w": 300, "h": 84 },  // DOCUMENT coords, CSS px
+      "rects": [             // every marked area for this point; rect is the last/primary one
+        { "x": 120, "y": 2260, "w": 300, "h": 84 }
+      ],
       "viewport": { "w": 1440, "h": 900, "dpr": 2 },
       "scroll": { "x": 0, "y": 1980 },
       "context": [          // ≤ 12 entries; [0] is the primary element under the rect
@@ -305,6 +313,15 @@ Read `.webkit/feedback/<slug>/verdicts.json`. Full schema:
 prior round's verdicts that failed to archive, or a race) — do **not** apply
 it: archive/delete the stale file and go back to step 7's wait rather than
 reverting or redoing against the wrong round.
+
+If `kind` is `feedback_update`, the user added points to this same batch while
+reviewing. Do not finalize any verdicts. Archive the current `review.json` and
+the interruption `verdicts.json` under the current round, keep the expanded
+live `feedback.json`, apply only the ids named in `addedPointIds` (one commit
+per new point), then publish round + 1 using the original `beforeRef`. The new
+review manifest must include the prior still-pending entries as well as the
+newly handled entries, so the user reviews the complete batch together. Reopen
+review and return to step 7.
 
 Per verdict:
 

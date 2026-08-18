@@ -883,23 +883,42 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 _atomic_write("feedback.json", existing)
                 batch_id = existing.get("batchId")
-            elif claimed and incoming.get("batchId") != existing.get("batchId"):
-                # A review round is in flight for the standing batch. A
-                # well-behaved overlay queues points client-side and only posts
-                # after the agent archives (at which point existing is None), so
-                # a different-batchId write here is a stale or foreign client —
-                # refuse it rather than clobber the batch under review (which
-                # would flip phase mid-review and make the agent's step-9
-                # archive copy the WRONG feedback.json into history/).
-                return self._send_json(
-                    409,
-                    {
-                        "error": "a review round is active for batch {} — points "
-                        "queue client-side until it completes".format(
-                            existing.get("batchId")
-                        )
-                    },
-                )
+            elif claimed:
+                # Additions belong to the standing batch even during review.
+                # Wake the agent's verdict waiter with a typed interruption so
+                # it can extend the same batch instead of making the user wait
+                # for an artificial second batch.
+                old_points = list(existing.get("points") or [])
+                known_ids = {p.get("id") for p in old_points}
+                nums = [p.get("number") for p in old_points if isinstance(p.get("number"), int)]
+                base = max(nums) if nums else len(old_points)
+                added_ids = []
+                for pt in points:
+                    if pt.get("id") in known_ids:
+                        continue
+                    pt = dict(pt)
+                    base += 1
+                    pt["number"] = base
+                    old_points.append(pt)
+                    known_ids.add(pt.get("id"))
+                    added_ids.append(pt.get("id"))
+                existing["points"] = old_points
+                pages = list(existing.get("pages") or [])
+                for pg in incoming.get("pages") or []:
+                    if pg not in pages:
+                        pages.append(pg)
+                existing["pages"] = pages
+                existing["updatedAt"] = incoming.get("updatedAt") or _now_iso()
+                _atomic_write("feedback.json", existing)
+                _atomic_write("verdicts.json", {
+                    "version": 1,
+                    "kind": "feedback_update",
+                    "batchId": existing.get("batchId"),
+                    "round": review.get("round", 1),
+                    "sentAt": _now_iso(),
+                    "addedPointIds": added_ids,
+                })
+                batch_id = existing.get("batchId")
             else:
                 # Fresh inbox (existing is None after archive), or an idempotent
                 # retry of the same batchId that IS under review.

@@ -415,6 +415,12 @@
   box-shadow: var(--wk-shadow);
   z-index: 12;
 }
+.wk-scope-heading {
+  padding: 5px 10px 7px;
+  color: var(--wk-muted);
+  font: 700 9px/1 var(--wk-font);
+  letter-spacing: .11em;
+}
 .wk-scope-option {
   width: 100%;
   padding: 8px 10px;
@@ -687,13 +693,38 @@
 }
 
 .wk-bar-note {
+  position: relative;
+  display: block;
+  max-width: 200px;
+}
+.wk-bar-note-text {
+  display: block;
   font: 400 11px/1.3 var(--wk-font);
   color: var(--wk-muted);
-  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.wk-bar-note-tip {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  width: max-content;
+  max-width: min(420px, 70vw);
+  transform: translateX(-50%);
+  padding: 9px 11px;
+  border: 1px solid var(--wk-line);
+  border-radius: 9px;
+  background: var(--wk-paper);
+  color: var(--wk-ink);
+  box-shadow: var(--wk-shadow);
+  white-space: normal;
+  line-height: 1.45;
+  z-index: 20;
+  pointer-events: none;
+}
+.wk-bar-note:hover .wk-bar-note-tip { display: block; }
 
 .wk-v {
   border-radius: 999px;

@@ -359,7 +359,7 @@ class ProjectManager:
             item["github"] = self.github_status(project["path"])
             item["sessions"] = [
                 s for s in state.get("sessions", [])
-                if s.get("projectId") == project["id"] and s.get("status") in ("active", "busy", "error")
+                if s.get("projectId") == project["id"] and s.get("status") in ("active", "busy", "merging", "error")
             ]
             projects.append(item)
         return projects
@@ -978,7 +978,9 @@ class SessionRuntime:
                 continue
             if job is None:
                 break
-            self.manager._set_session_status(self.session["id"], "busy")
+            self.manager._set_session_status(
+                self.session["id"], "merging" if job["source"] == "merge" else "busy"
+            )
             self.log.append("user" if job["source"] == "chat" else "system", job["prompt"], job["source"])
             runner = ProviderRunner(
                 self.session,
@@ -988,7 +990,10 @@ class SessionRuntime:
             )
             try:
                 runner.run(job["prompt"])
-                self.manager._set_session_status(self.session["id"], "active")
+                if job["source"] == "merge":
+                    self.manager._complete_agent_merge(self.session["id"])
+                else:
+                    self.manager._set_session_status(self.session["id"], "active")
             except Exception as exc:
                 self.log.append("system", str(exc), "error")
                 self.manager._set_session_status(self.session["id"], "error", str(exc))
@@ -1053,7 +1058,7 @@ class SessionManager:
             raise ControlCenterError("Project folder is missing.", 404)
         with self.lock:
             for session in self.list_sessions(project_id):
-                if session.get("color") == color and session.get("status") in ("active", "busy", "error"):
+                if session.get("color") == color and session.get("status") in ("active", "busy", "merging", "error"):
                     return session
             dirty = run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip()
             if dirty:
@@ -1181,52 +1186,69 @@ class SessionManager:
         session = self._get_session(session_id)
         project = self.projects.get_project(session["projectId"])
         runtime = self.runtimes.get(session_id)
-        if session.get("status") == "busy":
+        if session.get("status") in ("busy", "merging"):
             raise ControlCenterError("Wait for the agent to finish before merging.", 409)
-        worktree = Path(session["worktree"])
-        if worktree.exists() and run_command(["git", "status", "--porcelain"], cwd=worktree).stdout.strip():
-            raise ControlCenterError("The color worktree has uncommitted changes. Ask the agent to commit them first.", 409)
-        project_path = Path(project["path"])
-        if run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip():
-            raise ControlCenterError("The Control Center checkout has uncommitted changes.", 409)
-        base_branch = project.get("baseBranch", "main")
-        if run_command(["git", "branch", "--show-current"], cwd=project_path).stdout.strip() != base_branch:
-            raise ControlCenterError("The Control Center checkout is not on its managed base branch.", 409)
-        sync = self.projects.sync_from_github(project)
-        if sync.get("connected") and sync.get("error"):
-            raise ControlCenterError("GitHub main could not be synced: {}".format(sync["error"]), 409)
+        if not runtime:
+            raise ControlCenterError("The coding agent is not running for this color.", 409)
+        marker = Path(session["worktree"]) / ".webkit" / "control-center-merge.json"
+        marker.unlink(missing_ok=True)
+        prompt = """Merge our work to main and surface conflicts if any.
+
+You own the Git decision and conflict resolution for this session. First commit
+all intended work in the current color worktree. Merge the local base branch
+`{base}` into the current branch and resolve any conflicts carefully. Do not
+delete this worktree and do not update the controller checkout yourself.
+
+When the branch is clean and ready to integrate, write exactly:
+{{"status":"ready","message":"ready to merge"}}
+to `{marker}`. If a conflict needs the user, leave the worktree intact and
+write {{"status":"conflict","message":"<short explanation and question>"}}
+to that file instead. The Control Center will perform only the final
+fast-forward, GitHub push, and lifecycle cleanup after your ready signal.
+""".format(
+            base=project.get("baseBranch", "main"), marker=str(marker)
+        )
+        runtime.enqueue(prompt, "merge")
         self._set_session_status(session_id, "merging")
-        if runtime:
-            runtime.stop()
+        return {"queued": True, "agentManaged": True}
+
+    def _complete_agent_merge(self, session_id):
+        session = self._get_session(session_id)
+        project = self.projects.get_project(session["projectId"])
+        worktree = Path(session["worktree"])
+        marker = worktree / ".webkit" / "control-center-merge.json"
         try:
-            run_command(
-                ["git", "merge", "--no-ff", session["branch"], "-m", "Merge {} Webkit session".format(session["emoji"])],
-                cwd=project_path,
-            )
-        except Exception as exc:
-            run_command(["git", "merge", "--abort"], cwd=project_path, check=False)
-            if runtime:
-                self.runtimes.pop(session_id, None)
-                try:
-                    self._restart_runtime(session)
-                except Exception as restart_error:
-                    message = "{}; preview restart failed: {}".format(exc, restart_error)
-                    self._set_session_status(session_id, "error", message)
-                    raise ControlCenterError(message, 409)
-            self._set_session_status(session_id, "error", str(exc))
-            raise
+            result = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ControlCenterError("The agent did not return a valid merge result: {}".format(exc), 409)
+        marker.unlink(missing_ok=True)
+        if result.get("status") != "ready":
+            message = result.get("message") or "The agent needs help resolving a merge conflict."
+            self._set_session_status(session_id, "error", message)
+            EventLog(self.store.state_dir, session_id).append("system", message, "error")
+            return
+        if run_command(["git", "status", "--porcelain"], cwd=worktree).stdout.strip():
+            raise ControlCenterError("The agent reported ready, but the color worktree is not clean.", 409)
+        project_path = Path(project["path"])
+        base_branch = project.get("baseBranch", "main")
+        if run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip():
+            raise ControlCenterError("The main checkout has uncommitted changes.", 409)
+        run_command(["git", "merge", "--ff-only", session["branch"]], cwd=project_path)
         github = self.projects.push_to_github(project)
+        runtime = self.runtimes.get(session_id)
         if runtime:
             self._release(runtime)
         if worktree.exists():
             run_command(["git", "worktree", "remove", str(worktree)], cwd=project_path)
         run_command(["git", "branch", "-d", session["branch"]], cwd=project_path)
         self._set_session_status(session_id, "merged")
-        return {
-            "merged": True,
-            "branch": project.get("targetBranch", "main"),
-            "github": github,
-        }
+        EventLog(self.store.state_dir, session_id).append(
+            "system",
+            "Merged to {}{} and released the color.".format(
+                base_branch, "; GitHub updated" if github.get("pushed") else ""
+            ),
+            "status",
+        )
 
     def _restart_runtime(self, session):
         worktree = Path(session["worktree"])
@@ -1273,7 +1295,7 @@ class SessionManager:
 
     def recover(self):
         for session in self.store.read().get("sessions", []):
-            if session.get("status") not in ("active", "busy", "error"):
+            if session.get("status") not in ("active", "busy", "merging", "error"):
                 continue
             worktree = Path(session.get("worktree", ""))
             config_path = worktree / "webkit" / "webkit.config.json"

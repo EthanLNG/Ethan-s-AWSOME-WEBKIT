@@ -704,6 +704,10 @@
         x: Math.round(draft.rect.x), y: Math.round(draft.rect.y),
         w: Math.round(draft.rect.w), h: Math.round(draft.rect.h),
       },
+      rects: (draft.rects || [draft.rect]).map((rect) => ({
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        w: Math.round(rect.w), h: Math.round(rect.h),
+      })),
       viewport: { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 },
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
       anchor: existing ? (existing.anchor || 'doc') : (draft.anchor || 'doc'),
@@ -838,7 +842,16 @@
       S.drag = null;
       if (!(d.w >= 8 && d.h >= 8)) return;   // a click is not a rect
       const anchor = detectAnchor(d.x + d.w / 2, d.y + d.h / 2);   // viewport center
-      openCard({ rect: { x: d.x + scrollX, y: d.y + scrollY, w: d.w, h: d.h }, anchor });
+      const rect = { x: d.x + scrollX, y: d.y + scrollY, w: d.w, h: d.h };
+      if (S.addRectDraft) {
+        const draft = S.addRectDraft;
+        S.addRectDraft = null;
+        draft.rects = (draft.rects || [draft.rect]).concat([rect]);
+        draft.rect = rect;
+        openCard({ draft, editId: draft.editId });
+      } else {
+        openCard({ rect, anchor });
+      }
     });
     drawLayer.addEventListener('pointercancel', () => { if (S.drag?.kind === 'rubber') S.drag.cancel(); });
   }
@@ -883,6 +896,9 @@
         if (h < 8) { if (d.h.includes('n')) y += h - 8; h = 8; }
       }
       S.card.draft.rect = { x, y, w, h };
+      if (S.card.draft.rects?.length) {
+        S.card.draft.rects[S.card.draft.rects.length - 1] = S.card.draft.rect;
+      }
       positionFrozen();
       positionCard();
       S.card.saveDraft();
@@ -1045,6 +1061,8 @@
     }
     let recorder = null, stream = null, chunks = [], startedAt = 0;
     let recording = false, uploading = false, saveOnStop = false;
+    let settled = Promise.resolve();
+    let resolveSettled = null;
 
     function paint() {
       btn.classList.toggle('on', recording);
@@ -1090,16 +1108,19 @@
         chunks = [];
         saveOnStop = false;
         recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
-        recorder.onstop = () => {
+        recorder.onstop = async () => {
           const shouldSave = saveOnStop;
           const durationMs = Math.max(0, Date.now() - startedAt);
           const type = recorder?.mimeType || chunks[0]?.type || 'audio/webm';
           recording = false;
           closeStream();
           paint();
-          if (shouldSave && chunks.length) upload(new Blob(chunks, { type }), durationMs);
+          if (shouldSave && chunks.length) await upload(new Blob(chunks, { type }), durationMs);
           chunks = [];
+          if (resolveSettled) resolveSettled();
+          resolveSettled = null;
         };
+        settled = new Promise((resolve) => { resolveSettled = resolve; });
         recorder.start(250);
         startedAt = Date.now();
         recording = true;
@@ -1114,10 +1135,11 @@
       }
     }
     function finish() {
-      if (!recording || !recorder) return;
+      if (!recording || !recorder) return settled;
       saveOnStop = true;
       recorder.stop();
       if (liveMic === self) liveMic = null;
+      return settled;
     }
     function stop() {
       saveOnStop = false;
@@ -1135,6 +1157,7 @@
     });
     const self = {
       stop,
+      finishAndWait() { return recording ? finish() : settled; },
       arm() { btn.classList.add('armed'); },
       get on() { return recording; },
       get uploading() { return uploading; },
@@ -1165,6 +1188,7 @@
     const draft = init.draft || {
       page: logicalPath(),
       rect: editing ? { ...editing.rect } : init.rect,
+      rects: editing ? (editing.rects || [editing.rect]).map((rect) => ({ ...rect })) : [init.rect],
       anchor: editing ? (editing.anchor || 'doc') : (init.anchor || 'doc'),
       text: editing ? editing.text : '',
       caret: { start: (editing ? editing.text.length : 0), end: (editing ? editing.text.length : 0) },
@@ -1234,10 +1258,11 @@
     const actions = el('div', 'wk-row wk-actions');
     const delBtn = el('button', 'wk-btn danger', 'Delete');
     const cancelBtn = el('button', 'wk-btn ghost', 'Cancel');
+    const addRectBtn = el('button', 'wk-btn ghost', '+ Rectangle');
     const doneBtn = el('button', 'wk-btn primary', 'Done');
-    delBtn.type = cancelBtn.type = doneBtn.type = 'button';
+    delBtn.type = cancelBtn.type = addRectBtn.type = doneBtn.type = 'button';
     delBtn.hidden = !editing;
-    actions.append(delBtn, el('span', 'wk-spacer'), cancelBtn, doneBtn);
+    actions.append(delBtn, el('span', 'wk-spacer'), cancelBtn, addRectBtn, doneBtn);
 
     node.append(head, taWrap, abcWrap, actions);
     wrap.appendChild(node);
@@ -1372,11 +1397,27 @@
       teardown();
       return true;
     }
-    doneBtn.addEventListener('click', () => {
-      if (!commit()) return;
-      if (S.phase !== 'collecting' && S.phase !== null) {
-        toast('Point queued — the agent is mid-round; it auto-sends when the round ends.');
+    addRectBtn.addEventListener('click', () => {
+      if (mic.on || mic.uploading) {
+        toast('Finish the voice note before adding another rectangle.', { kind: 'warn' });
+        return;
       }
+      draft.text = ta.value;
+      draft.rects = draft.rects || [draft.rect];
+      saveDraft.flush();
+      S.addRectDraft = draft;
+      mic.stop();
+      saveDraft.cancel();
+      node.remove();
+      if (frozenEl) { frozenEl.remove(); frozenEl = null; }
+      S.card = null;
+      toast('Draw another rectangle for this same feedback point.');
+    });
+    doneBtn.addEventListener('click', async () => {
+      if (mic.on && mic.finishAndWait) await mic.finishAndWait();
+      else if (mic.uploading && mic.finishAndWait) await mic.finishAndWait();
+      if (!commit()) return;
+      if (S.phase !== 'collecting' && S.phase !== null) sendPoints(false);
     });
 
     // micBtn is exposed so the dictate/record hotkey drives the same handler.
@@ -1419,15 +1460,15 @@
     const n = S.points.length;
     sendBtn.hidden = n === 0;
     if (n === 0) return;
-    const blocked = S.phase !== null && S.phase !== 'collecting';
-    sendBtn.classList.toggle('queued', blocked);
+    const activeRound = S.phase !== null && S.phase !== 'collecting';
+    sendBtn.classList.toggle('queued', activeRound);
     sendBtn.innerHTML = '';
     sendBtn.append(
-      el('span', 'wk-send-label', blocked ? 'queued' : 'Send'),
+      el('span', 'wk-send-label', activeRound ? 'Add' : 'Send'),
       el('span', 'wk-badge', String(n)),
     );
-    sendBtn.title = blocked
-      ? n + ' point(s) queued — auto-sends when the agent finishes the current round'
+    sendBtn.title = activeRound
+      ? 'Add ' + n + ' point(s) to the current feedback batch'
       : 'Send ' + n + ' point(s) to the ' + COLOR + ' agent';
   }
 
@@ -1441,17 +1482,13 @@
     const storedIds = new Set(stored.map((p) => p.id));
     S.points = stored.concat(S.points.filter((p) => !storedIds.has(p.id) && !S.deletedIds.has(p.id)));
     if (!S.points.length) { renderPins(); updateSendBtn(); return; }
-    // phase null = server never answered (dead/booting). Let the POST attempt
-    // surface the truth via the catch's "Send failed" toast instead of silently
-    // returning; only a known non-collecting phase blocks (points auto-send later).
-    if (S.phase !== 'collecting' && S.phase !== null) { updateSendBtn(); return; }
     sending = true;
     const now = nowISO();
     // strip nothing: points are built exactly to schema
     const batch = {
       version: 1,
       kind: 'feedback',
-      batchId: newBatchId(),
+      batchId: S.batch?.batchId || newBatchId(),
       round: 1,
       color: COLOR,
       sessionId: SESSION_ID,
@@ -1474,8 +1511,9 @@
       savePoints.flush();
       renderPins();
       updateSendBtn();
-      toast((auto ? 'Queued points auto-sent' : 'Sent ' + batch.points.length + ' point(s)') +
-        ' — the ' + EMOJI + ' agent is on it.');
+      toast((S.phase !== 'collecting' && S.phase !== null
+        ? 'Added ' + batch.points.length + ' point(s) to the current batch'
+        : 'Sent ' + batch.points.length + ' point(s)') + ' — the ' + EMOJI + ' agent is on it.');
       pollNow();
     } catch (e) {
       toast('Send failed: ' + e.message, { kind: 'error' });
@@ -1492,10 +1530,6 @@
         n.classList.remove('attn'); void n.offsetWidth; n.classList.add('attn'); return;
       }
       if (!S.card.commit()) return;
-    }
-    if (S.phase !== 'collecting' && S.phase !== null) {
-      toast('The agent is mid-round — your points auto-send the moment it finishes.');
-      return;
     }
     sendPoints(false);
   });
@@ -2019,12 +2053,13 @@
     B.scopeMenu = el('div', 'wk-scope-menu');
     B.scopeMenu.hidden = true;
     B.scopeMenu.setAttribute('role', 'menu');
+    B.scopeHeading = el('div', 'wk-scope-heading', 'BEFORE/AFTER');
     B.scopePoint = el('button', 'wk-scope-option', 'Current point');
     B.scopeSite = el('button', 'wk-scope-option', 'Whole website');
     B.scopePoint.type = B.scopeSite.type = 'button';
     B.scopePoint.setAttribute('role', 'menuitemradio');
     B.scopeSite.setAttribute('role', 'menuitemradio');
-    B.scopeMenu.append(B.scopePoint, B.scopeSite);
+    B.scopeMenu.append(B.scopeHeading, B.scopePoint, B.scopeSite);
     B.scopeWrap.append(B.scope, B.scopeMenu);
 
     B.abcChip = el('button', 'wk-abc-chip');
@@ -2032,6 +2067,9 @@
     B.abcChip.hidden = true;
 
     B.note = el('span', 'wk-bar-note');
+    B.noteText = el('span', 'wk-bar-note-text');
+    B.noteTip = el('span', 'wk-bar-note-tip');
+    B.note.append(B.noteText, B.noteTip);
     B.note.hidden = true;
 
     B.accept = el('button', 'wk-v accept', 'Accept');
@@ -2190,9 +2228,7 @@
 
     B.before.classList.toggle('active', S.side === 'before');
     B.after.classList.toggle('active', S.side === 'after');
-    B.scope.title = S.compareScope === 'point'
-      ? 'Comparison scope: current feedback point'
-      : 'Comparison scope: whole website';
+    B.scope.title = 'BEFORE/AFTER Comparison scope';
     B.scope.setAttribute('aria-label', B.scope.title);
     B.scope.setAttribute('aria-expanded', String(!B.scopeMenu.hidden));
     B.scope.textContent = B.scopeMenu.hidden ? '▾' : '▴';
@@ -2232,7 +2268,14 @@
     // skipped points get Dismiss/Redo instead of Accept/Redo/Delete
     const skipped = h && h.handled === 'skipped';
     B.note.hidden = !(h && h.note);
-    if (h && h.note) B.note.textContent = (skipped ? 'skipped: ' : '') + h.note;
+    if (h && h.note) {
+      const fullNote = (skipped ? 'skipped: ' : '') + h.note;
+      B.noteText.textContent = fullNote;
+      B.noteTip.textContent = fullNote;
+    } else {
+      B.noteText.textContent = '';
+      B.noteTip.textContent = '';
+    }
     B.accept.hidden = skipped || S.sentVerdicts;
     B.del.hidden = skipped || S.sentVerdicts;
     B.dismiss.hidden = !skipped || S.sentVerdicts;
@@ -2337,12 +2380,10 @@
       close();
     }
     cancel.addEventListener('click', cancelMini);
-    save.addEventListener('click', () => {
+    save.addEventListener('click', async () => {
+      if (mic.on && mic.finishAndWait) await mic.finishAndWait();
+      else if (mic.uploading && mic.finishAndWait) await mic.finishAndWait();
       const txt = ta.value.trim();
-      if (mic.on || mic.uploading) {
-        toast(mic.on ? 'Stop the recording before saving.' : 'Wait for the voice note to finish saving.', { kind: 'warn' });
-        return;
-      }
       if (!txt && !redoVoiceNote) { ta.focus(); return; }
       if (originalRedoVoiceNote && originalRedoVoiceNote.path !== redoVoiceNote?.path) deleteVoiceNote(originalRedoVoiceNote);
       close();

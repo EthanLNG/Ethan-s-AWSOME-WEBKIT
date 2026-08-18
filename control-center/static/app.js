@@ -264,7 +264,7 @@ function renderProjectView() {
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
-  const active = (project.sessions || []).filter((session) => ["active", "busy", "error"].includes(session.status));
+  const active = (project.sessions || []).filter((session) => ["active", "busy", "merging", "error"].includes(session.status));
   const byColor = new Map(active.map((session) => [session.color, session]));
   const grid = $("#colorGrid");
   grid.replaceChildren();
@@ -429,15 +429,20 @@ async function finishSession(session, kind) {
     const body = kind === "discard" ? { confirmation: session.id } : {};
     const result = await api(`/api/sessions/${session.id}/${kind}`, { method: "POST", body });
     $("#confirmDialog").close();
-    $("#chatDrawer").hidden = true;
-    state.chatSessionId = null;
-    await refreshProjects();
     if (kind === "merge") {
+      if (result.queued) {
+        toast("The agent is integrating the branch. Open chat if it needs help with a conflict.");
+        await refreshProjects();
+        return;
+      }
       const github = result.github || { connected: false, pushed: false };
       if (github.pushed) toast("Merged and updated main on GitHub.");
       else if (github.connected) toast(`Merged locally, but GitHub push failed: ${github.error || "try again when connected"}`);
       else toast("Merged locally. Connect GitHub to your coding agent so future merges update main automatically.");
     } else toast("Color worktree discarded.");
+    $("#chatDrawer").hidden = true;
+    state.chatSessionId = null;
+    await refreshProjects();
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }
 }

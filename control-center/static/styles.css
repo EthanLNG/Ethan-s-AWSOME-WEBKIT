@@ -104,7 +104,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .session-row strong, .session-row small { display: block; }
 .session-row small { margin-top: 3px; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .session-state { padding: 6px 9px; border-radius: 99px; background: #eef6ef; color: #23663f; font-size: 11px; font-weight: 800; text-transform: uppercase; }
-.session-state.busy { background: #fff2db; color: #8c5516; }
+.session-state.busy, .session-state.merging { background: #fff2db; color: #8c5516; }
 .session-state.error { background: #fff0ee; color: #9f2724; }
 .open-chat { border: 0; border-bottom: 1px solid var(--ink); background: none; font-weight: 800; cursor: pointer; }
 .no-sessions { padding: 22px; border: 1px dashed var(--line); border-radius: 16px; color: var(--muted); text-align: center; }

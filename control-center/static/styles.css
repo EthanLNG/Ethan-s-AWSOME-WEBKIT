@@ -100,7 +100,8 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-card .active-label { display: inline-block; margin: 11px 0 0 10px; padding: 4px 7px; border-radius: 99px; background: var(--ink); color: white; font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; vertical-align: middle; }
 
 .session-list { display: grid; gap: 10px; }
-.session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto auto; align-items: center; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); }
+.session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); cursor: pointer; transition: border-color .15s ease, transform .15s ease; }
+.session-row:hover { border-color: var(--ink); transform: translateY(-1px); }
 .session-row .session-emoji { font-size: 25px; }
 .session-row strong, .session-row small { display: block; }
 .session-row small { margin-top: 3px; overflow: hidden; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

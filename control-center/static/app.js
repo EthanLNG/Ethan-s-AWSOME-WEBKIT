@@ -278,6 +278,12 @@ function selectProject(id) {
   renderProjectView();
 }
 
+function openSessionPreview(session) {
+  const tab = window.open(session.previewUrl, `webkit-${session.projectId}-${session.color}`);
+  if (tab) tab.focus();
+  else toast(`Preview ready at ${session.previewUrl}. Allow popups to focus it automatically.`);
+}
+
 function renderProjectView() {
   const project = selectedProject();
   if (!project) return;
@@ -310,9 +316,7 @@ function renderProjectView() {
       live.className = "active-label";
       live.textContent = "Open";
       card.appendChild(live);
-      card.addEventListener("click", () => {
-        window.open(session.previewUrl, `webkit-${project.id}-${color.slug}`);
-      });
+      card.addEventListener("click", () => openSessionPreview(session));
     } else {
       card.addEventListener("click", () => startColor(color.slug, card));
     }
@@ -334,6 +338,9 @@ function renderSessions(sessions) {
   sessions.forEach((session) => {
     const row = document.createElement("article");
     row.className = "session-row";
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-label", `Open ${session.color} website preview`);
     const emoji = document.createElement("span");
     emoji.className = "session-emoji";
     emoji.textContent = session.emoji;
@@ -350,13 +357,15 @@ function renderSessions(sessions) {
     open.type = "button";
     open.className = "open-chat";
     open.textContent = "Chat";
-    open.addEventListener("click", () => openSession(session));
-    const preview = document.createElement("button");
-    preview.type = "button";
-    preview.className = "open-chat";
-    preview.textContent = "Open";
-    preview.addEventListener("click", () => window.open(session.previewUrl, `webkit-${session.projectId}-${session.color}`));
-    row.append(emoji, info, status, open, preview);
+    open.addEventListener("click", (event) => { event.stopPropagation(); openSession(session); });
+    row.addEventListener("click", () => openSessionPreview(session));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openSessionPreview(session);
+      }
+    });
+    row.append(emoji, info, status, open);
     list.appendChild(row);
   });
 }

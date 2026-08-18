@@ -357,7 +357,7 @@ class ProjectManager:
         for project in state.get("projects", []):
             item = dict(project)
             item["exists"] = Path(project["path"]).is_dir()
-            item["github"] = self.github_status(project["path"])
+            item["github"] = self.github_sync_status(project)
             item["sessions"] = [
                 s for s in state.get("sessions", [])
                 if s.get("projectId") == project["id"] and s.get("status") in ("active", "busy", "merging", "error")
@@ -532,6 +532,40 @@ class ProjectManager:
                 return {"connected": True, "remote": remote, "url": url}
         return {"connected": False, "remote": None, "url": None}
 
+    def github_sync_status(self, project):
+        """Describe local commits waiting to land on the project's GitHub main."""
+        project_path = Path(project["path"])
+        status = self.github_status(project_path)
+        status.update({
+            "ahead": 0,
+            "behind": 0,
+            "unpushed": False,
+            "branch": project.get("baseBranch", "main"),
+            "targetBranch": project.get("targetBranch", "main"),
+        })
+        if not status["connected"]:
+            return status
+        local_ref = status["branch"]
+        remote_ref = "{}/{}".format(status["remote"], status["targetBranch"])
+        counts = run_command(
+            ["git", "rev-list", "--left-right", "--count", "{}...{}".format(remote_ref, local_ref)],
+            cwd=project_path, check=False,
+        )
+        if counts.returncode != 0:
+            # A connected but empty/new remote may not have a tracking ref yet.
+            local_count = run_command(
+                ["git", "rev-list", "--count", local_ref], cwd=project_path, check=False
+            )
+            if local_count.returncode == 0:
+                status["ahead"] = int(local_count.stdout.strip() or "0")
+                status["unpushed"] = status["ahead"] > 0
+            return status
+        parts = counts.stdout.strip().split()
+        if len(parts) == 2:
+            status["behind"], status["ahead"] = (int(parts[0]), int(parts[1]))
+            status["unpushed"] = status["ahead"] > 0
+        return status
+
     def _ensure_github_repo(self, project_path, repo_name, branch):
         status = self.github_status(project_path)
         if status["connected"]:
@@ -600,6 +634,23 @@ class ProjectManager:
             "remote": status["remote"],
             "error": None if result.returncode == 0 else (result.stderr.strip() or result.stdout.strip()),
         }
+
+    def push_project(self, project_id):
+        project = self.get_project(project_id)
+        before = self.github_sync_status(project)
+        if not before["connected"]:
+            raise ControlCenterError(
+                "Connect this project to GitHub before pushing.", 409
+            )
+        if not before["unpushed"]:
+            return {"pushed": False, "alreadyCurrent": True, "github": before}
+        result = self.push_to_github(project)
+        if not result["pushed"]:
+            raise ControlCenterError(
+                result.get("error") or "GitHub push failed. Check your GitHub authentication.", 409
+            )
+        after = self.github_sync_status(project)
+        return {"pushed": True, "alreadyCurrent": False, "github": after}
 
     def _validate_provider(self, provider):
         enabled = self.store.read().get("providers", [])

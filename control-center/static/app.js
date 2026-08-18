@@ -291,6 +291,13 @@ function renderProjectView() {
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
+  const github = project.github || {};
+  const pushButton = $("#pushGithubButton");
+  pushButton.hidden = !(github.connected && github.unpushed);
+  const commits = Number(github.ahead) || 0;
+  $("#pushGithubLabel").textContent = commits === 1
+    ? "Push 1 commit to GitHub"
+    : `Push ${commits} commits to GitHub`;
   const defaultEffort = localStorage.getItem(`wkcc:reasoning:${project.provider}`) || "medium";
   fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
   const active = (project.sessions || []).filter((session) => ["active", "busy", "merging", "error"].includes(session.status));
@@ -387,6 +394,22 @@ async function startColor(color, button) {
     if (previewTab) previewTab.close();
     toast(error.message);
   } finally { setBusy(button, false); }
+}
+
+async function pushSelectedProject() {
+  const project = selectedProject();
+  if (!project) return;
+  const button = $("#pushGithubButton");
+  setBusy(button, true, "Pushing…");
+  try {
+    const result = await api(`/api/projects/${project.id}/push`, { method: "POST", body: {} });
+    await refreshProjects();
+    toast(result.alreadyCurrent ? "GitHub is already up to date." : "Main is now updated on GitHub.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 function openSession(session) {
@@ -660,6 +683,7 @@ $("#homeButton").addEventListener("click", () => { state.selectedProjectId = nul
 $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
 $("#settingsButton").addEventListener("click", openSettings);
+$("#pushGithubButton").addEventListener("click", pushSelectedProject);
 $("#shortcutGuide").addEventListener("click", openSettings);
 $("#settingsForm").addEventListener("submit", saveSettings);
 document.querySelectorAll("[data-hotkey-setting]").forEach((button) => button.addEventListener("click", beginHotkeyCapture));

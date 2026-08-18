@@ -164,6 +164,33 @@ class ControlCenterTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertEqual(status["remote"], "origin")
 
+    def test_unpushed_main_commit_is_detected_and_can_be_pushed(self):
+        parent = self.root / "projects"
+        parent.mkdir()
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6338), mock.patch.object(
+            self.app.projects, "_ensure_github_repo"
+        ):
+            project = self.app.projects.create_project("Push Site", str(parent), "codex")
+        project_path = Path(project["path"])
+        remote = self.root / "remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(remote)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=project_path, check=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=project_path, check=True, capture_output=True)
+        (project_path / "index.html").write_text("<title>Ready to push</title>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "index.html"], cwd=project_path, check=True)
+        subprocess.run(["git", "commit", "-m", "Ready to push"], cwd=project_path, check=True, capture_output=True)
+        connected = {"connected": True, "remote": "origin", "url": "git@github.com:example/site.git"}
+        with mock.patch.object(self.app.projects, "github_status", return_value=connected):
+            status = self.app.projects.github_sync_status(project)
+            self.assertTrue(status["unpushed"])
+            self.assertEqual(status["ahead"], 1)
+            result = self.app.projects.push_project(project["id"])
+            self.assertTrue(result["pushed"])
+            self.assertFalse(result["github"]["unpushed"])
+
     def test_add_existing_rejects_a_subfolder_of_another_repository(self):
         parent_repo = self.root / "parent-repo"
         project_path = parent_repo / "website"

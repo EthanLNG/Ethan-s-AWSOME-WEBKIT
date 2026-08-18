@@ -105,6 +105,11 @@ class Handler(BaseHTTPRequestHandler):
                     body.get("path", ""), body.get("provider", "")
                 )
                 self._json({"project": project}, 201)
+            elif path.startswith("/api/projects/") and path.endswith("/push"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    raise ControlCenterError("Project route not found.", 404)
+                self._json(self.server.app.projects.push_project(parts[2]))
             elif path == "/api/sessions/start":
                 session = self.server.app.sessions.start_session(
                     body.get("projectId", ""), body.get("color", ""), body.get("reasoningEffort", "medium")

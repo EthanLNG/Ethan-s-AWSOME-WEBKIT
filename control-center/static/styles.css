@@ -89,17 +89,17 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .color-grid { display: grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px; }
 .color-card { position: relative; min-height: 178px; padding: 18px; overflow: hidden; border: 1.5px solid var(--ink); border-radius: 18px; background: var(--panel); text-align: left; cursor: pointer; }
 .color-card::after { content: ""; position: absolute; right: -42px; bottom: -62px; width: 135px; height: 135px; border-radius: 50%; background: var(--color); transition: transform .25s ease; }
-.color-card:hover::after { transform: scale(1.17); }
+.color-card:not(.active):hover::after { transform: scale(1.17); }
 .color-card:hover { box-shadow: 5px 6px 0 color-mix(in srgb, var(--color) 48%, transparent); transform: translateY(-2px); }
-.color-card .emoji { display: block; font-size: 24px; }
+.color-card .emoji { display: grid; place-items: center; width: 32px; height: 32px; font-size: 24px; }
 .color-card strong { display: block; margin-top: 49px; font-size: 18px; text-transform: capitalize; }
 .color-card small { color: var(--muted); }
 .color-card.active { background: color-mix(in srgb, var(--color) 9%, var(--panel)); }
 .color-card.active strong { margin-top: 34px; }
 .color-card.active small { display: inline-block; margin-top: 11px; vertical-align: middle; }
-.color-card.active .emoji { transform-origin: center; animation: active-circle-pulse 3.2s ease-in-out infinite; }
-.color-card.active::after { transform-origin: center; animation: active-circle-pulse 3.2s ease-in-out infinite .25s; }
-@keyframes active-circle-pulse { 0%, 100% { transform: scale(.96); } 50% { transform: scale(1.07); } }
+.color-card.active .emoji,
+.color-card.active::after { transform-origin: center; will-change: transform; animation: active-circle-pulse 4s ease-in-out infinite; }
+@keyframes active-circle-pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
 
 .session-list { display: grid; gap: 10px; }
 .session-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); cursor: pointer; transition: border-color .15s ease, transform .15s ease; }
@@ -142,8 +142,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 @keyframes working-pulse { to { transform: scale(1.35); box-shadow: 0 0 0 9px color-mix(in srgb, var(--orange) 8%, transparent); } }
 .session-row:has(.session-state.busy) .session-emoji,
 .session-row:has(.session-state.merging) .session-emoji,
-.color-card.active:has(small[data-working="true"]) .emoji { animation: working-bob .75s ease-in-out infinite alternate; }
-@keyframes working-bob { to { transform: translateY(-5px) rotate(7deg); } }
+.color-card.active:has(small[data-working="true"]) .emoji { animation-duration: 1.15s; }
 
 .modal { width: min(540px, calc(100vw - 32px)); padding: 0; border: 1.5px solid var(--ink); border-radius: 22px; background: var(--panel); box-shadow: 10px 12px 0 rgba(23,23,23,.15); }
 .modal::backdrop { background: rgba(23,23,23,.36); backdrop-filter: blur(5px); }

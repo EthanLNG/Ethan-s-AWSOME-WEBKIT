@@ -49,6 +49,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -91,6 +93,7 @@ def _load_config():
 
 
 CONFIG, CONFIG_PATH = _load_config()
+API_PROXY_ORIGIN = (CONFIG.get("api_proxy_origin") or "").rstrip("/")
 
 PALETTE = CONFIG.get("palette") or []
 if not PALETTE or not all(("emoji" in p and "slug" in p) for p in PALETTE):
@@ -489,6 +492,8 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.path.split("?", 1)[0]
         if raw.startswith("/__wk/"):
             return self._wk(self._wk_get, raw)
+        if API_PROXY_ORIGIN and raw.startswith("/api/"):
+            return self._proxy_api("GET")
         path = self.translate_path(self.path)
         if os.path.isdir(path):
             if not raw.endswith("/"):
@@ -549,7 +554,52 @@ class Handler(SimpleHTTPRequestHandler):
         raw = self.path.split("?", 1)[0]
         if raw.startswith("/__wk/"):
             return self._wk(self._wk_post, raw)
+        if API_PROXY_ORIGIN and raw.startswith("/api/"):
+            return self._proxy_api("POST")
         return self._send_json(404, {"error": "POST is only supported under /__wk/"})
+
+    def _proxy_api(self, method):
+        """Forward Control Center API calls while the UI is WebKit-injected.
+
+        The upstream server still owns all application behavior. The preview
+        server only gives its static interface the normal WebKit overlay, then
+        keeps same-origin browser requests working by relaying /api/* locally.
+        """
+        body = None
+        if method == "POST":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                return self._send_json(400, {"error": "bad Content-Length"})
+            if length > _MAX_BODY:
+                return self._send_json(413, {"error": "body exceeds 2 MB"})
+            body = self.rfile.read(length) if length else b""
+        headers = {"Accept": self.headers.get("Accept", "application/json")}
+        content_type = self.headers.get("Content-Type")
+        if content_type:
+            headers["Content-Type"] = content_type
+        request = urllib.request.Request(
+            API_PROXY_ORIGIN + self.path,
+            data=body,
+            headers=headers,
+            method=method,
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        except (OSError, urllib.error.URLError) as exc:
+            return self._send_json(502, {"error": "Control Center API unavailable: {}".format(exc)})
+        with response:
+            payload = response.read()
+            self.send_response(response.status)
+            self.send_header(
+                "Content-Type",
+                response.headers.get("Content-Type", "application/octet-stream"),
+            )
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
     def _wk(self, method, raw):
         # /__wk/* is API surface: a bug in a handler must come back as JSON,

@@ -60,7 +60,7 @@ existing at the wrong moment is a wrong phase.
 ## Step 1 — WAIT for feedback
 
 ```sh
-webkit/scripts/wait-for-file.sh .webkit/feedback/<slug>/feedback.json 540
+webkit/scripts/wait-for-file.sh .webkit/feedback/<slug>/feedback.json 3600
 ```
 
 Exit `0`: the file exists and parses as JSON — proceed to step 2.
@@ -76,7 +76,9 @@ fix/delete `.webkit/feedback/<slug>/feedback.json`), then wait again.
   don't burn your turn polling. On `124`, start it again in the background.
 - **Codex idiom:** keep the current agent turn alive until the waiter exits.
   Start the command in the foreground. If the shell tool yields a live session
-  id, wait/poll that **same session** in chunks of at most 60 seconds; do not
+  id, wait on that **same session** for the full 60-minute idle window when the
+  client supports it; do not repeatedly poll the agent once per minute. The
+  file watcher itself still exits immediately when feedback arrives. Do not
   send a final response while it is still running. A detached waiter can notice
   `feedback.json`, but its exit does not wake a Codex task after the task has
   already returned a final response. Exit `0` → read the batch immediately;
@@ -258,7 +260,7 @@ overlay sees `wk-review`, enters review mode, and jumps the user to point 1.
 ## Step 7 — WAIT for verdicts
 
 ```sh
-webkit/scripts/wait-for-file.sh .webkit/feedback/<slug>/verdicts.json 540
+webkit/scripts/wait-for-file.sh .webkit/feedback/<slug>/verdicts.json 3600
 ```
 
 Same idioms and exit codes as step 1 (background + re-invoke on Claude Code;

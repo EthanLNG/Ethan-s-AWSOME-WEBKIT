@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RealClick — דמו רב-מקטעים</title>
+<title>מעבדת וריאציות | הדגמה רב-מקטעית</title>
 <style>
   :root { --ink: #14171c; --blue: #2242ff; --blue-deep: #1a33cc; --paper: #ffffff; }
   * { box-sizing: border-box; margin: 0; }
@@ -62,184 +62,370 @@
     <button class="buy" id="buy">קנו עכשיו</button>
   </section>
 
-  <!-- ABC:widget hero — section-scoped variation switcher (dev-only; removed at finalize) -->
-  <script>
-  (() => {
-    /* ABC:config */
-    const ID      = 'hero';
-    const LETTERS = 'ABCD';
-    const RELOAD  = false;
-    /* /ABC:config */
-    const M = window.__abc || (window.__abc = (() => {
-      const insts = [];
-      const st = document.createElement('style');
-      st.textContent =
-        '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
-        'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
-        'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
-        'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
-        '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
-        '.abc-switch:hover{opacity:1}.abc-switch[hidden]{display:none}';
-      document.head.appendChild(st);
-      let raf = 0;
-      function recompute() {
-        raf = 0;
-        const vh = innerHeight;
-        for (const i of insts) {
-          const r = i.scope.getBoundingClientRect();
-          const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
-          i.visible = r.bottom > 0 && r.top < vh &&
-            ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
-             (r.height > 0 && shown >= r.height * 0.6));
-          i.btn.hidden = !i.visible;
-        }
-        insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
-          .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
-      }
-      const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
-      addEventListener('scroll', schedule, { passive: true });
-      addEventListener('resize', schedule);
+  <!-- ABC:widget hero - section-scoped variation switcher (dev-only; removed at finalize) -->
+<script>
+(() => {
+  /* ABC:config */
+  const ID      = 'hero';   // experiment id; MUST equal the section's data-abc-scope value
+  const LETTERS = 'ABCD';   // one letter per live variation, in cycle order
+  const RELOAD  = false;    // true reloads the page after each switch
+  /* /ABC:config */
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(ID)) {
+    console.warn('[abc] invalid experiment id:', ID);
+    return;
+  }
+  const VARIANTS = [...LETTERS];
+  if (!/^[A-J]{1,10}$/.test(LETTERS) || new Set(VARIANTS).size !== VARIANTS.length) {
+    console.warn('[abc] LETTERS must contain unique A-J variants:', LETTERS);
+    return;
+  }
+
+  function safeStorage(name) {
+    try {
+      const storage = window[name];
       return {
-        add(inst) { insts.push(inst); schedule(); },
-        get(id) { return insts.find(i => i.id === id) || null; },
-        list() { return insts.map(i => i.id); },
-        relayout: schedule,
+        get(key) { try { return storage.getItem(key); } catch (e) { return null; } },
+        set(key, value) { try { storage.setItem(key, value); } catch (e) { /* unavailable */ } },
+        remove(key) { try { storage.removeItem(key); } catch (e) { /* unavailable */ } },
       };
-    })());
-    const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
-    if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
-    const KEY = 'abc:' + location.pathname + ':' + ID;
-    let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
-           || localStorage.getItem(KEY) || LETTERS[0];
-    if (!LETTERS.includes(cur)) cur = LETTERS[0];
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'abc-switch';
-    btn.dataset.abcFor = ID;
-    btn.hidden = true;
-    btn.title = ID + ' variation — click: next, ⌥click: previous';
-    document.body.appendChild(btn);
-    function apply(letter) {
-      cur = letter;
-      localStorage.setItem(KEY, cur);
-      scope.setAttribute('data-abc', cur);
-      btn.textContent = cur;
-      scope.querySelectorAll('[data-abc-only]').forEach(el => {
-        el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur) ? '' : 'none';
-      });
-      scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+    } catch (e) {
+      return { get() { return null; }, set() {}, remove() {} };
     }
-    btn.addEventListener('click', e => {
-      const step = e.altKey ? LETTERS.length - 1 : 1;
-      const next = LETTERS[(LETTERS.indexOf(cur) + step) % LETTERS.length];
-      if (RELOAD) {
-        localStorage.setItem(KEY, next);
-        sessionStorage.setItem('abc:scroll', String(scrollY));
-        const u = new URL(location.href);
-        u.searchParams.set('abc-' + ID, next);
-        location.href = u.href;
-      } else apply(next);
+  }
+  const LOCAL = safeStorage('localStorage');
+  const SESSION = safeStorage('sessionStorage');
+
+  // Shared manager: defined once, even if several widgets are pasted on a page.
+  const existingManager = window.__abc;
+  if (existingManager && (
+    typeof existingManager.add !== 'function' ||
+    typeof existingManager.get !== 'function' ||
+    typeof existingManager.list !== 'function' ||
+    typeof existingManager.relayout !== 'function'
+  )) {
+    console.warn('[abc] window.__abc is already in use by an incompatible value');
+    return;
+  }
+  const M = existingManager || (window.__abc = (() => {
+    const insts = [];
+    const st = document.createElement('style');
+    st.textContent =
+      '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
+      'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
+      'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
+      'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
+      '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
+      '.abc-switch:hover{opacity:1}.abc-switch:focus-visible{opacity:1;outline:3px solid #2563eb;' +
+      'outline-offset:3px}.abc-switch[hidden]{display:none}' +
+      '@media(prefers-reduced-motion:reduce){.abc-switch{transition:none}}';
+    document.head.appendChild(st);
+    let raf = 0;
+    function recompute() {
+      raf = 0;
+      const vh = innerHeight;
+      for (const i of insts) {
+        const r = i.scope.getBoundingClientRect();
+        const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        // "the section I'm looking at": crosses the viewport's central band, OR a tall
+        // section fills half the view, OR a short section sits fully on screen.
+        i.visible = r.bottom > 0 && r.top < vh &&
+          ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
+           (r.height > 0 && shown >= r.height * 0.6));
+        i.btn.hidden = !i.visible;
+      }
+      // stack whatever buttons are visible so they never overlap (topmost section lowest)
+      insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
+        .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
+    }
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
+    addEventListener('scroll', schedule, { passive: true });
+    addEventListener('resize', schedule);
+    return {
+      add(inst) {
+        if (insts.some(i => i.id === inst.id)) {
+          console.warn('[abc] duplicate experiment id:', inst.id);
+          return false;
+        }
+        insts.push(inst);
+        schedule();
+        return true;
+      },
+      get(id) { return insts.find(i => i.id === id) || null; },
+      list() { return insts.map(i => i.id); },
+      relayout: schedule,
+    };
+  })());
+
+  if (M.get(ID)) {
+    console.warn('[abc] duplicate experiment id:', ID);
+    return;
+  }
+
+  // This experiment.
+  const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
+  if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
+  const KEY = 'abc:' + location.pathname + ':' + ID;
+  const SCROLL_KEY = KEY + ':scroll';
+  const ORIGINAL_DISPLAY = new WeakMap();
+
+  let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
+         || LOCAL.get(KEY) || VARIANTS[0];
+  if (!VARIANTS.includes(cur)) cur = VARIANTS[0];
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'abc-switch';
+  btn.dataset.abcFor = ID;   // which experiment this button drives (runtime-only; aids QA)
+  btn.hidden = true;
+  btn.title = ID + ' variation. Click for next; Alt/Option-click for previous.';
+  document.body.appendChild(btn);
+
+  function apply(letter) {
+    if (typeof letter !== 'string') return false;
+    const next = letter.toUpperCase();
+    if (!VARIANTS.includes(next)) {
+      console.warn('[abc] unknown variation for ' + ID + ':', letter);
+      return false;
+    }
+    cur = next;
+    LOCAL.set(KEY, cur);
+    scope.setAttribute('data-abc', cur);
+    btn.textContent = cur;
+    btn.setAttribute(
+      'aria-label',
+      ID + ' variation ' + cur + '. Click for next variation; Alt/Option-click for previous variation.'
+    );
+    scope.querySelectorAll('[data-abc-only]').forEach(el => {
+      if (el.closest('[data-abc-scope]') !== scope) return;
+      if (!ORIGINAL_DISPLAY.has(el)) ORIGINAL_DISPLAY.set(el, el.style.display);
+      el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur)
+        ? ORIGINAL_DISPLAY.get(el)
+        : 'none';
     });
-    M.add({
-      id: ID, scope, btn, visible: false,
-      top: () => scope.getBoundingClientRect().top,
-      letters: LETTERS, get current() { return cur; }, set: apply,
-    });
-    const y = sessionStorage.getItem('abc:scroll');
-    if (y !== null) { sessionStorage.removeItem('abc:scroll'); addEventListener('load', () => scrollTo(0, +y)); }
-    apply(cur);
-  })();
-  </script>
+    scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+    return true;
+  }
+
+  btn.addEventListener('click', e => {
+    const step = e.altKey ? VARIANTS.length - 1 : 1;
+    const next = VARIANTS[(VARIANTS.indexOf(cur) + step) % VARIANTS.length];
+    if (RELOAD) {
+      LOCAL.set(KEY, next);
+      SESSION.set(SCROLL_KEY, String(Math.max(0, scrollY)));
+      const u = new URL(location.href);
+      u.searchParams.set('abc-' + ID, next);
+      location.href = u.href;
+    } else apply(next);
+  });
+
+  const added = M.add({
+    id: ID, scope, btn, visible: false,
+    top: () => scope.getBoundingClientRect().top,
+    letters: LETTERS, get current() { return cur; }, set: apply,
+  });
+  if (added === false) {
+    btn.remove();
+    return;
+  }
+
+  const y = SESSION.get(SCROLL_KEY);
+  if (y !== null) {
+    SESSION.remove(SCROLL_KEY);
+    const position = Number(y);
+    if (Number.isFinite(position) && position >= 0) {
+      const restore = () => scrollTo(0, position);
+      if (document.readyState === 'complete') requestAnimationFrame(restore);
+      else addEventListener('load', restore, { once: true });
+    }
+  }
+
+  apply(cur);
+})();
+</script>
   <!-- /ABC:widget hero -->
 
-  <!-- ABC:widget pricing — section-scoped variation switcher (dev-only; removed at finalize) -->
-  <script>
-  (() => {
-    /* ABC:config */
-    const ID      = 'pricing';
-    const LETTERS = 'ABC';
-    const RELOAD  = false;
-    /* /ABC:config */
-    const M = window.__abc || (window.__abc = (() => {
-      const insts = [];
-      const st = document.createElement('style');
-      st.textContent =
-        '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
-        'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
-        'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
-        'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
-        '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
-        '.abc-switch:hover{opacity:1}.abc-switch[hidden]{display:none}';
-      document.head.appendChild(st);
-      let raf = 0;
-      function recompute() {
-        raf = 0;
-        const vh = innerHeight;
-        for (const i of insts) {
-          const r = i.scope.getBoundingClientRect();
-          const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
-          i.visible = r.bottom > 0 && r.top < vh &&
-            ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
-             (r.height > 0 && shown >= r.height * 0.6));
-          i.btn.hidden = !i.visible;
-        }
-        insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
-          .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
-      }
-      const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
-      addEventListener('scroll', schedule, { passive: true });
-      addEventListener('resize', schedule);
+  <!-- ABC:widget pricing - section-scoped variation switcher (dev-only; removed at finalize) -->
+<script>
+(() => {
+  /* ABC:config */
+  const ID      = 'pricing';   // experiment id; MUST equal the section's data-abc-scope value
+  const LETTERS = 'ABC';   // one letter per live variation, in cycle order
+  const RELOAD  = false;    // true reloads the page after each switch
+  /* /ABC:config */
+
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(ID)) {
+    console.warn('[abc] invalid experiment id:', ID);
+    return;
+  }
+  const VARIANTS = [...LETTERS];
+  if (!/^[A-J]{1,10}$/.test(LETTERS) || new Set(VARIANTS).size !== VARIANTS.length) {
+    console.warn('[abc] LETTERS must contain unique A-J variants:', LETTERS);
+    return;
+  }
+
+  function safeStorage(name) {
+    try {
+      const storage = window[name];
       return {
-        add(inst) { insts.push(inst); schedule(); },
-        get(id) { return insts.find(i => i.id === id) || null; },
-        list() { return insts.map(i => i.id); },
-        relayout: schedule,
+        get(key) { try { return storage.getItem(key); } catch (e) { return null; } },
+        set(key, value) { try { storage.setItem(key, value); } catch (e) { /* unavailable */ } },
+        remove(key) { try { storage.removeItem(key); } catch (e) { /* unavailable */ } },
       };
-    })());
-    const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
-    if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
-    const KEY = 'abc:' + location.pathname + ':' + ID;
-    let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
-           || localStorage.getItem(KEY) || LETTERS[0];
-    if (!LETTERS.includes(cur)) cur = LETTERS[0];
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'abc-switch';
-    btn.dataset.abcFor = ID;
-    btn.hidden = true;
-    btn.title = ID + ' variation — click: next, ⌥click: previous';
-    document.body.appendChild(btn);
-    function apply(letter) {
-      cur = letter;
-      localStorage.setItem(KEY, cur);
-      scope.setAttribute('data-abc', cur);
-      btn.textContent = cur;
-      scope.querySelectorAll('[data-abc-only]').forEach(el => {
-        el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur) ? '' : 'none';
-      });
-      scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+    } catch (e) {
+      return { get() { return null; }, set() {}, remove() {} };
     }
-    btn.addEventListener('click', e => {
-      const step = e.altKey ? LETTERS.length - 1 : 1;
-      const next = LETTERS[(LETTERS.indexOf(cur) + step) % LETTERS.length];
-      if (RELOAD) {
-        localStorage.setItem(KEY, next);
-        sessionStorage.setItem('abc:scroll', String(scrollY));
-        const u = new URL(location.href);
-        u.searchParams.set('abc-' + ID, next);
-        location.href = u.href;
-      } else apply(next);
+  }
+  const LOCAL = safeStorage('localStorage');
+  const SESSION = safeStorage('sessionStorage');
+
+  // Shared manager: defined once, even if several widgets are pasted on a page.
+  const existingManager = window.__abc;
+  if (existingManager && (
+    typeof existingManager.add !== 'function' ||
+    typeof existingManager.get !== 'function' ||
+    typeof existingManager.list !== 'function' ||
+    typeof existingManager.relayout !== 'function'
+  )) {
+    console.warn('[abc] window.__abc is already in use by an incompatible value');
+    return;
+  }
+  const M = existingManager || (window.__abc = (() => {
+    const insts = [];
+    const st = document.createElement('style');
+    st.textContent =
+      '.abc-switch{position:fixed;left:14px;bottom:14px;z-index:2147483000;width:36px;height:36px;' +
+      'border-radius:50%;border:1.6px solid var(--ink,#14171c);background:var(--paper,#fff);' +
+      'color:var(--ink,#14171c);font:700 16px/33px "Rubik",-apple-system,sans-serif;' +
+      'text-align:center;cursor:pointer;opacity:.55;user-select:none;' +
+      '-webkit-tap-highlight-color:transparent;transition:opacity .16s ease}' +
+      '.abc-switch:hover{opacity:1}.abc-switch:focus-visible{opacity:1;outline:3px solid #2563eb;' +
+      'outline-offset:3px}.abc-switch[hidden]{display:none}' +
+      '@media(prefers-reduced-motion:reduce){.abc-switch{transition:none}}';
+    document.head.appendChild(st);
+    let raf = 0;
+    function recompute() {
+      raf = 0;
+      const vh = innerHeight;
+      for (const i of insts) {
+        const r = i.scope.getBoundingClientRect();
+        const shown = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+        // "the section I'm looking at": crosses the viewport's central band, OR a tall
+        // section fills half the view, OR a short section sits fully on screen.
+        i.visible = r.bottom > 0 && r.top < vh &&
+          ((r.top < vh * 0.6 && r.bottom > vh * 0.4) || shown >= vh * 0.5 ||
+           (r.height > 0 && shown >= r.height * 0.6));
+        i.btn.hidden = !i.visible;
+      }
+      // stack whatever buttons are visible so they never overlap (topmost section lowest)
+      insts.filter(i => i.visible).sort((a, b) => a.top() - b.top())
+        .forEach((i, n) => { i.btn.style.bottom = (14 + n * 46) + 'px'; });
+    }
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(recompute); };
+    addEventListener('scroll', schedule, { passive: true });
+    addEventListener('resize', schedule);
+    return {
+      add(inst) {
+        if (insts.some(i => i.id === inst.id)) {
+          console.warn('[abc] duplicate experiment id:', inst.id);
+          return false;
+        }
+        insts.push(inst);
+        schedule();
+        return true;
+      },
+      get(id) { return insts.find(i => i.id === id) || null; },
+      list() { return insts.map(i => i.id); },
+      relayout: schedule,
+    };
+  })());
+
+  if (M.get(ID)) {
+    console.warn('[abc] duplicate experiment id:', ID);
+    return;
+  }
+
+  // This experiment.
+  const scope = document.querySelector('[data-abc-scope="' + ID + '"]');
+  if (!scope) { console.warn('[abc] no element with data-abc-scope="' + ID + '"'); return; }
+  const KEY = 'abc:' + location.pathname + ':' + ID;
+  const SCROLL_KEY = KEY + ':scroll';
+  const ORIGINAL_DISPLAY = new WeakMap();
+
+  let cur = (new URLSearchParams(location.search).get('abc-' + ID) || '').toUpperCase()
+         || LOCAL.get(KEY) || VARIANTS[0];
+  if (!VARIANTS.includes(cur)) cur = VARIANTS[0];
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'abc-switch';
+  btn.dataset.abcFor = ID;   // which experiment this button drives (runtime-only; aids QA)
+  btn.hidden = true;
+  btn.title = ID + ' variation. Click for next; Alt/Option-click for previous.';
+  document.body.appendChild(btn);
+
+  function apply(letter) {
+    if (typeof letter !== 'string') return false;
+    const next = letter.toUpperCase();
+    if (!VARIANTS.includes(next)) {
+      console.warn('[abc] unknown variation for ' + ID + ':', letter);
+      return false;
+    }
+    cur = next;
+    LOCAL.set(KEY, cur);
+    scope.setAttribute('data-abc', cur);
+    btn.textContent = cur;
+    btn.setAttribute(
+      'aria-label',
+      ID + ' variation ' + cur + '. Click for next variation; Alt/Option-click for previous variation.'
+    );
+    scope.querySelectorAll('[data-abc-only]').forEach(el => {
+      if (el.closest('[data-abc-scope]') !== scope) return;
+      if (!ORIGINAL_DISPLAY.has(el)) ORIGINAL_DISPLAY.set(el, el.style.display);
+      el.style.display = el.getAttribute('data-abc-only').split(/\s+/).includes(cur)
+        ? ORIGINAL_DISPLAY.get(el)
+        : 'none';
     });
-    M.add({
-      id: ID, scope, btn, visible: false,
-      top: () => scope.getBoundingClientRect().top,
-      letters: LETTERS, get current() { return cur; }, set: apply,
-    });
-    const y = sessionStorage.getItem('abc:scroll');
-    if (y !== null) { sessionStorage.removeItem('abc:scroll'); addEventListener('load', () => scrollTo(0, +y)); }
-    apply(cur);
-  })();
-  </script>
+    scope.dispatchEvent(new CustomEvent('abc:change', { detail: { id: ID, variant: cur }, bubbles: true }));
+    return true;
+  }
+
+  btn.addEventListener('click', e => {
+    const step = e.altKey ? VARIANTS.length - 1 : 1;
+    const next = VARIANTS[(VARIANTS.indexOf(cur) + step) % VARIANTS.length];
+    if (RELOAD) {
+      LOCAL.set(KEY, next);
+      SESSION.set(SCROLL_KEY, String(Math.max(0, scrollY)));
+      const u = new URL(location.href);
+      u.searchParams.set('abc-' + ID, next);
+      location.href = u.href;
+    } else apply(next);
+  });
+
+  const added = M.add({
+    id: ID, scope, btn, visible: false,
+    top: () => scope.getBoundingClientRect().top,
+    letters: LETTERS, get current() { return cur; }, set: apply,
+  });
+  if (added === false) {
+    btn.remove();
+    return;
+  }
+
+  const y = SESSION.get(SCROLL_KEY);
+  if (y !== null) {
+    SESSION.remove(SCROLL_KEY);
+    const position = Number(y);
+    if (Number.isFinite(position) && position >= 0) {
+      const restore = () => scrollTo(0, position);
+      if (document.readyState === 'complete') requestAnimationFrame(restore);
+      else addEventListener('load', restore, { once: true });
+    }
+  }
+
+  apply(cur);
+})();
+</script>
   <!-- /ABC:widget pricing -->
 </body>
 </html>

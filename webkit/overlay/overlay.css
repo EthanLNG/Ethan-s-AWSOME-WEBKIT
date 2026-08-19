@@ -1,9 +1,9 @@
 /* =============================================================================
- * Ethan's AWESOME WEBKIT — overlay styles (webkit/overlay/overlay.css)
+ * Ethan's AWESOME WEBKIT - overlay styles (webkit/overlay/overlay.css)
  * =============================================================================
  * Fetched by overlay.js from /__wk/overlay.css and installed into the overlay's
  * Shadow DOM via adoptedStyleSheets (fallback: a <style> node in the shadow
- * root). NOTHING here can leak into the host page and no host rule reaches in —
+ * root). NOTHING here can leak into the host page and no host rule reaches in -
  * the host element carries all:initial, so every visual decision is made here.
  * ONE exception: the `all` shorthand deliberately excludes `direction` and
  * `unicode-bidi`, so `<html dir="rtl">` (a Hebrew, Arabic or Farsi site) still
@@ -17,12 +17,12 @@
  *
  * Geometry contract with the abc switcher: abc buttons stack UP from
  * left:14px/bottom:14px; the webkit row grows RIGHT along y=14 (send at
- * left:60px). Never place anything at left:14px. There is no toggle button —
+ * left:60px). Never place anything at left:14px. There is no toggle button -
  * showing/hiding the overlay is a keypress, so nothing sits on the page at rest.
  * ========================================================================== */
 
 /* overlay.js toggles visibility with the `hidden` attribute; class rules below
- * set explicit `display` values which would otherwise defeat it — reassert. */
+ * set explicit `display` values which would otherwise defeat it - reassert. */
 [hidden] { display: none !important; }
 
 :host {
@@ -44,14 +44,14 @@
   /* `all:initial` on the host div does NOT reset direction (the shorthand
    * excludes it), so a host page with dir="rtl" would mirror the entire tool:
    * the card action row (Delete lands under muscle-memory "Done"), the review
-   * bar (◀/▶ swap, dots reverse), and .wk-caret all flip. Pin LTR here — this
+   * bar (◀/▶ swap, dots reverse), and .wk-caret all flip. Pin LTR here - this
    * one rule covers the whole shadow tree; free-text fields re-enable RTL via
    * `unicode-bidi: plaintext` on their own rules below. */
   direction: ltr;
 }
 
 /* ===== hideable container (evaluate ⇄ feedback) ===== */
-/* visibility (not display) so the DOM — an open editor card mid-word — stays
+/* visibility (not display) so the DOM - an open editor card mid-word - stays
  * alive and re-appears exactly as it was. */
 .wk-wrap {
   position: fixed;
@@ -67,6 +67,13 @@
   font-family: var(--wk-font);
   -webkit-tap-highlight-color: transparent;
 }
+button:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--wk-ink);
+  outline-offset: 2px;
+}
 
 /* ===== draw layer ===== */
 .wk-draw {
@@ -75,7 +82,7 @@
   pointer-events: auto;
   cursor: crosshair;
   /* Without this the browser claims a drag as a scroll/pan gesture, fires
-   * pointercancel and kills the rubber-band — drawing a rect by touch is
+   * pointercancel and kills the rubber-band - drawing a rect by touch is
    * impossible. `none` lets the drag reach overlay.js's pointermove handler. */
   touch-action: none;
   z-index: 1;
@@ -133,13 +140,14 @@
   position: absolute;
   left: 0;
   top: 0;
-  width: 22px;
-  height: 22px;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   border: 1.6px solid var(--wk-ink);
   background: var(--wk-paper);
   color: var(--wk-ink);
-  font: 700 11px/19px var(--wk-font);
+  font: 700 11px/1 var(--wk-font);
   text-align: center;
   padding: 0;
   cursor: pointer;
@@ -184,12 +192,13 @@
 .wk-frozen-delete {
   position: absolute;
   z-index: 2;
-  left: -22px;
-  top: -22px;
+  left: -26px;
+  top: -26px;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 1px solid var(--wk-danger);
   border-radius: 50%;
@@ -210,6 +219,11 @@
   pointer-events: auto;
   touch-action: none;   /* drag-to-resize by touch (see .wk-draw) */
 }
+.wk-handle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
 .wk-handle.h-nw { left: -5px; top: -5px; cursor: nwse-resize; }
 .wk-handle.h-n  { left: calc(50% - 5px); top: -5px; cursor: ns-resize; }
 .wk-handle.h-ne { right: -5px; top: -5px; cursor: nesw-resize; }
@@ -223,6 +237,10 @@
 .wk-card {
   position: fixed;
   width: 320px;
+  box-sizing: border-box;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--wk-paper);
   border: 1.5px solid var(--wk-ink);
   border-radius: var(--wk-radius);
@@ -326,7 +344,7 @@
 
 /* textarea + interim-dictation ghost. The ghost mirrors the textarea's metrics
  * exactly; committed text is painted transparent so only the gray interim tail
- * shows — visually the words appear at the caret before they're final. */
+ * shows - visually the words appear at the caret before they're final. */
 .wk-ta-wrap { position: relative; }
 .wk-ta {
   width: 100%;
@@ -406,7 +424,8 @@
 .wk-seg-btn {
   border: 0;
   background: transparent;
-  padding: 5px 10px;
+  min-height: 24px;
+  padding: 6px 10px;
   font: 600 11px/1 var(--wk-font);
   color: var(--wk-muted);
   cursor: pointer;
@@ -418,6 +437,7 @@
 .wk-scope-wrap { position: relative; align-self: stretch; display: flex; }
 .wk-scope-btn {
   width: 27px;
+  min-height: 24px;
   padding: 0 3px;
   border: 1px solid var(--wk-line);
   border-radius: 7px;
@@ -465,8 +485,9 @@
 .wk-step-row { gap: 6px; }
 .wk-step-label { font-size: 12px; color: var(--wk-muted); margin-right: auto; }
 .wk-step {
-  width: 22px;
-  height: 22px;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
   border-radius: 6px;
   border: 1px solid var(--wk-line);
   background: var(--wk-paper);
@@ -587,6 +608,9 @@
   pointer-events: none;
   z-index: 6;
   white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ===== review bar ===== */
@@ -627,28 +651,48 @@
 .wk-nav:hover { border-color: var(--wk-accent); color: var(--wk-accent); }
 .wk-bar-count { font: 700 12px/1 var(--wk-font); color: var(--wk-ink); white-space: nowrap; }
 
-.wk-dots { display: inline-flex; gap: 4px; align-items: center; }
+.wk-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  max-width: min(280px, 35vw);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
 .wk-dot-i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  border: 1px solid var(--wk-muted);
+  position: relative;
+  width: 24px;
+  height: 24px;
+  border: 0;
   background: transparent;
   padding: 0;
   cursor: pointer;
+}
+.wk-dot-i::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 1px solid var(--wk-muted);
+  background: transparent;
+  transform: translate(-50%, -50%);
   transition: transform var(--wk-ease), background var(--wk-ease), border-color var(--wk-ease);
 }
-.wk-dot-i.cur { transform: scale(1.4); border-color: var(--wk-accent); }
-.wk-dot-i.v-accept { background: var(--wk-ok); border-color: var(--wk-ok); }
-.wk-dot-i.v-redo { background: var(--wk-warn); border-color: var(--wk-warn); }
-.wk-dot-i.v-delete { background: var(--wk-muted); border-color: var(--wk-muted); }
+.wk-dot-i.cur::before { transform: translate(-50%, -50%) scale(1.4); border-color: var(--wk-accent); }
+.wk-dot-i.v-accept::before { background: var(--wk-ok); border-color: var(--wk-ok); }
+.wk-dot-i.v-redo::before { background: var(--wk-warn); border-color: var(--wk-warn); }
+.wk-dot-i.v-delete::before { background: var(--wk-muted); border-color: var(--wk-muted); }
 
 /* ===== A/B variants pill (the ONLY variant switcher shown during review) =====
  * overlay.js hides the page's own .abc-switch button for the scope under
  * review, so this chip carries the whole job: it must read as a pressable
  * control, not a status label. Hence the raised surface, the oversized current
  * letter, the full letter run with the live one lit, and a ⟳ that spins on
- * hover — "click me and the variant changes" has to be legible at a glance. */
+ * hover - "click me and the variant changes" has to be legible at a glance. */
 .wk-abc-chip {
   position: absolute;
   left: 50%;
@@ -680,7 +724,7 @@
   min-width: 11px;
   text-align: center;
 }
-/* the run of available letters — shows at a glance that there ARE others */
+/* the run of available letters - shows at a glance that there ARE others */
 .wk-abc-chip .wk-chip-run { display: inline-flex; gap: 2px; }
 .wk-abc-chip .wk-chip-l {
   font: 700 9px/13px var(--wk-font);
@@ -857,6 +901,9 @@
   color: var(--wk-muted);
   font: 400 15px/1 var(--wk-font);
   cursor: pointer;
+  box-sizing: border-box;
+  min-width: 24px;
+  min-height: 24px;
   padding: 2px 4px;
   transition: color var(--wk-ease);
 }
@@ -868,7 +915,7 @@
  * (left:106px) and wraps its ~12 children into a tall blob over the lower
  * viewport. Dock it full-width ABOVE the corner row instead (that row occupies
  * y=14..50; bottom:60px clears it). The card is a fixed 320px, wider than a
- * ~336px viewport once positionCard clamps it — let it shrink to fit; the JS
+ * ~336px viewport once positionCard clamps it - let it shrink to fit; the JS
  * clamp measures offsetWidth so it self-corrects. */
 @media (max-width: 560px) {
   .wk-bar {
@@ -880,4 +927,24 @@
     border-radius: 18px;   /* pill radius looks wrong once rows wrap */
   }
   .wk-card { width: min(320px, 100vw - 16px); }
+  .wk-mini {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    transform: none;
+  }
+  .wk-hint {
+    max-width: calc(100vw - 32px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -15,11 +15,15 @@
     <button class="shortcut-guide" id="shortcutGuide" type="button" aria-label="Preview shortcuts; open settings">
       <span><kbd id="guideToggleKey">C</kbd><small>Hide/Show</small></span>
       <span><kbd id="guideDictateKey">V</kbd><small>Voice</small></span>
-      <span><kbd>⌥</kbd><small id="guideOptionAction">Draw</small></span>
+      <span><kbd class="option-key">Alt</kbd><small id="guideOptionAction">Draw</small></span>
     </button>
     <div class="system-status" id="systemStatus" aria-live="polite"></div>
-    <button class="secondary small" id="settingsButton" type="button">Settings</button>
-    <button class="primary small" id="addProjectButton" type="button">+ Project</button>
+    <button class="secondary small topbar-action" id="settingsButton" type="button" aria-label="Settings">
+      <span class="topbar-action-icon settings-action-icon" aria-hidden="true">⚙</span><span class="topbar-action-label">Settings</span>
+    </button>
+    <button class="primary small topbar-action" id="addProjectButton" type="button" aria-label="Add project">
+      <span class="topbar-action-icon" aria-hidden="true">+</span><span class="topbar-action-label">Project</span>
+    </button>
   </header>
 
   <main class="shell">
@@ -80,46 +84,46 @@
       <button class="icon-button" id="closeChat" type="button" aria-label="Collapse chat">×</button>
       <div><p class="eyebrow" id="chatColor"></p><h2 id="chatTitle">Agent</h2></div>
       <label class="reasoning-control chat-reasoning"><span id="chatReasoningLabel">Reasoning</span><select id="chatReasoning"></select></label>
-      <span class="live-dot" id="chatStatus"></span>
+      <span class="live-dot" id="chatStatus" role="status"><span class="sr-only" id="chatStatusText">Session status</span></span>
     </header>
     <div class="chat-events" id="chatEvents" aria-live="polite"></div>
     <form class="composer" id="chatForm">
       <div class="attachment-list" id="attachmentList" hidden></div>
       <input id="chatFiles" type="file" multiple hidden>
       <button class="attach-button" id="attachButton" type="button" aria-label="Attach files">＋</button>
-      <textarea id="chatInput" rows="2" placeholder="Describe a change or ask the agent…"></textarea>
+      <textarea id="chatInput" rows="2" aria-label="Message the coding agent" placeholder="Describe a change or ask the agent…"></textarea>
       <button class="primary" type="submit">Send</button>
     </form>
     <footer>
-      <button class="secondary merge" id="mergeButton" type="button">Merge to main</button>
+      <button class="secondary merge" id="mergeButton" type="button">Merge changes</button>
       <button class="danger" id="discardButton" type="button">Discard work</button>
     </footer>
   </aside>
 
-  <dialog id="providerDialog" class="modal wizard">
+  <dialog id="providerDialog" class="modal wizard" aria-labelledby="providerDialogTitle">
     <form method="dialog">
       <p class="eyebrow">First launch</p>
-      <h2>Which local agents do you use?</h2>
+      <h2 id="providerDialogTitle">Which local agents do you use?</h2>
       <p>Select one or both. Each website will still use one provider at a time.</p>
       <div class="provider-options">
         <label><input type="checkbox" value="codex"><span><b>Codex</b><small>OpenAI Codex CLI</small></span></label>
         <label><input type="checkbox" value="claude"><span><b>Claude Code</b><small>Anthropic Claude Code CLI</small></span></label>
       </div>
-      <div class="modal-error" id="providerError"></div>
+      <div class="modal-error" id="providerError" role="alert" aria-live="assertive"></div>
       <button class="primary full" id="saveProviders" type="button">Continue</button>
     </form>
   </dialog>
 
-  <dialog id="projectDialog" class="modal project-modal">
+  <dialog id="projectDialog" class="modal project-modal" aria-labelledby="projectDialogTitle">
     <form method="dialog" id="projectForm">
       <button class="dialog-close" id="projectDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Website project</p>
       <h2 id="projectDialogTitle">Create or bring your own</h2>
       <div class="segmented" id="projectModeTabs" role="tablist">
-        <button type="button" class="active" data-project-mode="create">Create new</button>
-        <button type="button" data-project-mode="existing">Use existing</button>
+        <button type="button" class="active" id="createProjectTab" role="tab" aria-selected="true" aria-controls="createFields" data-project-mode="create">Create new</button>
+        <button type="button" id="existingProjectTab" role="tab" aria-selected="false" aria-controls="existingFields" tabindex="-1" data-project-mode="existing">Use existing</button>
       </div>
-      <div id="createFields">
+      <div id="createFields" role="tabpanel" aria-labelledby="createProjectTab">
         <div class="onboarding-progress" aria-label="New project onboarding progress">
           <span class="active" data-onboarding-dot="1">1</span><i></i><span data-onboarding-dot="2">2</span><i></i><span data-onboarding-dot="3">3</span>
         </div>
@@ -136,9 +140,9 @@
         <div data-create-step="2" hidden>
           <p class="step-kicker">Optional context</p>
           <label>Describe the brand or design language
-            <textarea id="newBrandBrief" rows="5" placeholder="Personality, audience, visual references, colors to use or avoid, feelings the site should create…"></textarea>
+            <textarea id="newBrandBrief" rows="5" maxlength="20000" placeholder="Personality, audience, visual references, colors to use or avoid, feelings the site should create…"></textarea>
           </label>
-          <div class="project-assets" id="projectAssetsDropzone" tabindex="0">
+          <div class="project-assets" id="projectAssetsDropzone" role="group" aria-label="Add project reference files or folders">
             <b>Drop project references here</b>
             <small>Logos, imagery, design systems, copy, PDFs, whole reference folders, or other useful material. Optional.</small>
             <span class="project-assets-actions">
@@ -149,6 +153,7 @@
               </span>
             </span>
           </div>
+          <p class="capability-note">References are copied into <code>project-context/</code> and included in the new project's Git history. Add only files you want the project to retain and sync.</p>
           <div class="project-asset-list" id="projectAssetList" hidden></div>
         </div>
         <div data-create-step="3" hidden>
@@ -160,7 +165,7 @@
           </div>
         </div>
       </div>
-      <div id="existingFields" hidden>
+      <div id="existingFields" role="tabpanel" aria-labelledby="existingProjectTab" hidden>
         <label>Project folder
           <span class="folder-picker">
             <input id="existingPath" readonly placeholder="No folder selected">
@@ -169,8 +174,8 @@
         </label>
       </div>
       <label id="projectProviderField">Agent provider<select id="projectProviderSelect"></select></label>
-      <p class="capability-note" id="projectGithubNote">GitHub is the default: WebKit detects an existing remote or creates a private repository when GitHub CLI is connected.</p>
-      <div class="modal-error" id="projectError"></div>
+      <p class="capability-note" id="projectGithubNote">New websites are created as private GitHub repositories when GitHub CLI is connected. Existing projects stay local unless they already have a GitHub remote.</p>
+      <div class="modal-error" id="projectError" role="alert" aria-live="assertive"></div>
       <div class="project-wizard-actions">
         <button class="secondary" id="projectBack" type="button" hidden>Back</button>
         <button class="primary" id="saveProject" type="submit">Continue</button>
@@ -178,7 +183,7 @@
     </form>
   </dialog>
 
-  <dialog id="seedDialog" class="modal seed-modal">
+  <dialog id="seedDialog" class="modal seed-modal" aria-labelledby="seedDialogTitle">
     <form method="dialog">
       <button class="dialog-close" id="seedDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow" id="seedDialogEyebrow">Creating directions</p>
@@ -190,21 +195,21 @@
           <div class="seed-list" id="seedList"></div>
           <div class="seed-preview-wrap">
             <div class="seed-preview-head"><strong id="seedPreviewTitle"></strong><button class="secondary" id="openSeedPreview" type="button">Open full preview</button></div>
-            <iframe class="seed-preview" id="seedPreview" title="Selected website seed preview"></iframe>
+            <iframe class="seed-preview" id="seedPreview" title="Selected website seed preview" sandbox="allow-scripts allow-same-origin"></iframe>
             <p id="seedPreviewSummary"></p>
           </div>
         </div>
         <label class="seed-combination">What should the final website take from the selected seeds? <span>Optional</span>
-          <textarea id="seedCombinationNotes" rows="3" placeholder="For example: Seed 2's typography, Seed 6's navigation, and Seed 9's warmer palette."></textarea>
+          <textarea id="seedCombinationNotes" rows="3" maxlength="12000" placeholder="For example: Seed 2's typography, Seed 6's navigation, and Seed 9's warmer palette."></textarea>
         </label>
-        <div class="modal-error" id="seedError"></div>
+        <div class="modal-error" id="seedError" role="alert" aria-live="assertive"></div>
         <button class="primary full" id="finishSeeds" type="button">Build from selected seeds</button>
       </div>
       <button class="secondary full seed-chat-button" id="openSeedChat" type="button" hidden>Open agent chat</button>
     </form>
   </dialog>
 
-  <dialog id="confirmDialog" class="modal confirm-modal">
+  <dialog id="confirmDialog" class="modal confirm-modal" aria-labelledby="confirmTitle">
     <form method="dialog">
       <p class="eyebrow" id="confirmEyebrow">Confirm</p>
       <h2 id="confirmTitle"></h2>
@@ -216,11 +221,11 @@
     </form>
   </dialog>
 
-  <dialog id="settingsDialog" class="modal settings-modal">
+  <dialog id="settingsDialog" class="modal settings-modal" aria-labelledby="settingsDialogTitle">
     <form method="dialog" id="settingsForm">
       <button class="dialog-close" id="settingsDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Control Center settings</p>
-      <h2>Preview shortcuts</h2>
+      <h2 id="settingsDialogTitle">Preview shortcuts</h2>
       <p>These are the only three controls you need on the website. Click either letter shortcut to change it.</p>
       <div class="hotkey-options">
         <button class="hotkey-picker" type="button" data-hotkey-setting="toggleHotkey">
@@ -233,7 +238,7 @@
         </button>
         <div class="hotkey-picker fixed">
           <span><b id="settingsOptionAction">Draw a rectangle</b><small>Hold while dragging on the website</small></span>
-          <kbd>⌥</kbd>
+          <kbd class="option-key">Alt</kbd>
         </div>
       </div>
       <p class="capability-note shortcut-note">Shortcuts pause while you type in a text field, so the selected letters remain typable.</p>
@@ -266,11 +271,11 @@
         <div class="settings-options">
           <label>
             <input type="radio" name="interactionMode" value="browse-default">
-            <span><b>Click the website normally</b><small>Default. Hold Option while dragging to draw a feedback rectangle.</small></span>
+            <span><b>Click the website normally</b><small>Default. Hold Alt/Option while dragging to draw a feedback rectangle.</small></span>
           </label>
           <label>
             <input type="radio" name="interactionMode" value="draw-default">
-            <span><b>Draw rectangles immediately</b><small>Legacy mode. Hold Option when you want to click the website underneath.</small></span>
+            <span><b>Draw rectangles immediately</b><small>Legacy mode. Hold Alt/Option when you want to click the website underneath.</small></span>
           </label>
         </div>
       </div>
@@ -283,7 +288,7 @@
         <h2>GitHub sync</h2>
         <p id="githubConnectionStatus"></p>
       </div>
-      <div class="modal-error" id="settingsError"></div>
+      <div class="modal-error" id="settingsError" role="alert" aria-live="assertive"></div>
       <button class="primary full" id="saveSettings" type="submit">Save settings</button>
     </form>
   </dialog>

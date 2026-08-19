@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overlay QA fixture</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font: 16px/1.5 system-ui, sans-serif; background: #f5f1e8; color: #171717; }
+    main { width: min(880px, calc(100% - 40px)); margin: 40px auto; }
+    button { margin: 0 8px 12px 0; padding: 10px 14px; }
+    #target { min-height: 260px; margin-top: 20px; padding: 40px; border: 3px solid; background: white; }
+    dialog { width: min(480px, calc(100% - 40px)); padding: 32px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Overlay browser QA</h1>
+    <button id="open-modal" type="button">Open test modal</button>
+    <button id="open-modal-second" type="button">Open second modal</button>
+    <button id="grant-microphone" type="button">Grant test microphone</button>
+    <button id="reject-microphone" type="button">Reject test microphone</button>
+    <button id="release-upload" type="button">Release test upload</button>
+    <button id="reject-upload" type="button">Reject test upload</button>
+    <button id="zero-data" type="button">Next recording has no data</button>
+    <button id="recorder-error" type="button">Emit recorder error</button>
+    <button id="unexpected-stop" type="button">Stop recorder unexpectedly</button>
+    <button id="next-review-point" type="button">Next review point</button>
+    <button id="bump-review-round" type="button">Bump review round</button>
+    <button id="clear-review-round" type="button">Clear review override</button>
+    <output id="qa-state" aria-label="QA state"></output>
+    <section id="target">
+      <h2>Rectangle target</h2>
+      <p>Draw a feedback rectangle here to open the voice-note editor.</p>
+    </section>
+  </main>
+  <dialog id="test-modal">
+    <h2>Modal target</h2>
+    <p>The overlay host must move into this top layer and return after close.</p>
+    <button id="open-second-from-first" type="button">Open second modal above this one</button>
+    <button id="close-modal" type="button">Close test modal</button>
+  </dialog>
+  <dialog id="test-modal-second">
+    <h2>Second modal target</h2>
+    <p>Open the first modal from here to test top-layer order against DOM order.</p>
+    <button id="open-first-from-second" type="button">Open first modal above this one</button>
+    <button id="close-modal-second" type="button">Close second modal</button>
+  </dialog>
+  <script>
+    (() => {
+      const qa = window.__qa = {
+        permissionRequests: 0,
+        recorderCount: 0,
+        stoppedTracks: 0,
+        voiceUploadRequests: 0,
+        voiceDeleteRequests: 0,
+        recorderStopCalls: 0,
+        trackStopCalls: 0,
+        zeroDataNext: false,
+        zeroDataStops: 0,
+        recorderErrors: 0,
+        unexpectedStops: 0,
+        activeRecorder: null,
+        reviewNavigationRequests: 0,
+        reviewNavigationHits: 0,
+        reviewRoundOffset: 0,
+        stateOverrideResponses: 0,
+        resolvePermission: null,
+        rejectPermission: null,
+        releaseUpload: null,
+        rejectUpload: null,
+      };
+      const stateOutput = document.getElementById('qa-state');
+      const paintState = () => {
+        stateOutput.dataset.permissionRequests = String(qa.permissionRequests);
+        stateOutput.dataset.recorderCount = String(qa.recorderCount);
+        stateOutput.dataset.stoppedTracks = String(qa.stoppedTracks);
+        stateOutput.dataset.voiceUploadRequests = String(qa.voiceUploadRequests);
+        stateOutput.dataset.voiceDeleteRequests = String(qa.voiceDeleteRequests);
+        stateOutput.dataset.recorderStopCalls = String(qa.recorderStopCalls);
+        stateOutput.dataset.trackStopCalls = String(qa.trackStopCalls);
+        stateOutput.dataset.zeroDataNext = String(qa.zeroDataNext);
+        stateOutput.dataset.zeroDataStops = String(qa.zeroDataStops);
+        stateOutput.dataset.recorderErrors = String(qa.recorderErrors);
+        stateOutput.dataset.unexpectedStops = String(qa.unexpectedStops);
+        stateOutput.dataset.activeRecorderState = qa.activeRecorder?.state || 'none';
+        stateOutput.dataset.reviewNavigationRequests = String(qa.reviewNavigationRequests);
+        stateOutput.dataset.reviewNavigationHits = String(qa.reviewNavigationHits);
+        stateOutput.dataset.reviewRoundOffset = String(qa.reviewRoundOffset);
+        stateOutput.dataset.stateOverrideResponses = String(qa.stateOverrideResponses);
+        stateOutput.dataset.permissionPending = String(!!qa.resolvePermission);
+        stateOutput.dataset.uploadPending = String(!!qa.releaseUpload);
+        const overlayRoot = document.querySelector('[data-wk-host]')?.shadowRoot;
+        stateOutput.dataset.reviewCounter = overlayRoot?.querySelector('.wk-bar-count')?.textContent || '';
+        stateOutput.dataset.redoOpen = String(!!overlayRoot?.querySelector('.wk-mini'));
+        stateOutput.textContent = [
+          `permission:${qa.permissionRequests}`,
+          `recorders:${qa.recorderCount}`,
+          `stopped:${qa.stoppedTracks}`,
+          `uploads:${qa.voiceUploadRequests}`,
+          `deletes:${qa.voiceDeleteRequests}`,
+          `recorder-stops:${qa.recorderStopCalls}`,
+          `track-stop-calls:${qa.trackStopCalls}`,
+          `zero-data-next:${qa.zeroDataNext}`,
+          `zero-data-stops:${qa.zeroDataStops}`,
+          `recorder-errors:${qa.recorderErrors}`,
+          `unexpected-stops:${qa.unexpectedStops}`,
+          `review-nav:${qa.reviewNavigationHits}/${qa.reviewNavigationRequests}`,
+          `round-offset:${qa.reviewRoundOffset}`,
+        ].join(' ');
+      };
+      paintState();
+      const dialog = document.getElementById('test-modal');
+      const secondDialog = document.getElementById('test-modal-second');
+      const showModal = (target) => { if (!target.open) target.showModal(); };
+      document.getElementById('open-modal').addEventListener('click', () => showModal(dialog));
+      document.getElementById('open-modal-second').addEventListener('click', () => showModal(secondDialog));
+      document.getElementById('open-second-from-first').addEventListener('click', () => showModal(secondDialog));
+      document.getElementById('open-first-from-second').addEventListener('click', () => showModal(dialog));
+      document.getElementById('close-modal').addEventListener('click', () => dialog.close());
+      document.getElementById('close-modal-second').addEventListener('click', () => secondDialog.close());
+      const makeStream = () => {
+        const track = {
+          stopped: false,
+          stop() {
+            qa.trackStopCalls += 1;
+            if (!this.stopped) {
+              this.stopped = true;
+              qa.stoppedTracks += 1;
+            }
+            paintState();
+          },
+        };
+        return { getTracks: () => [track] };
+      };
+      navigator.mediaDevices = navigator.mediaDevices || {};
+      navigator.mediaDevices.getUserMedia = () => {
+        qa.permissionRequests += 1;
+        paintState();
+        if (qa.resolvePermission) {
+          return Promise.reject(new DOMException('Concurrent permission request', 'InvalidStateError'));
+        }
+        return new Promise((resolve, reject) => {
+          const clearPermission = () => {
+            qa.resolvePermission = null;
+            qa.rejectPermission = null;
+            paintState();
+          };
+          qa.resolvePermission = () => {
+            clearPermission();
+            resolve(makeStream());
+          };
+          qa.rejectPermission = () => {
+            clearPermission();
+            reject(new DOMException('Test microphone rejected', 'NotAllowedError'));
+          };
+          paintState();
+        });
+      };
+      class TestMediaRecorder {
+        static isTypeSupported() { return true; }
+        constructor(stream, options) {
+          qa.recorderCount += 1;
+          this.stream = stream;
+          this.mimeType = options?.mimeType || 'audio/webm';
+          this.state = 'inactive';
+          qa.activeRecorder = this;
+          paintState();
+        }
+        start() {
+          if (this.state !== 'inactive') {
+            throw new DOMException('Recorder is already active', 'InvalidStateError');
+          }
+          this.state = 'recording';
+          paintState();
+        }
+        stop() {
+          qa.recorderStopCalls += 1;
+          paintState();
+          if (this.state !== 'recording') {
+            throw new DOMException('Recorder is inactive', 'InvalidStateError');
+          }
+          this.state = 'inactive';
+          const omitData = qa.zeroDataNext;
+          qa.zeroDataNext = false;
+          if (omitData) qa.zeroDataStops += 1;
+          paintState();
+          setTimeout(() => {
+            if (!omitData) {
+              this.ondataavailable?.({
+                data: new Blob(['browser-qa-audio'], { type: this.mimeType }),
+              });
+            }
+            this.onstop?.();
+            if (qa.activeRecorder === this) qa.activeRecorder = null;
+            paintState();
+          }, 0);
+        }
+        emitError() {
+          if (this.state !== 'recording') return false;
+          qa.recorderErrors += 1;
+          this.state = 'inactive';
+          paintState();
+          setTimeout(() => {
+            this.onerror?.({
+              error: new DOMException('Test recorder error', 'UnknownError'),
+            });
+            this.onstop?.();
+            if (qa.activeRecorder === this) qa.activeRecorder = null;
+            paintState();
+          }, 0);
+          return true;
+        }
+        stopUnexpectedly() {
+          if (this.state !== 'recording') return false;
+          qa.unexpectedStops += 1;
+          this.state = 'inactive';
+          paintState();
+          setTimeout(() => {
+            this.ondataavailable?.({
+              data: new Blob(['browser-qa-audio'], { type: this.mimeType }),
+            });
+            this.onstop?.();
+            if (qa.activeRecorder === this) qa.activeRecorder = null;
+            paintState();
+          }, 0);
+          return true;
+        }
+      }
+      window.MediaRecorder = TestMediaRecorder;
+      const nativeFetch = window.fetch.bind(window);
+      window.fetch = (input, init) => {
+        const url = String(input);
+        if (url.startsWith('/__wk/state') && qa.reviewRoundOffset) {
+          const fullStateUrl = new URL(url, window.location.href);
+          fullStateUrl.searchParams.delete('known');
+          return nativeFetch(fullStateUrl.href, init).then(async (response) => {
+            if (!response.ok) return response;
+            const state = await response.clone().json();
+            if (!state.review) return response;
+            qa.stateOverrideResponses += 1;
+            state.changed = true;
+            state.review = {
+              ...state.review,
+              round: Number(state.review.round || 0) + qa.reviewRoundOffset,
+            };
+            state.rev = `${state.rev || ''}:qa-round-${qa.reviewRoundOffset}`;
+            const headers = new Headers(response.headers);
+            headers.delete('content-length');
+            headers.set('content-type', 'application/json');
+            paintState();
+            return new Response(JSON.stringify(state), {
+              status: response.status,
+              statusText: response.statusText,
+              headers,
+            });
+          });
+        }
+        if (url.startsWith('/__wk/voice-note/delete')) {
+          qa.voiceDeleteRequests += 1;
+          paintState();
+        }
+        if (url.startsWith('/__wk/voice-note?')) {
+          qa.voiceUploadRequests += 1;
+          paintState();
+          if (qa.releaseUpload) {
+            return Promise.reject(new Error('Concurrent voice upload'));
+          }
+          return new Promise((resolve, reject) => {
+            const clearUpload = () => {
+              qa.releaseUpload = null;
+              qa.rejectUpload = null;
+              paintState();
+            };
+            qa.releaseUpload = () => {
+              clearUpload();
+              nativeFetch(input, init).then(resolve, reject);
+            };
+            qa.rejectUpload = () => {
+              clearUpload();
+              reject(new TypeError('Test voice upload rejected'));
+            };
+            paintState();
+          });
+        }
+        return nativeFetch(input, init);
+      };
+      document.getElementById('grant-microphone').addEventListener('click', () => {
+        qa.resolvePermission?.();
+      });
+      document.getElementById('reject-microphone').addEventListener('click', () => {
+        qa.rejectPermission?.();
+      });
+      document.getElementById('release-upload').addEventListener('click', () => {
+        qa.releaseUpload?.();
+      });
+      document.getElementById('reject-upload').addEventListener('click', () => {
+        qa.rejectUpload?.();
+      });
+      document.getElementById('zero-data').addEventListener('click', () => {
+        qa.zeroDataNext = true;
+        paintState();
+      });
+      document.getElementById('recorder-error').addEventListener('click', () => {
+        qa.activeRecorder?.emitError();
+        paintState();
+      });
+      document.getElementById('unexpected-stop').addEventListener('click', () => {
+        qa.activeRecorder?.stopUnexpectedly();
+        paintState();
+      });
+      qa.navigateReview = () => {
+        qa.reviewNavigationRequests += 1;
+        const overlayRoot = document.querySelector('[data-wk-host]')?.shadowRoot;
+        const next = overlayRoot?.querySelectorAll('.wk-nav')[1];
+        if (next) {
+          qa.reviewNavigationHits += 1;
+          next.click();
+        }
+        paintState();
+      };
+      document.getElementById('next-review-point').addEventListener('click', qa.navigateReview);
+      document.getElementById('bump-review-round').addEventListener('click', () => {
+        qa.reviewRoundOffset += 1;
+        paintState();
+      });
+      document.getElementById('clear-review-round').addEventListener('click', () => {
+        qa.reviewRoundOffset = 0;
+        paintState();
+      });
+      qa.paintState = paintState;
+    })();
+  </script>
+</body>
+</html>

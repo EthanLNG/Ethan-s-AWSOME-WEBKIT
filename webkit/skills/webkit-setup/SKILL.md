@@ -1,6 +1,6 @@
 ---
 name: webkit-setup
-description: Start or reuse a webkit design-iteration session in a project that vendors webkit/ (Ethan's AWESOME WEBKIT). Use at session start and whenever the user asks to launch, open, preview, show, or test the website, or says "set up the webkit", "start a webkit session", "start the preview session", or "start the feedback session" — claiming the agent color, starting the stamping preview server, and opening the configured external desktop browser all happen through this.
+description: Start or reuse a webkit design-iteration session in a project that vendors webkit/ (Ethan's AWESOME WEBKIT). Use at session start and whenever the user asks to launch, open, preview, show, or test the website, or says "set up the webkit", "start a webkit session", "start the preview session", or "start the feedback session" - claiming the agent color, starting the stamping preview server, and opening the configured external desktop browser all happen through this.
 ---
 
 # webkit-setup

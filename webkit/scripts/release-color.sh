@@ -1,47 +1,61 @@
 #!/bin/bash
-# release-color.sh — free an agent color when a session ends ("merge to main").
+# release-color.sh: release one linked color and TCP port reservation.
 #
-# Removes the atomic lock created by claim-color.sh so the next agent can
-# reclaim the color. Closing your preview tab + stopping your preview server
-# is still done separately; this just drops the lock.
-#
-# Ownership guard: the lock records the claiming worktree in <lock>/owner;
-# releasing a color someone else holds is refused so one agent's cleanup can't
-# free another agent's color mid-session. Override (human cleanup of a dead
-# session's lock) with WK_COLOR_FORCE=1. Same owner-file format as the legacy
-# RealClick scripts, so this releases legacy-claimed locks too when lock_dir
-# points at the shared registry.
-#
-# Palette and lock_dir come from webkit.config.json via config-get.sh.
-#
-# Usage:  webkit/scripts/release-color.sh <emoji>    # e.g. release-color.sh 🟢
-#
-# Env overrides:
-#   WK_CONFIG         alternate config file (resolved by config-get.sh)
-#   WK_COLOR_LOCKDIR  lock registry dir (else config lock_dir)
-#   WK_COLOR_OWNER    identity to compare against the lock owner (else `pwd -P`)
-#   WK_COLOR_FORCE=1  release even if the lock belongs to someone else
+# The owner guard and random reservation token prevent stale cleanup from
+# deleting a newer claim or another worktree's reservation. WK_COLOR_FORCE=1
+# is the explicit human recovery path for a known dead legacy or linked claim.
 
 set -euo pipefail
 
-emoji="${1:?usage: release-color.sh <emoji>}"
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-
-# Unknown emoji / broken config -> config-get.sh already printed why; exit 1.
-slug_port="$("$script_dir/config-get.sh" color "$emoji")"
-slug="${slug_port%% *}"
-
+registry="$script_dir/runtime_registry.py"
+if [ "$#" -eq 2 ] && [ "$1" = "--slug" ]; then
+  slug="$2"
+  case "$slug" in
+    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*)
+      echo "release-color.sh: --slug needs a safe palette slug" >&2
+      exit 2
+      ;;
+  esac
+  port="$("$script_dir/config-get.sh" palette | awk -v wanted="$slug" '$1 == wanted { print $3; found=1 } END { if (!found) print 1 }')"
+  emoji="$slug"
+elif [ "$#" -eq 1 ]; then
+  emoji="$1"
+  slug_port="$("$script_dir/config-get.sh" color "$emoji")"
+  slug="${slug_port%% *}"
+  port="${slug_port##* }"
+else
+  echo "usage: release-color.sh <emoji> | release-color.sh --slug <palette-slug>" >&2
+  exit 2
+fi
 lockdir="${WK_COLOR_LOCKDIR:-$("$script_dir/config-get.sh" get lock_dir)}"
-lock="$lockdir/$slug.lock"
-
-[ -d "$lock" ] || exit 0                    # nothing to release
-
-owner="$(cat "$lock/owner" 2>/dev/null || true)"
 me="${WK_COLOR_OWNER:-$(pwd -P)}"
-if [ -n "$owner" ] && [ "$owner" != "$me" ] && [ -z "${WK_COLOR_FORCE:-}" ]; then
-  echo "release-color.sh: $emoji is claimed by '$owner', not this worktree ('$me') — not releasing. Set WK_COLOR_FORCE=1 to override." >&2
-  exit 1
+
+status=0
+if [ "${WK_COLOR_FORCE:-0}" = "1" ]; then
+  if python3 "$registry" release-color \
+    --lock-dir "$lockdir" --color "$slug" --port "$port" --owner "$me" \
+    --force; then
+    :
+  else
+    status=$?
+  fi
+else
+  if python3 "$registry" release-color \
+    --lock-dir "$lockdir" --color "$slug" --port "$port" --owner "$me"; then
+    :
+  else
+    status=$?
+  fi
 fi
 
-rm -rf "$lock"
+if [ "$status" -eq 0 ]; then
+  exit 0
+else
+  if [ "$status" -eq 3 ]; then
+    echo "release-color.sh: $emoji is claimed by another owner; not releasing. Set WK_COLOR_FORCE=1 only for a verified dead session." >&2
+    exit 1
+  fi
+  echo "release-color.sh: refused unsafe or inconsistent claim cleanup" >&2
+  exit 2
+fi

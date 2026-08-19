@@ -1,0 +1,127 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.7.17", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Configure test Git identity
+        run: |
+          git config --global user.name "AWESOME WEBKIT CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Compile every Python source
+        run: python -m compileall -q -f .
+
+      - name: Run Control Center tests
+        run: python -m unittest discover -s control-center/tests -p 'test_*.py' -v
+
+      - name: Run top-level tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check repository source formats
+        if: matrix.python-version == '3.14'
+        run: python tests/test_release_quality.py
+
+  macos-launchers:
+    name: macOS 15 / Python 3.14 / Bash 3.2
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+
+      - name: Configure test Git identity
+        run: |
+          git config --global user.name "AWESOME WEBKIT CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Validate native Bash 3.2 entry points
+        run: |
+          /bin/bash --version
+          /bin/bash -c 'test "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}" = "3.2"'
+          find . -type f \( -name '*.sh' -o -name '*.command' \) \
+            -not -path './.git/*' -exec /bin/bash -n {} +
+
+      - name: Compile every Python source
+        run: python -m compileall -q -f .
+
+      - name: Run Control Center and macOS launcher tests
+        run: python -m unittest discover -s control-center/tests -p 'test_*.py' -v
+
+      - name: Run full top-level tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Check repository source formats
+        run: python tests/test_release_quality.py
+
+  windows-launchers:
+    name: Windows / Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python 3.7.9 is the final 3.7 release with a Windows installer.
+        python-version: ["3.7.9", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Configure test Git identity
+        run: |
+          git config --global user.name "AWESOME WEBKIT CI"
+          git config --global user.email "ci@example.invalid"
+
+      - name: Compile every Python source
+        run: python -m compileall -q -f .
+
+      - name: Run Control Center tests, including native session and cmd.exe coverage
+        run: python -m unittest discover -s control-center/tests -p 'test_*.py' -v
+
+      - name: Run cross-platform top-level tests
+        run: python -m unittest -v tests.test_abc_widget tests.test_control_center_frontend tests.test_helper_scripts tests.test_overlay_protocol tests.test_preview_server tests.test_release_quality tests.test_runtime_registry

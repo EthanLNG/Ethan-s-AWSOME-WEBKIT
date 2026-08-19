@@ -1,5 +1,5 @@
 /* =============================================================================
- * Ethan's AWESOME WEBKIT — feedback overlay (webkit/overlay/overlay.js)
+ * Ethan's AWESOME WEBKIT - feedback overlay (webkit/overlay/overlay.js)
  * =============================================================================
  *
  * The in-browser half of the feedback loop. The kit's preview server injects
@@ -21,7 +21,7 @@
  *  - ISOLATION: everything lives in an open Shadow DOM on a host <div> hung off
  *    documentElement with all:initial + pointer-events:none, so host-page CSS
  *    cannot bleed in and the overlay cannot repaint the site. (Prefixed classes
- *    were rejected — host resets still bleed; an iframe was rejected — the
+ *    were rejected - host resets still bleed; an iframe was rejected - the
  *    overlay constantly reads the host document for context capture.)
  *  - CORNER GEOMETRY: the abc variant switcher owns x=14px growing UP
  *    (bottom = 14 + n*46); the webkit owns y=14px growing RIGHT (corner toggle
@@ -38,6 +38,7 @@
  *    (fallback: a <style> node in the shadow root).
  *
  * Server contract (all under /__wk/, JSON in/out):
+ *   GET  /__wk/handshake            204 when the injected browser token is current
  *   GET  /__wk/state?known=<rev>  → {changed, rev, color, emoji, phase,
  *                                    batch, review, verdicts}
  *        phase: collecting | awaiting_agent | reviewing | verdicts_sent
@@ -48,29 +49,367 @@
  *   GET  /__wk/before/<path>      → the page at review.beforeRef, re-injected
  *                                   with data-wk-mode="before"
  * ========================================================================== */
-(() => {
+(async () => {
   'use strict';
-  if (window.__wkOverlayLoaded) return;   // injection idempotence (belt: server also guards)
-  window.__wkOverlayLoaded = true;
+
+  // ===== pure protocol helpers (also exercised by focused tests) =============
+  function isOverlayScript(node, pageURL) {
+    if (!node || String(node.tagName || '').toUpperCase() !== 'SCRIPT') return false;
+    const raw = node.getAttribute && node.getAttribute('src');
+    if (!raw) return false;
+    try {
+      const url = new URL(raw, pageURL);
+      return url.origin === new URL(pageURL).origin && url.pathname === '/__wk/overlay.js';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function findOverlayScript(doc, pageURL) {
+    if (isOverlayScript(doc.currentScript, pageURL)) return doc.currentScript;
+    const matches = Array.from(doc.scripts || []).filter((node) => isOverlayScript(node, pageURL));
+    return matches.length ? matches[matches.length - 1] : null;
+  }
+
+  function overlayScriptHandshake(node, pageURL) {
+    if (!isOverlayScript(node, pageURL) || !node.hasAttribute ||
+      !node.hasAttribute('defer') || node.hasAttribute('nomodule')) return null;
+    const type = String(node.getAttribute('type') || '').trim().toLowerCase();
+    if (type && ![
+      'module', 'text/javascript', 'application/javascript',
+      'text/ecmascript', 'application/ecmascript',
+    ].includes(type)) return null;
+    const dataset = Object.assign({}, node.dataset || {});
+    const nonce = String(node.nonce || node.getAttribute('nonce') || '');
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(dataset.wkColor || '') ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/.test(dataset.wkProject || '') ||
+      !/^[A-Za-z0-9_-]{16,128}$/.test(dataset.wkToken || '') ||
+      !/^[A-Za-z0-9+/_-]{16,128}={0,2}$/.test(dataset.wkNonce || '') ||
+      dataset.wkNonce !== nonce ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(dataset.wkTrustedTypesPolicy || '') ||
+      !['before', 'after'].includes(dataset.wkMode) ||
+      typeof dataset.wkEmoji !== 'string' || !dataset.wkEmoji ||
+      !['speech', 'voice-note'].includes(dataset.wkDictationMode) ||
+      !['browse-default', 'draw-default'].includes(dataset.wkInteractionMode) ||
+      (dataset.wkMode === 'after' && (dataset.wkBeforePrefix || '') !== '') ||
+      (dataset.wkMode === 'before' &&
+        !/^\/__wk\/before\/[0-9a-f]{64}$/.test(dataset.wkBeforePrefix || ''))) return null;
+    return { script: node, dataset };
+  }
+
+  function findOverlayHandshakes(doc, pageURL) {
+    const matches = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      const handshake = overlayScriptHandshake(node, pageURL);
+      if (handshake) matches.push(handshake);
+    };
+    add(doc.currentScript);
+    const scripts = Array.from(doc.scripts || []);
+    for (let index = scripts.length - 1; index >= 0; index -= 1) add(scripts[index]);
+    return matches;
+  }
+
+  function findOverlayHandshake(doc, pageURL) {
+    return findOverlayHandshakes(doc, pageURL)[0] || null;
+  }
+
+  function claimOverlayInstance(targetWindow, handshake) {
+    if (!handshake || targetWindow.__wkOverlayLoaded) return null;
+    targetWindow.__wkOverlayLoaded = true;
+    return handshake;
+  }
+
+  async function authenticateOverlayToken(request, token) {
+    try {
+      const response = await request(
+        '/__wk/handshake', apiRequestOptions('/__wk/handshake', undefined, token)
+      );
+      return !!response && response.status === 204;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async function authenticateOverlayHandshake(request, handshakes) {
+    for (const handshake of (handshakes || []).slice(0, 32)) {
+      if (await authenticateOverlayToken(request, handshake.dataset.wkToken)) {
+        return handshake;
+      }
+    }
+    return null;
+  }
+
+  function modifierKeyLabel(platform) {
+    return /(?:mac|iphone|ipad|ipod)/i.test(String(platform || '')) ? '⌥' : 'Alt';
+  }
+
+  function makeStore(backing, namespace) {
+    const cache = new Map();
+    const dirtyValues = new Map();
+    const dirtyRemovals = new Set();
+    const physicalKey = (logical) => namespace + String(logical).replace(/^wk:/, '');
+    const logicalKey = (physical) => typeof physical === 'string' && physical.startsWith(namespace)
+      ? 'wk:' + physical.slice(namespace.length)
+      : null;
+    return {
+      get(k) {
+        if (dirtyRemovals.has(k)) return null;
+        if (dirtyValues.has(k)) return dirtyValues.get(k);
+        const key = physicalKey(k);
+        try {
+          const value = backing.getItem(key);
+          if (value === null) cache.delete(k);
+          else cache.set(k, value);
+          return value;
+        } catch (e) {
+          return cache.has(k) ? cache.get(k) : null;
+        }
+      },
+      set(k, v) {
+        cache.set(k, v);
+        dirtyRemovals.delete(k);
+        try {
+          backing.setItem(physicalKey(k), v);
+          dirtyValues.delete(k);
+          return true;
+        } catch (e) {
+          dirtyValues.set(k, v);
+          return false;
+        }
+      },
+      remove(k) {
+        cache.delete(k);
+        dirtyValues.delete(k);
+        try {
+          backing.removeItem(physicalKey(k));
+          dirtyRemovals.delete(k);
+          return true;
+        } catch (e) {
+          dirtyRemovals.add(k);
+          return false;
+        }
+      },
+      // Return logical keys only. Callers never need to know the physical prefix.
+      keys() {
+        const out = new Set();
+        let backingReadable = true;
+        try {
+          for (let i = 0; i < backing.length; i++) {
+            const logical = logicalKey(backing.key(i));
+            if (logical !== null) out.add(logical);
+          }
+        } catch (e) {
+          backingReadable = false;
+        }
+        if (!backingReadable) {
+          for (const key of cache.keys()) out.add(key);
+        }
+        for (const key of dirtyValues.keys()) out.add(key);
+        for (const key of dirtyRemovals) out.delete(key);
+        return [...out];
+      },
+      logicalKey,
+      getJSON(k, fallback) {
+        const raw = this.get(k);
+        if (raw === null) return fallback;
+        try { return JSON.parse(raw); } catch (e) { return fallback; }
+      },
+      setJSON(k, v) { return this.set(k, JSON.stringify(v)); },
+    };
+  }
+
+  // Each unsent point owns a separate localStorage key. This is deliberately
+  // not one shared JSON array: two renderer processes can both read the same
+  // array and then overwrite one another even though each individual
+  // localStorage operation is atomic. Distinct point keys make independent
+  // additions commute. A separate, persistent tombstone wins over a stale tab
+  // rewriting an already sent or deleted point.
+  const QUEUED_POINT_PREFIX = 'wk:queued-point:';
+  const QUEUED_TOMBSTONE_PREFIX = 'wk:queued-tombstone:';
+  const QUEUED_POINT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+  const MAX_QUEUED_TOMBSTONES = 2048;
+
+  function queuedPointKey(id) { return QUEUED_POINT_PREFIX + id; }
+  function queuedTombstoneKey(id) { return QUEUED_TOMBSTONE_PREFIX + id; }
+
+  function validQueuedRect(value) {
+    return !!value && typeof value === 'object' &&
+      ['x', 'y', 'w', 'h'].every((name) => Number.isFinite(value[name])) &&
+      value.w > 0 && value.h > 0;
+  }
+
+  function validQueuedPoint(point) {
+    return !!point && typeof point === 'object' &&
+      typeof point.id === 'string' && QUEUED_POINT_ID.test(point.id) &&
+      typeof point.page === 'string' && point.page.startsWith('/') &&
+      !point.page.startsWith('//') &&
+      Number.isInteger(point.number) && point.number > 0 &&
+      typeof point.text === 'string' && validQueuedRect(point.rect) &&
+      (!Array.isArray(point.rects) || point.rects.every(validQueuedRect));
+  }
+
+  function normalizeQueuedPointNumbers(points, reservedNumbers) {
+    const reserved = new Set((reservedNumbers || []).filter(
+      (number) => Number.isInteger(number) && number > 0
+    ));
+    const used = new Set(reserved);
+    const ordered = points.slice().sort((left, right) => {
+      const byNumber = left.number - right.number;
+      if (byNumber) return byNumber;
+      const byCreated = String(left.createdAt || '').localeCompare(String(right.createdAt || ''));
+      return byCreated || left.id.localeCompare(right.id);
+    });
+    return ordered.map((point) => {
+      let number = point.number;
+      while (used.has(number)) number += 1;
+      used.add(number);
+      return number === point.number ? point : { ...point, number };
+    });
+  }
+
+  function readQueuedPointState(store, legacyPoints, reservedNumbers) {
+    const tombstones = new Set();
+    const records = new Map();
+    for (const key of store.keys()) {
+      if (key.startsWith(QUEUED_TOMBSTONE_PREFIX)) {
+        const id = key.slice(QUEUED_TOMBSTONE_PREFIX.length);
+        if (QUEUED_POINT_ID.test(id)) tombstones.add(id);
+      }
+    }
+    for (const point of Array.isArray(legacyPoints) ? legacyPoints : []) {
+      if (validQueuedPoint(point) && !tombstones.has(point.id)) records.set(point.id, point);
+    }
+    for (const key of store.keys()) {
+      if (!key.startsWith(QUEUED_POINT_PREFIX)) continue;
+      const id = key.slice(QUEUED_POINT_PREFIX.length);
+      const point = store.getJSON(key, null);
+      if (QUEUED_POINT_ID.test(id) && validQueuedPoint(point) && point.id === id &&
+        !tombstones.has(id)) records.set(id, point);
+    }
+    return normalizeQueuedPointNumbers([...records.values()], reservedNumbers);
+  }
+
+  function hasQueuedTombstoneCapacity(store, ids, limit) {
+    const existing = new Set();
+    let count = 0;
+    for (const key of store.keys()) {
+      if (!key.startsWith(QUEUED_TOMBSTONE_PREFIX)) continue;
+      count += 1;
+      const id = key.slice(QUEUED_TOMBSTONE_PREFIX.length);
+      if (QUEUED_POINT_ID.test(id)) existing.add(id);
+    }
+    for (const id of new Set(ids || [])) {
+      if (!QUEUED_POINT_ID.test(id)) return false;
+      if (!existing.has(id)) count += 1;
+    }
+    return count <= limit;
+  }
+
+  function safeWindowStorage(name) {
+    try {
+      const value = window[name];
+      if (value) return value;
+    } catch (e) { /* use the inert fallback */ }
+    return {
+      length: 0,
+      key() { return null; },
+      getItem() { return null; },
+      setItem() { throw new Error(name + ' is unavailable'); },
+      removeItem() { throw new Error(name + ' is unavailable'); },
+    };
+  }
+
+  function apiRequestOptions(path, body, token) {
+    if (body !== undefined) {
+      return {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-WK-Token': token },
+        body: JSON.stringify(body),
+      };
+    }
+    const options = { cache: 'no-store' };
+    if (/^\/__wk\/(?:handshake|state)(?:\?|$)/.test(path)) {
+      options.headers = { 'X-WK-Token': token };
+    }
+    return options;
+  }
+
+  function singleFlight(task, onIdle) {
+    let active = null;
+    let rerun = false;
+    return function run() {
+      if (active) {
+        rerun = true;
+        return active;
+      }
+      active = (async () => {
+        do {
+          rerun = false;
+          await task();
+        } while (rerun);
+      })().finally(() => {
+        active = null;
+        if (onIdle) onIdle();
+      });
+      return active;
+    };
+  }
+  // ===== end pure protocol helpers ==========================================
 
   // ===== script dataset ======================================================
-  // document.currentScript is null for some defer/timing combinations — fall
-  // back to locating our own tag by the attribute the server always sets.
-  const scriptEl = document.currentScript && document.currentScript.dataset.wkColor !== undefined
-    ? document.currentScript
-    : document.querySelector('script[data-wk-color]');
-  const DS = (scriptEl && scriptEl.dataset) || {};
+  // Claim idempotence only after validating the server handshake. A source
+  // page may already contain a bare or stale /__wk/overlay.js script, and that
+  // script must not prevent the correctly injected instance from starting.
+  const handshakeCandidates = findOverlayHandshakes(document, location.href);
+  const handshakeCandidate = await authenticateOverlayHandshake(
+    window.fetch.bind(window), handshakeCandidates
+  );
+  if (!handshakeCandidate) {
+    if (handshakeCandidates.length) console.warn('[wk] overlay handshake was rejected');
+    return;
+  }
+  const overlayHandshake = claimOverlayInstance(window, handshakeCandidate);
+  if (!overlayHandshake) return;
+  const scriptEl = overlayHandshake.script;
+  const DS = overlayHandshake.dataset;
   const COLOR = DS.wkColor || 'unknown';
+  const PROJECT = DS.wkProject || 'unknown-project';
+  const MUTATION_TOKEN = DS.wkToken || '';
+  const CSP_NONCE = /^[A-Za-z0-9+/_-]{16,128}={0,2}$/.test(DS.wkNonce || '')
+    ? DS.wkNonce
+    : '';
+  const TRUSTED_TYPES_POLICY_NAME = /^[A-Za-z0-9_-]{1,128}$/.test(
+    DS.wkTrustedTypesPolicy || ''
+  ) ? DS.wkTrustedTypesPolicy : '';
+  let trustedHTMLPolicy = null;
+  if (window.trustedTypes && TRUSTED_TYPES_POLICY_NAME) {
+    try {
+      trustedHTMLPolicy = window.trustedTypes.createPolicy(TRUSTED_TYPES_POLICY_NAME, {
+        createHTML(value) { return value; },
+      });
+    } catch (error) {
+      console.warn('[wk] Trusted Types policy could not be created:', error.message);
+    }
+  }
+  const asTrustedHTML = (value) => trustedHTMLPolicy
+    ? trustedHTMLPolicy.createHTML(value)
+    : value;
   const EMOJI = DS.wkEmoji || '⬜';
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
   const DICTATION_MODE = DS.wkDictationMode === 'voice-note' ? 'voice-note' : 'speech';
   const INTERACTION_MODE = DS.wkInteractionMode === 'draw-default'
     ? 'draw-default'
     : 'browse-default';
+  const PLATFORM = (navigator.userAgentData && navigator.userAgentData.platform)
+    || navigator.platform || '';
+  const MODIFIER_LABEL = modifierKeyLabel(PLATFORM);
 
   // Hotkeys are KeyboardEvent.code values (LAYOUT-INDEPENDENT: this site is
   // Hebrew, so `e.key` would be a different character on every layout).
-  // Ctrl/Cmd+. — the original primary — never reaches the page on macOS Chrome
+  // Ctrl/Cmd+. - the original primary - never reaches the page on macOS Chrome
   // (the browser eats the combo), hence a single bare key. The server injects
   // overrides from the config's `hotkeys` block; these are the defaults.
   const HOTKEY_TOGGLE = DS.wkHotkeyToggle || 'KeyC';
@@ -87,10 +426,16 @@
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
   const MIC_TITLE = DICTATION_MODE === 'voice-note'
-    ? 'Record a voice note for the agent — or press ' + DICTATE_LABEL + ' outside a text field'
-    : 'Dictate (Chrome speech-to-text) — or press ' + DICTATE_LABEL + ' outside a text field';
+    ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' outside a text field'
+    : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' outside a text field';
+  const MIC_ARIA_LABEL = DICTATION_MODE === 'voice-note'
+    ? 'Start or stop recording a voice note'
+    : 'Start or stop speech dictation';
 
-  const BEFORE_PREFIX = '/__wk/before';
+  const BEFORE_PREFIX_PATTERN = /^\/__wk\/before\/[a-f0-9]{64}$/;
+  let BEFORE_PREFIX = BEFORE_PREFIX_PATTERN.test(DS.wkBeforePrefix || '')
+    ? DS.wkBeforePrefix
+    : '/__wk/before/invalid';
   const LETTERS = 'ABCDEFGHIJ';               // abc request letters, count capped at 10
 
   // ===== tiny utils ==========================================================
@@ -111,11 +456,60 @@
       '-' + p(d.getHours(), 2) + p(d.getMinutes(), 2) + '-' + rand4();
   }
 
+  let pointIdSequence = 0;
+  function newPointId() {
+    pointIdSequence += 1;
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return 'p-' + window.crypto.randomUUID();
+      }
+      if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        return 'p-' + Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+      }
+    } catch (e) { /* use the session-local fallback */ }
+    return 'p-' + Date.now().toString(36) + '-' + pointIdSequence.toString(36) + '-' + rand4() + rand4();
+  }
+
   function el(tag, cls, text) {
     const n = document.createElement(tag);
     if (cls) n.className = cls;
     if (text != null) n.textContent = text;
     return n;
+  }
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svgEl(tag, attributes) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [name, value] of Object.entries(attributes || {})) {
+      node.setAttribute(name, value);
+    }
+    return node;
+  }
+
+  function microphoneIcon() {
+    const svg = svgEl('svg', {
+      viewBox: '0 0 16 16', width: '14', height: '14', fill: 'none',
+      stroke: 'currentColor', 'stroke-width': '1.5', 'stroke-linecap': 'round',
+      'aria-hidden': 'true',
+    });
+    svg.append(
+      svgEl('rect', { x: '5.5', y: '1.75', width: '5', height: '8', rx: '2.5' }),
+      svgEl('path', { d: 'M3 7.5a5 5 0 0 0 10 0M8 12.5v2' }),
+    );
+    return svg;
+  }
+
+  function closeIcon() {
+    const svg = svgEl('svg', {
+      viewBox: '0 0 10 10', 'aria-hidden': 'true',
+    });
+    svg.appendChild(svgEl('path', {
+      d: 'M1 1l8 8M9 1L1 9', fill: 'none', stroke: 'currentColor',
+      'stroke-width': '1.6', 'stroke-linecap': 'round',
+    }));
+    return svg;
   }
 
   function debounce(fn, ms) {
@@ -137,39 +531,32 @@
   const physicalPath = (page, side) => (side === 'before' ? BEFORE_PREFIX : '') + page;
 
   // ===== storage (quota/private-mode safe) ==================================
-  // localStorage can throw on read AND write (private mode, quota). Degrade to
-  // an in-memory map that mirrors every write, so the session keeps working.
-  function makeStore(backing) {
-    const mem = new Map();
-    return {
-      get(k) {
-        try { const v = backing.getItem(k); if (v !== null) return v; } catch (e) { /* fall through */ }
-        return mem.has(k) ? mem.get(k) : null;
-      },
-      set(k, v) {
-        mem.set(k, v);
-        try { backing.setItem(k, v); } catch (e) { /* memory copy holds */ }
-      },
-      remove(k) {
-        mem.delete(k);
-        try { backing.removeItem(k); } catch (e) { /* ignore */ }
-      },
-      // every live key (mem ∪ backing) — used to GC round-scoped verdict caches
-      keys() {
-        const out = new Set(mem.keys());
-        try { for (let i = 0; i < backing.length; i++) out.add(backing.key(i)); } catch (e) { /* mem-only */ }
-        return [...out];
-      },
-      getJSON(k, fallback) {
-        const raw = this.get(k);
-        if (raw === null) return fallback;
-        try { return JSON.parse(raw); } catch (e) { return fallback; }
-      },
-      setJSON(k, v) { this.set(k, JSON.stringify(v)); },
-    };
+  // Accessing the storage property itself can throw. Reads and writes can also
+  // throw, so each store mirrors writes in memory for the current page lifetime.
+  const STORAGE_NAMESPACE = 'wk:' + encodeURIComponent(PROJECT) + ':' + encodeURIComponent(COLOR) + ':';
+  const LS = makeStore(safeWindowStorage('localStorage'), STORAGE_NAMESPACE);
+  const SS = makeStore(safeWindowStorage('sessionStorage'), STORAGE_NAMESPACE);
+  const POINT_QUEUE_LOCK = STORAGE_NAMESPACE + 'point-queue';
+
+  async function withPointQueueLock(task) {
+    const manager = navigator.locks;
+    if (!manager || typeof manager.request !== 'function' ||
+      typeof AbortController !== 'function') return task();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      return await manager.request(
+        POINT_QUEUE_LOCK, { mode: 'exclusive', signal: controller.signal }, task
+      );
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        throw new Error('Another tab is still updating the feedback queue. Try again.');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
-  const LS = makeStore(window.localStorage || { getItem() { return null; }, setItem() {}, removeItem() {} });
-  const SS = makeStore(window.sessionStorage || { getItem() { return null; }, setItem() {}, removeItem() {} });
 
   // SpeechRecognition.lang is a real request parameter, not a UI hint. Keep an
   // explicit English/Hebrew choice because automatic language inference turns
@@ -207,7 +594,7 @@
     rev: '',                    // last seen state rev (echoed as ?known=)
     batch: null,                // parsed feedback.json (from /state)
     review: null,               // parsed review.json (from /state)
-    points: LS.getJSON('wk:points', []),   // unsent/queued points (all pages)
+    points: readQueuedPointState(LS, LS.getJSON('wk:points', []), []),
     drag: null,                 // active rubber/resize/move drag
     card: null,                 // open editor card {draft, els...}
     mini: null,                 // open redo mini-input
@@ -218,7 +605,7 @@
     reviewList: [],             // batch points under review, ordered by number
     handledById: new Map(),     // pointId → review.points entry
     verdicts: {},               // pointId → {verdict, chosenLetter?, redoText?}
-    deletedIds: new Set(),      // points deleted/sent this session — never resurrect on cross-tab merge
+    deletedIds: new Set(),      // points deleted/sent this session - never resurrect on cross-tab merge
     cursor: 0,
     side: IS_BEFORE ? 'before' : 'after',  // the served document is authoritative
     compareScope: LS.get('wk:compareScope') === 'site' ? 'site' : 'point',
@@ -226,20 +613,102 @@
     abcToggled: new Set(),      // scopeIds the user toggled since review entry
     acceptArmed: null,          // pointId armed for "accept without toggling" confirm
     offeredReview: '',          // batchId:round already toasted, don't re-nag
-    bootReview: null,           // ?wk-review target during boot — suppresses the offer toast
+    bootReview: null,           // ?wk-review target during boot - suppresses the offer toast
     pinEls: [],                 // [{node, box}] for the rAF repositioner
     altHeld: false,
   };
-  // read-merge-write so a second tab on the same origin can't clobber points:
-  // union by id, keeping foreign points this tab never saw and dropping anything
-  // we deleted or already sent (S.deletedIds), which the blind last-writer-wins
-  // setJSON used to erase.
-  const savePoints = debounce(() => {
-    const stored = LS.getJSON('wk:points', []);
-    const mine = new Set(S.points.map((p) => p.id));
-    const merged = stored.filter((p) => !mine.has(p.id) && !S.deletedIds.has(p.id)).concat(S.points);
-    LS.setJSON('wk:points', merged);
-  }, 150);
+  function reservedPointNumbers() {
+    const points = S.batch && Array.isArray(S.batch.points) ? S.batch.points : [];
+    return points.map((point) => point && point.number).filter(
+      (number) => Number.isInteger(number) && number > 0
+    );
+  }
+
+  function loadQueuedPoints() {
+    return readQueuedPointState(
+      LS, LS.getJSON('wk:points', []), reservedPointNumbers()
+    );
+  }
+
+  function retireQueuedPointIds(ids) {
+    const unique = [...new Set(ids || [])];
+    if (!hasQueuedTombstoneCapacity(LS, unique, MAX_QUEUED_TOMBSTONES)) return false;
+    for (const id of unique) {
+      S.deletedIds.add(id);
+      LS.set(queuedTombstoneKey(id), nowISO());
+      LS.remove(queuedPointKey(id));
+    }
+    S.points = S.points.filter((point) => !S.deletedIds.has(point.id));
+    savePoints();
+    savePoints.flush();
+    return true;
+  }
+
+  const POINT_SAVE_RETRY_MS = [100, 500, 2000];
+  let pointSaveRetry = 0;
+  let pointSaveRetryTimer = 0;
+  let pointStorageWarned = false;
+  let pointStorageWarningClose = null;
+
+  function warnPointStorage() {
+    if (pointStorageWarned) return;
+    pointStorageWarned = true;
+    console.warn('[wk] queued feedback is only stored in this tab because localStorage writes failed');
+    pointStorageWarningClose = toast('Feedback storage is unavailable. Keep this tab open and send before reloading.', {
+      kind: 'error', ttl: 0,
+    });
+  }
+
+  function persistQueuedPoints() {
+    let durable = true;
+    for (const id of S.deletedIds) {
+      // The tombstone is written before deleting the record. If a suspended tab
+      // later rewrites stale point data, every reader still gives the tombstone
+      // precedence and the deleted or sent point cannot reappear.
+      durable = LS.set(queuedTombstoneKey(id), nowISO()) && durable;
+      LS.remove(queuedPointKey(id));
+    }
+
+    const live = [];
+    for (const point of S.points) {
+      if (!validQueuedPoint(point) || S.deletedIds.has(point.id) ||
+        LS.get(queuedTombstoneKey(point.id)) !== null) {
+        if (point && typeof point.id === 'string') LS.remove(queuedPointKey(point.id));
+        continue;
+      }
+      live.push(point);
+      durable = LS.setJSON(queuedPointKey(point.id), point) && durable;
+    }
+    S.points = live;
+
+    if (durable) {
+      clearTimeout(pointSaveRetryTimer);
+      pointSaveRetryTimer = 0;
+      pointSaveRetry = 0;
+      pointStorageWarned = false;
+      if (pointStorageWarningClose) pointStorageWarningClose();
+      pointStorageWarningClose = null;
+      // This aggregate key is read only for one-time migration from older
+      // overlays. Per-point keys are the authoritative cross-tab protocol.
+      LS.remove('wk:points');
+      LS.remove('wk:lastNum');
+    } else if (!pointSaveRetryTimer && pointSaveRetry < POINT_SAVE_RETRY_MS.length) {
+      const delay = POINT_SAVE_RETRY_MS[pointSaveRetry++];
+      pointSaveRetryTimer = setTimeout(() => {
+        pointSaveRetryTimer = 0;
+        persistQueuedPoints();
+      }, delay);
+    } else if (!pointSaveRetryTimer) {
+      warnPointStorage();
+    }
+
+    // Merge records added by other tabs after our write. Deterministic number
+    // normalization means simultaneous claims for the same number converge.
+    S.points = loadQueuedPoints();
+    return durable;
+  }
+
+  const savePoints = debounce(persistQueuedPoints, 150);
 
   // ===== shadow shell ========================================================
   const host = document.createElement('div');
@@ -258,15 +727,40 @@
   // UI disappearing behind them. Pointer-events still pass through whenever
   // the drawing layer is in browse mode.
   let topLayerRaiseQueued = false;
+  const modalOpenOrder = new WeakMap();
+  let modalOpenSequence = 0;
+  function rememberModalState(dialog, promote) {
+    if (!dialog.open) {
+      modalOpenOrder.delete(dialog);
+      return false;
+    }
+    try {
+      if (!dialog.matches(':modal')) {
+        modalOpenOrder.delete(dialog);
+        return false;
+      }
+    } catch (e) {
+      return false;
+    }
+    if (promote || !modalOpenOrder.has(dialog)) {
+      modalOpenOrder.set(dialog, ++modalOpenSequence);
+    }
+    return true;
+  }
   function activeModalDialog() {
     if (typeof HTMLDialogElement === 'undefined') return null;
     const openDialogs = [...document.querySelectorAll('dialog[open]')];
-    for (let index = openDialogs.length - 1; index >= 0; index -= 1) {
-      try {
-        if (openDialogs[index].matches(':modal')) return openDialogs[index];
-      } catch (e) { /* :modal is unavailable in older browsers */ }
+    let active = null;
+    let activeOrder = -1;
+    for (const dialog of openDialogs) {
+      if (!rememberModalState(dialog, false)) continue;
+      const order = modalOpenOrder.get(dialog);
+      if (order > activeOrder) {
+        active = dialog;
+        activeOrder = order;
+      }
     }
-    return null;
+    return active;
   }
 
   function raiseAboveTopLayer() {
@@ -274,7 +768,7 @@
     // A showModal() dialog makes every node outside itself inert. Merely
     // putting WebKit later in the top-layer stack keeps the pill visible, but
     // its drawing surface still cannot receive pointer events. Temporarily
-    // parent the host inside the active modal so Option-drag works there too;
+    // parent the host inside the active modal so modifier-drag works there too;
     // move it back to <html> as soon as that modal closes.
     const container = activeModalDialog() || document.documentElement;
     const moving = host.parentNode !== container;
@@ -297,15 +791,22 @@
   }, true);
 
   // A tidy-minded host page (or a framework re-render) may remove foreign
-  // nodes from the tree — quietly re-append ourselves.
+  // nodes from the tree - quietly re-append ourselves.
   new MutationObserver((records) => {
     if (!host.isConnected) {
       document.documentElement.appendChild(host);
       queueTopLayerRaise();
     }
-    if (records.some((record) => record.type === 'attributes' &&
-      typeof HTMLDialogElement !== 'undefined' &&
-      record.target instanceof HTMLDialogElement && record.target.open)) {
+    let modalLayerChanged = false;
+    if (typeof HTMLDialogElement !== 'undefined') {
+      for (const record of records) {
+        if (record.type !== 'attributes' || record.attributeName !== 'open' ||
+          !(record.target instanceof HTMLDialogElement)) continue;
+        rememberModalState(record.target, record.target.open);
+        modalLayerChanged = true;
+      }
+    }
+    if (modalLayerChanged) {
       queueTopLayerRaise();
     }
     if (records.some((record) => record.type === 'attributes' &&
@@ -321,7 +822,7 @@
 
   // If the fetch fails there is no "unstyled but working" fallback: pointer-events
   // is inherited from the host div's inline `pointer-events:none`, so ONLY the
-  // stylesheet re-enables clicks — without it every control is dead AND .wk-off
+  // stylesheet re-enables clicks - without it every control is dead AND .wk-off
   // stops hiding, dumping raw overlay text over the page. Install a minimal
   // critical stub immediately (clickable controls + hidden wrap) and keep
   // retrying with backoff until the real sheet lands.
@@ -332,9 +833,13 @@
   function applySheet(css) {
     try {
       if (!cssSheet) { cssSheet = new CSSStyleSheet(); root.adoptedStyleSheets = [...root.adoptedStyleSheets, cssSheet]; }
-      cssSheet.replaceSync(css);   // replace, don't append — retries must not stack sheets
+      cssSheet.replaceSync(css);   // replace, don't append - retries must not stack sheets
     } catch (e) {
-      if (!cssStyleNode) { cssStyleNode = document.createElement('style'); root.appendChild(cssStyleNode); }
+      if (!cssStyleNode) {
+        cssStyleNode = document.createElement('style');
+        if (CSP_NONCE) cssStyleNode.setAttribute('nonce', CSP_NONCE);
+        root.appendChild(cssStyleNode);
+      }
       cssStyleNode.textContent = css;
     }
   }
@@ -361,8 +866,8 @@
     (INTERACTION_MODE === 'browse-default' ? ' pass' : ''));
   const pinLayer = el('div', 'wk-pins');
   const interactionHint = INTERACTION_MODE === 'browse-default'
-    ? 'hold ⌥ + drag to mark a spot'
-    : 'drag to mark a spot · hold ⌥ to use the page';
+    ? 'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'
+    : 'drag to mark a spot · hold ' + MODIFIER_LABEL + ' to use the page';
   const hintChip = el('div', 'wk-hint', interactionHint + ' · ' + TOGGLE_LABEL +
     ' to hide · ' + DICTATE_LABEL + ' to dictate (outside text fields)');
   const sendBtn = el('button', 'wk-send');
@@ -370,10 +875,18 @@
   sendBtn.hidden = true;
   const statusChip = el('div', 'wk-chip');
   statusChip.hidden = true;
+  statusChip.setAttribute('role', 'status');
+  statusChip.setAttribute('aria-live', 'polite');
+  statusChip.setAttribute('aria-atomic', 'true');
   const bar = el('div', 'wk-bar');                   // review bar, built on demand
   bar.hidden = true;
   bar.tabIndex = 0;
+  bar.setAttribute('role', 'region');
+  bar.setAttribute('aria-label', 'Feedback review controls');
   const toasts = el('div', 'wk-toasts');
+  toasts.setAttribute('aria-live', 'polite');
+  toasts.setAttribute('aria-relevant', 'additions text');
+  toasts.setAttribute('aria-label', 'Webkit notifications');
 
   if (drawLayer) wrap.appendChild(drawLayer);
   wrap.appendChild(pinLayer);
@@ -390,6 +903,8 @@
   function toast(msg, opts) {
     opts = opts || {};
     const t = el('div', 'wk-toast' + (opts.kind ? ' ' + opts.kind : ''));
+    t.setAttribute('role', opts.kind === 'error' ? 'alert' : 'status');
+    t.setAttribute('aria-atomic', 'true');
     t.appendChild(el('span', 'wk-toast-msg', msg));
     let closed = false;
     const close = () => { if (closed) return; closed = true; t.remove(); };
@@ -401,6 +916,7 @@
     }
     const x = el('button', 'wk-toast-x', '×');
     x.type = 'button';
+    x.setAttribute('aria-label', 'Dismiss notification');
     x.addEventListener('click', close);
     t.appendChild(x);
     toasts.appendChild(t);
@@ -408,24 +924,51 @@
     return close;
   }
 
+  // Migrate the pre-v0.9 aggregate queue after notifications are available.
+  // A failed migration keeps the parsed points in memory and follows the
+  // bounded retry path, so the failure is visible before a reload can lose it.
+  persistQueuedPoints();
+
   // ===== server API ==========================================================
-  async function api(path, body) {
-    const res = await fetch(path, body === undefined
-      ? { cache: 'no-store' }
-      : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    let json = null;
-    try { json = await res.json(); } catch (e) { /* non-JSON error body */ }
-    if (!res.ok) {
-      const err = new Error((json && json.error) || ('HTTP ' + res.status));
-      err.status = res.status;
-      throw err;
+  async function api(path, body, timeoutMs) {
+    const options = apiRequestOptions(path, body, MUTATION_TOKEN);
+    const controller = timeoutMs && typeof AbortController === 'function'
+      ? new AbortController()
+      : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : 0;
+    if (controller) options.signal = controller.signal;
+    try {
+      const res = await fetch(path, options);
+      let json = null;
+      try { json = await res.json(); } catch (e) { /* non-JSON error body */ }
+      if (!res.ok) {
+        const err = new Error((json && json.error) || ('HTTP ' + res.status));
+        err.status = res.status;
+        throw err;
+      }
+      return json;
+    } catch (error) {
+      if (error && error.name === 'AbortError') {
+        throw new Error('The local preview server did not respond in time.');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
     }
-    return json;
   }
 
   function deleteVoiceNote(note) {
     if (!note || !note.path) return;
     api('/__wk/voice-note/delete', { path: note.path }).catch(() => { /* best-effort orphan cleanup */ });
+  }
+
+  function deleteDistinctVoiceNotes(...notes) {
+    const paths = new Set();
+    for (const note of notes) {
+      if (!note || !note.path || paths.has(note.path)) continue;
+      paths.add(note.path);
+      deleteVoiceNote(note);
+    }
   }
 
   // ===== mode toggle =========================================================
@@ -464,7 +1007,7 @@
   let posRaf = 0;
   function schedulePos() { if (!posRaf) posRaf = requestAnimationFrame(repositionAll); }
   // viewport-anchored boxes (pins on a position:fixed/sticky ancestor) are already
-  // stored in viewport coords, so they must NOT be scroll-translated — that is what
+  // stored in viewport coords, so they must NOT be scroll-translated - that is what
   // keeps them pinned to the fixed element instead of drifting up the document.
   function place(node, box, fixed) {
     const x = fixed ? box.x : box.x - scrollX;
@@ -550,7 +1093,7 @@
       node = parent;
     }
     // last resort: absolute nth-of-type chain. Anchor by actual containment
-    // (elements hung off <html> — fixed headers, portal roots — are not under
+    // (elements hung off <html> - fixed headers, portal roots - are not under
     // body, where 'body > …' would match nothing), and VERIFY before returning:
     // unlike every branch above this one wasn't checked, so a non-matching chain
     // could silently strand correctedRect and hand the agent a dead selector.
@@ -582,7 +1125,7 @@
       const a = overlap(elm);
       if (a > 0) areas.set(elm, a);
     }
-    // 1) elementsFromPoint over a 3×3 grid — fast, respects stacking, and our
+    // 1) elementsFromPoint over a 3×3 grid - fast, respects stacking, and our
     //    host is pointer-events:none so it self-excludes.
     for (const fx of [0.12, 0.5, 0.88]) {
       for (const fy of [0.12, 0.5, 0.88]) {
@@ -593,7 +1136,7 @@
         } catch (e) { /* ignore */ }
       }
     }
-    // 2) bbox scan fallback — the rect may sit partly outside the viewport
+    // 2) bbox scan fallback - the rect may sit partly outside the viewport
     //    where elementsFromPoint can't see.
     if (areas.size === 0 && document.body) {
       for (const elm of document.body.querySelectorAll('*')) consider(elm);
@@ -644,7 +1187,7 @@
     return Object.keys(out).length ? out : null;
   }
   // While reviewing an abc point the review bar's ⚗ chip IS the switcher, so the
-  // page's own bottom-left button for THAT scope is a confusing duplicate — park
+  // page's own bottom-left button for THAT scope is a confusing duplicate - park
   // it behind an inline display:none (the abc manager only ever writes .hidden
   // and .style.bottom, so it never fights us) and restore it on the way out.
   // Scoped by data-abc-for: an unrelated live experiment's button keeps working.
@@ -660,7 +1203,7 @@
     let btns = [];
     try {
       btns = [...document.querySelectorAll('.abc-switch[data-abc-for="' + cssEscape(scopeId) + '"]')];
-    } catch (e) { /* exotic scope id — leave the page's button alone */ }
+    } catch (e) { /* exotic scope id - leave the page's button alone */ }
     for (const el2 of btns) {
       hiddenAbcBtns.push({ el: el2, prev: el2.style.display, scopeId });
       el2.style.display = 'none';
@@ -674,12 +1217,12 @@
   });
 
   // ===== points ==============================================================
-  // Monotonic across sends: sendPoints emptied S.points, so seeding only from it
-  // restarted at 1 and drew a second pin "1" over the already-numbered review
-  // pins. wk:lastNum (persisted at send, survives reloads) carries the high-water
-  // mark so numbers only ever climb — pins stay unique and "point 7" is stable.
+  // The number is a local proposal. Simultaneous tabs can propose the same
+  // value, so readQueuedPointState deterministically resolves collisions before
+  // display or send. Active server point numbers are always reserved.
   function nextNumber() {
-    let n = Number(LS.get('wk:lastNum')) || 0;
+    let n = 0;
+    for (const number of reservedPointNumbers()) n = Math.max(n, number);
     for (const p of S.points) n = Math.max(n, p.number || 0);
     return n + 1;
   }
@@ -735,7 +1278,7 @@
   function pointFromDraft(draft) {
     const existing = draft.editId ? S.points.find((p) => p.id === draft.editId) : null;
     return {
-      id: existing ? existing.id : 'p-' + Date.now().toString(36) + '-' + rand4(),
+      id: existing ? existing.id : newPointId(),
       number: existing ? existing.number : nextNumber(),
       page: logicalPath(),
       createdAt: existing ? existing.createdAt : nowISO(),
@@ -774,7 +1317,7 @@
   // ===== pins layer ==========================================================
   // Unsent points → ink pins; review points → accent pins. Both live in a
   // pointer-events:none layer (pins re-enable themselves) and are translated by
-  // the rAF engine — no per-scroll layout reads.
+  // the rAF engine - no per-scroll layout reads.
   function renderPins() {
     pinLayer.textContent = '';
     S.pinEls = [];
@@ -787,11 +1330,12 @@
       const pin = el('button', 'wk-pin ' + cls, String(num));
       pin.type = 'button';
       pin.title = title || '';
+      pin.setAttribute('aria-label', title || ('Feedback point ' + num));
       pin.addEventListener('click', onClick);
       pinLayer.appendChild(rect);
       pinLayer.appendChild(pin);
       S.pinEls.push({ node: rect, box, fixed: !!fixed });
-      S.pinEls.push({ node: pin, box: { x: box.x - 11, y: box.y - 11, w: 22, h: 22 }, fixed: !!fixed });
+      S.pinEls.push({ node: pin, box: { x: box.x - 12, y: box.y - 12, w: 24, h: 24 }, fixed: !!fixed });
       return { rect, pin };
     };
     if (S.reviewing) {
@@ -808,7 +1352,7 @@
         boxes.forEach((box, rectIndex) => {
           const els = addPin(p.number, box,
             'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
-            () => jumpTo(i), 'point ' + p.number + (v ? ' — ' + v.verdict : ''), !!va);
+            () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''), !!va);
           if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
         });
       });
@@ -824,7 +1368,7 @@
       }, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
-      }, S.reviewing ? 'added to current batch — click to edit' : 'click to edit', !!va));
+      }, S.reviewing ? 'added to current batch - click to edit' : 'click to edit', !!va));
     }
     repositionAll();
     updateHint();
@@ -843,7 +1387,7 @@
           const dy = (b.top + scrollY) - p.context[0].box.y;
           return { x: p.rect.x + dx, y: p.rect.y + dy, w: p.rect.w, h: p.rect.h };
         }
-      } catch (e) { /* selector no longer valid — use stored rect */ }
+      } catch (e) { /* selector no longer valid - use stored rect */ }
     }
     return p.rect;
   }
@@ -930,7 +1474,7 @@
       remove.type = 'button';
       remove.title = 'Delete this rectangle';
       remove.setAttribute('aria-label', 'Delete this rectangle');
-      remove.innerHTML = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+      remove.appendChild(closeIcon());
       remove.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -998,7 +1542,7 @@
   // feature-gated so other browsers simply don't get a mic button.
   const SRClass = window.webkitSpeechRecognition || window.SpeechRecognition;
   // Chrome permits exactly one live recognition. Two (editor card + redo mini)
-  // would abort each other, and each aborted onend restarts 250ms later — an
+  // would abort each other, and each aborted onend restarts 250ms later - an
   // endless ping-pong where neither transcribes. This registry guarantees one.
   let liveMic = null;
 
@@ -1014,9 +1558,29 @@
     function paint() {
       btn.classList.toggle('on', userOn);
       btn.classList.remove('armed');
+      btn.setAttribute('aria-pressed', String(userOn));
+    }
+    function failSynchronousStart(error) {
+      userOn = false;
+      languageRestart = false;
+      clearTimeout(restartT);
+      rec = null;
+      interim = '';
+      onText && onText('');
+      if (liveMic === self) liveMic = null;
+      paint();
+      btn.classList.add('error');
+      btn.title = 'Dictation could not start. Click to retry.';
+      toast('Could not start dictation: ' + (error?.message || 'browser rejected the request') + '. Click the mic to retry.',
+        { kind: 'error' });
     }
     function start() {
-      rec = new SRClass();
+      try {
+        rec = new SRClass();
+      } catch (error) {
+        failSynchronousStart(error);
+        return;
+      }
       rec.continuous = true;
       rec.interimResults = true;
       // The Web Speech API sends this BCP 47 tag to the recognition service
@@ -1039,9 +1603,9 @@
       rec.onerror = (e) => {
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           userOn = false;
-          paint();                // drop the red 'on' pulse — dictation is dead
+          paint();                // drop the red 'on' pulse - dictation is dead
           btn.classList.add('error');
-          btn.title = 'Microphone blocked — allow the mic for this site in Chrome, then click again';
+          btn.title = 'Microphone blocked - allow the mic for this site in Chrome, then click again';
         } else if (e.error === 'network') {
           netFails++;
           btn.classList.add('error');
@@ -1050,17 +1614,17 @@
             userOn = false;
             paint();
             btn.classList.add('error');
-            btn.title = 'Speech service unreachable — dictation stopped after 3 network errors';
+            btn.title = 'Speech service unreachable - dictation stopped after 3 network errors';
           }
         } else if (e.error !== 'no-speech' && !(languageRestart && e.error === 'aborted')) {
           // audio-capture / language-not-supported / 'aborted' are terminal: make
           // them stop userOn so onend's 250ms restart loop ends (and the two-mic
-          // ping-pong breaks — a preempted recognition lands here and must not
+          // ping-pong breaks - a preempted recognition lands here and must not
           // resurrect itself). 'no-speech' stays routine; onend re-arms it.
           userOn = false;
           paint();
           btn.classList.add('error');
-          btn.title = 'Dictation stopped (' + e.error + ') — click to retry';
+          btn.title = 'Dictation stopped (' + e.error + ') - click to retry';
         }
       };
       rec.onend = () => {
@@ -1071,11 +1635,15 @@
           if (userOn) restartT = setTimeout(start, 0);
           return;
         }
-        // Chrome ends recognition on every silence — quietly re-arm unless the
+        // Chrome ends recognition on every silence - quietly re-arm unless the
         // user toggled off or errors made restarting pointless.
         if (userOn) restartT = setTimeout(() => { try { rec && start(); } catch (e) { /* ok */ } }, 250);
       };
-      try { rec.start(); } catch (e) { /* double-start race — ignore */ }
+      try {
+        rec.start();
+      } catch (error) {
+        failSynchronousStart(error);
+      }
     }
     function stop() {
       userOn = false;
@@ -1095,7 +1663,7 @@
       userOn = true;
       netFails = 0;
       btn.classList.remove('error');
-      btn.title = 'Dictating — click, or press ' + DICTATE_LABEL + ' outside a text field, to stop';
+      btn.title = 'Dictating - click, or press ' + DICTATE_LABEL + ' outside a text field, to stop';
       paint();
       start();
       ta.focus();
@@ -1115,7 +1683,7 @@
     });
     const self = {
       stop,
-      // after a reload we can't auto-start (browser gesture rule) — show the
+      // after a reload we can't auto-start (browser gesture rule) - show the
       // armed look so the user knows one click resumes dictation
       arm() {
         if (!userOn) {
@@ -1131,103 +1699,326 @@
   // Voice-note mode deliberately avoids browser speech recognition. It keeps
   // the original audio, uploads it into this color's private feedback inbox,
   // and lets the background agent run the bundled local Whisper helper.
+  const VOICE_MAX_BYTES = 24 * 1024 * 1024;
+  const VOICE_MAX_DURATION_MS = 5 * 60 * 1000;
   function makeVoiceRecorder(btn, langSelect, onSaved, onState) {
     if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) {
       btn.hidden = true;
       langSelect.hidden = true;
-      return { stop() {}, arm() {}, get on() { return false; }, get uploading() { return false; } };
+      return {
+        stop() {}, arm() {}, get on() { return false; },
+        get starting() { return false; }, get stopping() { return false; },
+        get uploading() { return false; },
+      };
     }
     let recorder = null, stream = null, chunks = [], startedAt = 0;
-    let recording = false, uploading = false, saveOnStop = false;
-    let settled = Promise.resolve();
-    let resolveSettled = null;
+    let recording = false, starting = false, stopping = false, uploading = false;
+    let saveOnStop = false, errorMessage = '';
+    let discarded = false, generation = 0;
+    let recordedBytes = 0, limitTimer = 0, limitReason = '', limitStop = null;
+    const closedStreams = new WeakSet();
+    let cycle = { promise: Promise.resolve(true), resolve() {}, settled: true };
+
+    function newCycle() {
+      let finishPromise;
+      const state = {
+        settled: false,
+        promise: new Promise((done) => { finishPromise = done; }),
+        resolve(value) {
+          if (state.settled) return;
+          state.settled = true;
+          finishPromise(value);
+        },
+      };
+      return state;
+    }
 
     function paint() {
       btn.classList.toggle('on', recording);
       btn.classList.toggle('uploading', uploading);
-      if (recording) btn.title = 'Recording voice note — click to stop and attach';
+      btn.classList.toggle('error', !!errorMessage);
+      btn.setAttribute('aria-pressed', String(recording));
+      btn.disabled = starting || stopping || uploading;
+      btn.setAttribute('aria-busy', String(starting || stopping || uploading));
+      if (recording) btn.title = 'Recording voice note - click to stop and attach';
+      else if (starting) btn.title = 'Waiting for microphone permission…';
+      else if (stopping) btn.title = 'Finishing voice note…';
       else if (uploading) btn.title = 'Saving voice note…';
+      else if (errorMessage) btn.title = errorMessage;
       else btn.title = MIC_TITLE;
-      onState && onState({ recording, uploading });
+      onState && onState({ recording, starting, stopping, uploading });
     }
-    function closeStream() {
-      for (const track of stream?.getTracks?.() || []) track.stop();
-      stream = null;
+    function closeStream(target = stream) {
+      if (target && !closedStreams.has(target)) {
+        closedStreams.add(target);
+        for (const track of target.getTracks?.() || []) track.stop();
+      }
+      if (target === stream) stream = null;
     }
-    async function upload(blob, durationMs) {
+    function clearLimitTimer() {
+      clearTimeout(limitTimer);
+      limitTimer = 0;
+    }
+    async function upload(blob, durationMs, attempt, currentCycle) {
+      if (blob.size > VOICE_MAX_BYTES) {
+        errorMessage = 'Voice note is too large. Click to record a shorter note.';
+        toast('Voice note exceeded the 24 MB upload limit. Record a shorter note.', { kind: 'error' });
+        paint();
+        currentCycle.resolve(false);
+        return;
+      }
       uploading = true;
       paint();
       const id = 'voice-' + Date.now().toString(36) + '-' + rand4();
+      let saved = false;
       try {
         const response = await fetch('/__wk/voice-note?id=' + encodeURIComponent(id), {
-          method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob,
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/webm', 'X-WK-Token': MUTATION_TOKEN },
+          body: blob,
         });
         const result = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(result.error || ('HTTP ' + response.status));
         const note = result.voiceNote;
         note.durationMs = durationMs;
         note.language = langSelect.value === 'he-IL' ? 'he' : 'en';
-        onSaved(note);
-        toast('Voice note attached — the agent will transcribe it locally.');
+        if (discarded || attempt !== generation) {
+          deleteVoiceNote(note);
+        } else {
+          onSaved(note);
+          saved = true;
+          toast('Voice note attached. The agent will transcribe it locally.');
+        }
       } catch (error) {
-        toast('Voice note failed to save: ' + error.message, { kind: 'error' });
+        if (!discarded && attempt === generation) {
+          toast('Voice note failed to save: ' + error.message, { kind: 'error' });
+        }
       } finally {
         uploading = false;
         paint();
+        currentCycle.resolve(saved);
       }
     }
     async function start() {
+      if (recording || starting || stopping || uploading) return cycle.promise;
       if (liveMic && liveMic !== self) liveMic.stop();
+      const attempt = ++generation;
+      const currentCycle = newCycle();
+      cycle = currentCycle;
+      discarded = false;
+      errorMessage = '';
+      recordedBytes = 0;
+      limitReason = '';
+      clearLimitTimer();
+      starting = true;
+      liveMic = self;
+      paint();
+      let acquiredStream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        acquiredStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (attempt !== generation || discarded) {
+          closeStream(acquiredStream);
+          currentCycle.resolve(false);
+          return currentCycle.promise;
+        }
+        stream = acquiredStream;
         const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
           .find((type) => !MediaRecorder.isTypeSupported || MediaRecorder.isTypeSupported(type));
-        recorder = preferred ? new MediaRecorder(stream, { mimeType: preferred }) : new MediaRecorder(stream);
-        chunks = [];
+        const currentRecorder = preferred
+          ? new MediaRecorder(stream, { mimeType: preferred })
+          : new MediaRecorder(stream);
+        recorder = currentRecorder;
+        const currentChunks = [];
+        chunks = currentChunks;
         saveOnStop = false;
-        recorder.ondataavailable = (event) => { if (event.data?.size) chunks.push(event.data); };
-        recorder.onstop = async () => {
-          const shouldSave = saveOnStop;
-          const durationMs = Math.max(0, Date.now() - startedAt);
-          const type = recorder?.mimeType || chunks[0]?.type || 'audio/webm';
-          recording = false;
-          closeStream();
+        const failRecording = (message, detail) => {
+          clearLimitTimer();
+          limitStop = null;
+          const ownsRecorder = recorder === currentRecorder;
+          if (ownsRecorder) {
+            recording = false;
+            stopping = false;
+            recorder = null;
+            if (liveMic === self) liveMic = null;
+          }
+          closeStream(acquiredStream);
+          if (attempt === generation && !discarded && !currentCycle.settled) {
+            errorMessage = message;
+            toast(detail || message, { kind: 'error' });
+          }
+          currentCycle.resolve(false);
           paint();
-          if (shouldSave && chunks.length) await upload(new Blob(chunks, { type }), durationMs);
-          chunks = [];
-          if (resolveSettled) resolveSettled();
-          resolveSettled = null;
         };
-        settled = new Promise((resolve) => { resolveSettled = resolve; });
-        recorder.start(250);
+        const stopAtLimit = (message) => {
+          if (limitReason || attempt !== generation || discarded || currentCycle.settled) return;
+          limitReason = message;
+          saveOnStop = false;
+          errorMessage = 'Recording limit reached. Click to record a shorter note.';
+          toast(message, { kind: 'error' });
+          const alreadyStopping = stopping;
+          recording = false;
+          stopping = true;
+          if (liveMic === self) liveMic = null;
+          clearLimitTimer();
+          paint();
+          if (alreadyStopping) return;
+          try {
+            currentRecorder.stop();
+          } catch (error) {
+            failRecording(errorMessage, message);
+          }
+        };
+        limitStop = stopAtLimit;
+        currentRecorder.ondataavailable = (event) => {
+          if (!event.data?.size || limitReason) return;
+          if (Date.now() - startedAt >= VOICE_MAX_DURATION_MS) {
+            stopAtLimit('Voice note reached the 5 minute recording limit. Record a shorter note.');
+            return;
+          }
+          recordedBytes += event.data.size;
+          if (recordedBytes > VOICE_MAX_BYTES) {
+            stopAtLimit('Voice note reached the 24 MB recording limit. Record a shorter note.');
+            return;
+          }
+          currentChunks.push(event.data);
+        };
+        currentRecorder.onerror = (event) => {
+          const detail = event?.error?.message || 'unknown recorder error';
+          failRecording(
+            'Voice recording failed. Click to retry.',
+            'Voice recording failed: ' + detail,
+          );
+        };
+        currentRecorder.onstop = async () => {
+          clearLimitTimer();
+          limitStop = null;
+          const shouldSave = saveOnStop && attempt === generation && !discarded;
+          const unexpected = !saveOnStop && attempt === generation && !discarded && !currentCycle.settled;
+          const stoppedAtLimit = !!limitReason;
+          const durationMs = Math.max(0, Date.now() - startedAt);
+          const type = currentRecorder.mimeType || currentChunks[0]?.type || 'audio/webm';
+          const ownsRecorder = recorder === currentRecorder;
+          if (ownsRecorder) {
+            recording = false;
+            stopping = false;
+            recorder = null;
+            if (liveMic === self) liveMic = null;
+          }
+          closeStream(acquiredStream);
+          paint();
+          if (currentCycle.settled) {
+            // The error event already made the failure visible and completed the cycle.
+          } else if (stoppedAtLimit) {
+            currentCycle.resolve(false);
+          } else if (shouldSave && currentChunks.length) {
+            await upload(new Blob(currentChunks, { type }), durationMs, attempt, currentCycle);
+          } else if (shouldSave) {
+            errorMessage = 'No audio was captured. Click to retry.';
+            toast('No audio was captured. Please record the voice note again.', { kind: 'error' });
+            currentCycle.resolve(false);
+            paint();
+          } else if (unexpected) {
+            errorMessage = 'Recording stopped unexpectedly. Click to retry.';
+            toast('Voice recording stopped unexpectedly. Please try again.', { kind: 'error' });
+            currentCycle.resolve(false);
+            paint();
+          } else {
+            currentCycle.resolve(false);
+          }
+          if (chunks === currentChunks) chunks = [];
+        };
         startedAt = Date.now();
+        currentRecorder.start(250);
         recording = true;
-        liveMic = self;
-        paint();
+        limitTimer = setTimeout(() => {
+          stopAtLimit('Voice note reached the 5 minute recording limit. Record a shorter note.');
+        }, VOICE_MAX_DURATION_MS);
       } catch (error) {
-        closeStream();
+        clearLimitTimer();
+        limitStop = null;
+        closeStream(acquiredStream);
         recording = false;
-        btn.classList.add('error');
-        btn.title = 'Microphone blocked or unavailable — click to retry';
-        toast('Could not start voice recording: ' + error.message, { kind: 'error' });
+        stopping = false;
+        if (attempt === generation) recorder = null;
+        currentCycle.resolve(false);
+        if (attempt === generation && !discarded) {
+          errorMessage = 'Microphone blocked or unavailable. Click to retry.';
+          toast('Could not start voice recording: ' + error.message, { kind: 'error' });
+        }
+      } finally {
+        if (attempt === generation) starting = false;
+        if (!recording && liveMic === self) liveMic = null;
+        paint();
       }
+      return currentCycle.promise;
     }
     function finish() {
-      if (!recording || !recorder) return settled;
+      if (stopping) return cycle.promise;
+      if (!recording || !recorder) return cycle.promise;
+      if (Date.now() - startedAt >= VOICE_MAX_DURATION_MS && limitStop) {
+        limitStop('Voice note reached the 5 minute recording limit. Record a shorter note.');
+        return cycle.promise;
+      }
+      const currentRecorder = recorder;
+      clearLimitTimer();
       saveOnStop = true;
-      recorder.stop();
+      recording = false;
+      stopping = true;
       if (liveMic === self) liveMic = null;
-      return settled;
+      paint();
+      try {
+        currentRecorder.stop();
+      } catch (error) {
+        limitStop = null;
+        stopping = false;
+        if (recorder === currentRecorder) recorder = null;
+        closeStream();
+        errorMessage = 'Could not finish this voice note. Click to retry.';
+        toast('Could not finish voice recording: ' + error.message, { kind: 'error' });
+        cycle.resolve(false);
+        paint();
+      }
+      return cycle.promise;
     }
     function stop() {
+      clearLimitTimer();
+      limitStop = null;
+      discarded = true;
+      generation += 1;
       saveOnStop = false;
-      if (recording && recorder) recorder.stop();
-      else closeStream();
+      starting = false;
+      if (stopping) {
+        if (liveMic === self) liveMic = null;
+        paint();
+        return;
+      }
+      if (recording && recorder) {
+        const currentRecorder = recorder;
+        recording = false;
+        stopping = true;
+        if (liveMic === self) liveMic = null;
+        paint();
+        try {
+          currentRecorder.stop();
+        } catch (error) {
+          stopping = false;
+          if (recorder === currentRecorder) recorder = null;
+          closeStream();
+          cycle.resolve(false);
+        }
+      } else {
+        closeStream();
+        cycle.resolve(false);
+      }
       recording = false;
       if (liveMic === self) liveMic = null;
       paint();
     }
-    btn.addEventListener('click', () => recording ? finish() : start());
+    btn.addEventListener('click', () => {
+      if (starting || stopping || uploading) return;
+      if (recording) finish();
+      else start();
+    });
     langSelect.addEventListener('change', () => {
       if (!SPEECH_LANGS.has(langSelect.value)) langSelect.value = 'en-US';
       speechLang = langSelect.value;
@@ -1235,9 +2026,11 @@
     });
     const self = {
       stop,
-      finishAndWait() { return recording ? finish() : settled; },
+      finishAndWait() { return recording ? finish() : cycle.promise; },
       arm() { btn.classList.add('armed'); },
       get on() { return recording; },
+      get starting() { return starting; },
+      get stopping() { return stopping; },
       get uploading() { return uploading; },
     };
     return self;
@@ -1253,12 +2046,6 @@
   }
 
   // ===== editor card =========================================================
-  const micGlyph =
-    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
-    ' stroke-width="1.5" stroke-linecap="round" aria-hidden="true">' +
-    '<rect x="5.5" y="1.75" width="5" height="8" rx="2.5"/>' +
-    '<path d="M3 7.5a5 5 0 0 0 10 0M8 12.5v2"/></svg>';
-
   function openCard(init) {
     if (S.card || IS_BEFORE) return;
     const editing = init.editId ? S.points.find((p) => p.id === init.editId) : null;
@@ -1284,22 +2071,31 @@
       voiceNote: editing ? (editing.voiceNote || null) : null,
       editId: editing ? editing.id : null,
     };
+    let cardOwner = null;
+    let doneBusy = false;
 
     const node = el('div', 'wk-card');
+    node.setAttribute('role', 'dialog');
     const head = el('div', 'wk-row wk-head');
     const num = el('span', 'wk-num', String(editing ? editing.number : nextNumber()));
     const title = el('span', 'wk-card-title', editing ? 'edit point' : 'feedback');
+    title.id = 'wk-card-title-' + rand4();
+    node.setAttribute('aria-labelledby', title.id);
     const micBtn = el('button', 'wk-mic');
     micBtn.type = 'button';
     micBtn.title = MIC_TITLE;
-    micBtn.innerHTML = micGlyph;
+    micBtn.setAttribute('aria-label', MIC_ARIA_LABEL);
+    micBtn.appendChild(microphoneIcon());
     const langSelect = speechLanguageSelect();
     const voiceStatus = el('span', 'wk-voice-status');
     voiceStatus.hidden = DICTATION_MODE !== 'voice-note';
+    voiceStatus.setAttribute('role', 'status');
+    voiceStatus.setAttribute('aria-live', 'polite');
     head.append(num, title, voiceStatus, langSelect, micBtn);
 
     const taWrap = el('div', 'wk-ta-wrap');
     const ta = el('textarea', 'wk-ta');
+    ta.setAttribute('aria-label', editing ? 'Edit feedback details' : 'Feedback details');
     ta.placeholder = DICTATION_MODE === 'voice-note'
       ? 'Type a note, record one, or use both…'
       : 'What should change here?';
@@ -1315,9 +2111,17 @@
     const abcWrap = el('div', 'wk-abc');
     const abcHead = el('button', 'wk-abc-head');
     abcHead.type = 'button';
-    abcHead.innerHTML = '<span class="wk-flask">⚗</span><span>Request A/B variants</span><span class="wk-caret">▸</span>';
+    abcHead.append(
+      el('span', 'wk-flask', '⚗'),
+      el('span', '', 'Request A/B variants'),
+      el('span', 'wk-caret', '▸'),
+    );
     const abcBody = el('div', 'wk-abc-body');
+    abcBody.id = 'wk-abc-body-' + rand4();
+    abcHead.setAttribute('aria-controls', abcBody.id);
     const seg = el('div', 'wk-seg');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', 'A/B variant authoring mode');
     const segModel = el('button', 'wk-seg-btn', 'Model generates');
     const segUser = el('button', 'wk-seg-btn', "I'll describe each");
     segModel.type = segUser.type = 'button';
@@ -1328,6 +2132,8 @@
     const countEl = el('span', 'wk-count-n', '4');
     const plus = el('button', 'wk-step', '+');
     minus.type = plus.type = 'button';
+    minus.setAttribute('aria-label', 'Fewer variants');
+    plus.setAttribute('aria-label', 'More variants');
     stepRow.append(stepLabel, minus, countEl, plus);
     const promptsBox = el('div', 'wk-abc-prompts');
     abcBody.append(seg, stepRow, promptsBox);
@@ -1375,6 +2181,8 @@
     function paintVoiceStatus(state) {
       if (DICTATION_MODE !== 'voice-note') return;
       if (state?.recording) voiceStatus.textContent = 'recording…';
+      else if (state?.starting) voiceStatus.textContent = 'connecting…';
+      else if (state?.stopping) voiceStatus.textContent = 'finishing…';
       else if (state?.uploading) voiceStatus.textContent = 'saving…';
       else if (draft.voiceNote) voiceStatus.textContent = 'voice attached';
       else voiceStatus.textContent = 'voice note';
@@ -1396,8 +2204,11 @@
     function paintAbc() {
       abcWrap.classList.toggle('open', draft.abc.open);
       abcHead.querySelector('.wk-caret').textContent = draft.abc.open ? '▾' : '▸';
+      abcHead.setAttribute('aria-expanded', String(draft.abc.open));
       segModel.classList.toggle('active', draft.abc.mode === 'model');
       segUser.classList.toggle('active', draft.abc.mode === 'user');
+      segModel.setAttribute('aria-pressed', String(draft.abc.mode === 'model'));
+      segUser.setAttribute('aria-pressed', String(draft.abc.mode === 'user'));
       countEl.textContent = String(draft.abc.count);
       promptsBox.hidden = draft.abc.mode !== 'user';
       if (draft.abc.mode === 'user') {
@@ -1427,7 +2238,7 @@
     function teardown() {
       mic.stop();
       // cancel, don't flush: every teardown path has already decided the fate
-      // of wk:card (removed it, or done saved the point) — a late debounced
+      // of wk:card (removed it, or done saved the point) - a late debounced
       // write here would resurrect a discarded draft 150ms after the fact
       saveDraft.cancel();
       node.remove();
@@ -1441,29 +2252,56 @@
       LS.remove('wk:card'); teardown();
     }
     cancelBtn.addEventListener('click', cancelDraft);
-    delBtn.addEventListener('click', () => {
-      // record the id as deleted BEFORE saving: the merge in savePoints keeps
-      // foreign points, so without this the just-removed point (still in LS from
-      // its own earlier write, or from another tab) would be resurrected.
-      if (editing) { S.deletedIds.add(editing.id); S.points = S.points.filter((p) => p.id !== editing.id); }
-      deleteVoiceNote(draft.voiceNote || originalVoiceNote);
-      savePoints();
-      savePoints.flush();
-      LS.remove('wk:card');
-      teardown();
+    delBtn.addEventListener('click', async () => {
+      delBtn.disabled = true;
+      try {
+        if (editing) {
+          let retired = false;
+          try {
+            retired = await withPointQueueLock(() => retireQueuedPointIds([editing.id]));
+          } catch (error) {
+            toast('Could not delete this point: ' + error.message, { kind: 'error' });
+            return;
+          }
+          if (!retired) {
+            toast('Feedback history is full. The point was kept. Close other preview tabs, then clear this preview site storage and reload.', {
+              kind: 'error', ttl: 0,
+            });
+            return;
+          }
+        }
+        if (cardOwner && S.card !== cardOwner) return;
+        deleteDistinctVoiceNotes(draft.voiceNote, originalVoiceNote);
+        LS.remove('wk:card');
+        teardown();
+      } finally {
+        if (node.isConnected) delBtn.disabled = false;
+      }
     });
     // commit the draft into S.points. Returns false (and shakes) on empty text.
     // Exposed on S.card so Send can flush an open card before shipping the batch.
     function commit() {
       draft.text = ta.value;
-      if (mic.on || mic.uploading) {
-        toast(mic.on ? 'Stop the recording before saving this point.' : 'Wait for the voice note to finish saving.', { kind: 'warn' });
+      if (mic.on || mic.starting || mic.stopping || mic.uploading) {
+        const message = mic.on
+          ? 'Stop the recording before saving this point.'
+          : mic.starting
+            ? 'Wait for microphone permission before saving this point.'
+            : mic.stopping
+              ? 'Wait for the voice note to finish processing.'
+            : 'Wait for the voice note to finish saving.';
+        toast(message, { kind: 'warn' });
         return false;
       }
       if (!draft.text.trim() && !draft.voiceNote) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
-      const pt = pointFromDraft(draft);
+      let pt = pointFromDraft(draft);
+      if (S.deletedIds.has(pt.id) || LS.get(queuedTombstoneKey(pt.id)) !== null) {
+        // A send or delete in another tab won while this editor was open. Keep
+        // the user's work as a new point instead of reviving the retired id.
+        pt = { ...pt, id: newPointId(), number: nextNumber(), createdAt: nowISO() };
+      }
       // update-or-push: if the edited point was sent/deleted meanwhile (findIndex
-      // misses), pointFromDraft already minted a fresh id/number, so PUSH it —
+      // misses), pointFromDraft already minted a fresh id/number, so PUSH it -
       // the old code's map()-only branch silently dropped the user's edit.
       const idx = S.points.findIndex((p) => p.id === pt.id);
       if (idx >= 0) S.points[idx] = pt;
@@ -1476,7 +2314,7 @@
       return true;
     }
     addRectBtn.addEventListener('click', () => {
-      if (mic.on || mic.uploading) {
+      if (mic.on || mic.starting || mic.stopping || mic.uploading) {
         toast('Finish the voice note before adding another rectangle.', { kind: 'warn' });
         return;
       }
@@ -1491,10 +2329,28 @@
       toast('Draw another rectangle for this same feedback point.');
     });
     doneBtn.addEventListener('click', async () => {
-      if (mic.on && mic.finishAndWait) await mic.finishAndWait();
-      else if (mic.uploading && mic.finishAndWait) await mic.finishAndWait();
-      if (!commit()) return;
-      if (S.phase !== 'collecting' && S.phase !== null) sendPoints(false);
+      if (doneBusy || !cardOwner || S.card !== cardOwner) return;
+      if (mic.starting) {
+        toast('Wait for microphone permission before saving this point.', { kind: 'warn' });
+        return;
+      }
+      doneBusy = true;
+      doneBtn.disabled = true;
+      try {
+        let voiceReady = true;
+        if (mic.on && mic.finishAndWait) voiceReady = await mic.finishAndWait();
+        else if ((mic.stopping || mic.uploading) && mic.finishAndWait) {
+          voiceReady = await mic.finishAndWait();
+        }
+        if (voiceReady === false || S.card !== cardOwner || !node.isConnected) return;
+        if (!commit()) return;
+        if (S.phase !== 'collecting' && S.phase !== null && S.phase !== 'verdicts_sent') {
+          sendPoints(false);
+        }
+      } finally {
+        doneBusy = false;
+        if (S.card === cardOwner && node.isConnected) doneBtn.disabled = false;
+      }
     });
 
     // The header doubles as a drag handle. Keep the chosen viewport position in
@@ -1539,7 +2395,8 @@
     });
 
     // micBtn is exposed so the dictate/record hotkey drives the same handler.
-    S.card = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft };
+    cardOwner = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft };
+    S.card = cardOwner;
     paintAbc();
     autoGrow();
     positionFrozen();
@@ -1588,13 +2445,16 @@
     sendBtn.hidden = n === 0;
     if (n === 0) return;
     const activeRound = S.phase !== null && S.phase !== 'collecting';
+    const queued = S.phase === 'verdicts_sent';
     sendBtn.classList.toggle('queued', activeRound);
-    sendBtn.innerHTML = '';
+    sendBtn.replaceChildren();
     sendBtn.append(
-      el('span', 'wk-send-label', activeRound ? 'Add' : 'Send'),
+      el('span', 'wk-send-label', queued ? 'Queued' : (activeRound ? 'Add' : 'Send')),
       el('span', 'wk-badge', String(n)),
     );
-    sendBtn.title = activeRound
+    sendBtn.title = queued
+      ? 'These points will send as soon as the current verdicts finish processing'
+      : activeRound
       ? 'Add ' + n + ' point(s) to the current feedback batch'
       : 'Send ' + n + ' point(s) to the ' + COLOR + ' agent';
   }
@@ -1602,54 +2462,69 @@
   let sending = false;
   async function sendPoints(auto) {
     if (sending) return;
-    // reconcile with storage first: another tab may already have sent (points
-    // gone from LS → don't re-send stale memory) or added points (fold them in),
-    // never resurrecting anything we deleted/sent this session.
-    const stored = LS.getJSON('wk:points', []);
-    const storedIds = new Set(stored.map((p) => p.id));
-    S.points = stored.concat(S.points.filter((p) => !storedIds.has(p.id) && !S.deletedIds.has(p.id)));
-    if (!S.points.length) { renderPins(); updateSendBtn(); return; }
+    if (S.phase === 'verdicts_sent') {
+      updateSendBtn();
+      if (!auto) toast('Points queued for the next batch.');
+      return;
+    }
     sending = true;
-    const now = nowISO();
-    // strip nothing: points are built exactly to schema
-    const batch = {
-      version: 1,
-      kind: 'feedback',
-      batchId: S.batch?.batchId || newBatchId(),
-      round: 1,
-      color: COLOR,
-      sessionId: SESSION_ID,
-      createdAt: now,
-      updatedAt: now,
-      pages: [...new Set(S.points.map((p) => p.page))],
-      points: S.points,
-    };
+    let sentCount = 0;
+    let addedToActiveRound = false;
+    let accepted = false;
     try {
-      await api('/__wk/feedback', batch);
-      // keep numbers climbing across sends (high-water mark) so the next batch's
-      // pins never collide with this batch's review pins
-      const maxSent = batch.points.reduce((m, p) => Math.max(m, p.number || 0), 0);
-      LS.set('wk:lastNum', String(Math.max(Number(LS.get('wk:lastNum')) || 0, maxSent)));
-      // drop only the ids we sent — keep any a concurrent tab added meanwhile
-      const sentIds = new Set(batch.points.map((p) => p.id));
-      for (const id of sentIds) S.deletedIds.add(id);
-      S.points = LS.getJSON('wk:points', []).filter((p) => !sentIds.has(p.id));
-      savePoints();
-      savePoints.flush();
+      await withPointQueueLock(async () => {
+        // This is the send linearization point. A completed tombstone already
+        // present here wins and is excluded. A delete that acquires the lock
+        // later cannot retract a request the server has already accepted.
+        S.points = loadQueuedPoints();
+        if (!S.points.length) return;
+        const snapshot = S.points.slice();
+        const sentIds = snapshot.map((point) => point.id);
+        if (!hasQueuedTombstoneCapacity(LS, sentIds, MAX_QUEUED_TOMBSTONES)) {
+          throw new Error(
+            'Feedback history is full. Points were kept. Close other preview tabs, then clear this preview site storage and reload.'
+          );
+        }
+        const now = nowISO();
+        const batch = {
+          version: 1,
+          kind: 'feedback',
+          batchId: S.batch?.batchId || newBatchId(),
+          round: S.batch?.round || 1,
+          color: COLOR,
+          sessionId: SESSION_ID,
+          createdAt: now,
+          updatedAt: now,
+          pages: [...new Set(snapshot.map((point) => point.page))],
+          points: snapshot,
+        };
+        addedToActiveRound = S.phase !== 'collecting' && S.phase !== null;
+        await api('/__wk/feedback', batch, 15000);
+        accepted = true;
+        if (!retireQueuedPointIds(sentIds)) {
+          // The lock makes this unreachable for cooperating tabs. Keep it as a
+          // fail-visible guard for browsers without Web Locks or hostile writes.
+          throw new Error('Feedback was accepted, but its local history could not be retired safely.');
+        }
+        sentCount = snapshot.length;
+      });
       renderPins();
       updateSendBtn();
-      toast((S.phase !== 'collecting' && S.phase !== null
-        ? 'Added ' + batch.points.length + ' point(s) to the current batch'
-        : 'Sent ' + batch.points.length + ' point(s)') + ' — the ' + EMOJI + ' agent is on it.');
-      pollNow();
+      if (sentCount) {
+        toast((addedToActiveRound
+          ? 'Added ' + sentCount + ' point(s) to the current batch'
+          : 'Sent ' + sentCount + ' point(s)') + '. The ' + EMOJI + ' agent is on it.');
+        pollNow();
+      }
     } catch (e) {
-      toast('Send failed: ' + e.message, { kind: 'error' });
+      toast((accepted ? 'Feedback was sent, but local cleanup failed: ' : 'Send failed: ') +
+        e.message, { kind: 'error' });
     } finally {
       sending = false;
     }
   }
   sendBtn.addEventListener('click', () => {
-    // an open editor card holds an uncommitted note — flush it into the batch
+    // an open editor card holds an uncommitted note - flush it into the batch
     // ("type the note, hit Send" must not ship without it); shake+refuse if empty
     if (S.card) {
       const n = S.card.node;
@@ -1661,17 +2536,20 @@
     sendPoints(false);
   });
 
-  // Cross-tab sync: the 'storage' event fires only in OTHER tabs, so it is exactly
-  // the channel to reconcile a second tab on the same origin — adopt its points /
-  // verdicts instead of diverging and later re-sending a stale duplicate batch.
+  // Cross-tab sync: distinct point keys commute, and tombstones always win over
+  // stale records. Re-read the whole bounded queue on each related event so all
+  // tabs converge on the same deterministic numbering.
   window.addEventListener('storage', (e) => {
-    if (e.key === 'wk:points') {
-      S.points = LS.getJSON('wk:points', []);
+    const key = LS.logicalKey(e.key);
+    if (e.key === null || key === 'wk:points' ||
+      (key && (key.startsWith(QUEUED_POINT_PREFIX) ||
+        key.startsWith(QUEUED_TOMBSTONE_PREFIX)))) {
+      S.points = loadQueuedPoints();
       if (!S.card) renderPins();   // don't yank the layer out from under an open editor
       updateSendBtn();
       updateHint();
-    } else if (e.key && S.verdictsKey && e.key === S.verdictsKey) {
-      S.verdicts = LS.getJSON(e.key, {});
+    } else if (key && S.verdictsKey && key === S.verdictsKey) {
+      S.verdicts = LS.getJSON(key, {});
       renderPins();
       if (S.reviewing) updateBar();
     }
@@ -1692,11 +2570,16 @@
   });
 
   let pollWarned = false;
-  async function pollNow() {
+  const pollNow = singleFlight(async () => {
     clearTimeout(pollT);
     try {
       const st = await api('/__wk/state?known=' + encodeURIComponent(S.rev));
       pollWarned = false;
+      if (st && BEFORE_PREFIX_PATTERN.test(st.beforePrefix || '')) {
+        BEFORE_PREFIX = st.beforePrefix;
+      } else if (st && Object.prototype.hasOwnProperty.call(st, 'beforePrefix')) {
+        BEFORE_PREFIX = '/__wk/before/invalid';
+      }
       if (st && (st.changed || S.phase === null)) handleState(st);
       else if (st && st.rev) S.rev = st.rev;
     } catch (e) {
@@ -1705,15 +2588,29 @@
         console.warn('[wk] state poll failed (server down?):', e.message);
       }
     }
-    schedulePoll();
-  }
+  }, schedulePoll);
 
   function handleState(st) {
     const prevPhase = S.phase;
+    const previousReviewIdentity = S.review
+      ? [S.review.batchId, S.review.round, S.review.beforeRef || ''].join(':')
+      : '';
     S.rev = st.rev || '';
     S.phase = st.phase || 'collecting';
     S.batch = st.batch || null;
     S.review = st.review || null;
+    S.points = loadQueuedPoints();
+    const nextReviewIdentity = S.review
+      ? [S.review.batchId, S.review.round, S.review.beforeRef || ''].join(':')
+      : '';
+    if (previousReviewIdentity !== nextReviewIdentity) {
+      invalidateSwapWork();
+      swapQueued = null;
+      restoreSwap();
+      resetSwapDocumentCache();
+      if (!IS_BEFORE) S.side = 'after';
+    }
+    if (S.mini && !reviewTargetIsCurrent(S.mini.target)) S.mini.cancel();
 
     // leaving verdicts_sent = the agent consumed our verdicts → the local
     // verdict cache for that batch is now history
@@ -1726,7 +2623,7 @@
     if (S.phase === 'collecting') {
       if (S.reviewing) {
         if (IS_BEFORE) {
-          // the round is over — this git-snapshot document is now orphaned (its
+          // the round is over - this git-snapshot document is now orphaned (its
           // URL 409s and it has no draw layer). Hand off to the live AFTER
           // document at the same spot; replace() so the dead URL leaves no history.
           SS.setJSON('wk:scroll', { path: logicalPath(), x: Math.round(scrollX), y: Math.round(scrollY) });
@@ -1734,19 +2631,12 @@
           return;
         }
         exitReview();
-        toast('Round complete — batch archived. Draw away!');
+        toast('Round complete - batch archived. Draw away!');
       }
       // anything still in wk:points while phase was non-collecting is queued
       // by construction (a send in collecting clears them) → flush it now
       if (prevPhase !== null && prevPhase !== 'collecting' && S.points.length) {
         sendPoints(true);
-      } else if (!S.points.length) {
-        // The batch is finished and nothing is queued behind it, so the numbering
-        // starts over at #1. The high-water mark only exists to stop a NEW point
-        // colliding with the pins of a batch still on screen; once the inbox is
-        // empty there is nothing to collide with, and carrying on at "#6" just
-        // reads as though the old round never closed.
-        LS.remove('wk:lastNum');
       }
     } else if (S.phase === 'reviewing' && S.review) {
       const key = S.review.batchId + ':' + S.review.round;
@@ -1760,12 +2650,12 @@
         return;
       }
       if (S.reviewing && S.reviewBatchId === S.review.batchId && S.reviewRound !== S.review.round) {
-        // next round landed while we watch — re-enter at point 1
+        // next round landed while we watch - re-enter at point 1
         enterReview({ auto: true });
-        toast('Round ' + S.review.round + ' ready — walking the redone points.');
+        toast('Round ' + S.review.round + ' ready - walking the redone points.');
       } else if (!S.reviewing && S.offeredReview !== key && S.bootReview !== S.review.batchId) {
         S.offeredReview = key;
-        toast(EMOJI + ' review ready — ' + (S.batch?.points?.length || '') + ' point(s) to walk', {
+        toast(EMOJI + ' review ready - ' + (S.batch?.points?.length || '') + ' point(s) to walk', {
           ttl: 0,
           action: { label: 'Start review', fn: () => enterReview({}) },
         });
@@ -1783,7 +2673,7 @@
       statusChip.textContent = EMOJI + ' agent is working on your batch…';
       statusChip.hidden = false;
     } else if (S.phase === 'verdicts_sent') {
-      statusChip.textContent = EMOJI + ' verdicts sent — agent is processing…';
+      statusChip.textContent = EMOJI + ' verdicts sent - agent is processing…';
       statusChip.hidden = false;
     } else {
       statusChip.hidden = true;
@@ -1800,6 +2690,7 @@
 
   function enterReview(opts) {
     if (!S.review || !S.batch) return;
+    if (S.mini) S.mini.cancel();
     S.reviewing = true;
     S.sentVerdicts = S.phase === 'verdicts_sent';
     S.reviewBatchId = S.review.batchId;
@@ -1840,12 +2731,16 @@
   }
 
   function exitReview() {
+    if (S.mini) S.mini.cancel();
     S.reviewing = false;
+    invalidateSwapWork();
+    swapQueued = null;
     S.reviewList = [];
     S.curPinEls = null;
     // leaving review = the page must go back to being itself: the live AFTER
     // DOM/stylesheets, and the page's own abc switcher visible again
     restoreSwap();
+    resetSwapDocumentCache();
     if (!IS_BEFORE) S.side = 'after';
     restorePageAbc();
     closeAutoOpenedReviewSurfaces();
@@ -1858,7 +2753,7 @@
   // Probe a cross-document target before navigating: the agent may have created,
   // renamed or deleted the page (or the round just ended), and a blind
   // location.href would strand the user on a bare 404/409 with no overlay. A GET
-  // (not HEAD — the server has no do_HEAD, so HEAD bypasses /__wk/before) tells us.
+  // (not HEAD - the server has no do_HEAD, so HEAD bypasses /__wk/before) tells us.
   function navGuarded(url, failMsg) {
     fetch(url, { cache: 'no-store' }).then((r) => {
       if (r.ok) location.href = url;
@@ -1871,6 +2766,10 @@
     if (!S.reviewList.length) return;
     idx = ((idx % S.reviewList.length) + S.reviewList.length) % S.reviewList.length;  // wrap
     const pt = S.reviewList[idx];
+    if (S.mini && (S.mini.target.batchId !== S.reviewBatchId ||
+      S.mini.target.round !== S.reviewRound || S.mini.target.pointId !== pt.id)) {
+      S.mini.cancel();
+    }
     S.cursor = idx;
     S.acceptArmed = null;
     SS.setJSON('wk:reviewCursor', { batchId: S.reviewBatchId, round: S.reviewRound, idx });
@@ -1878,7 +2777,7 @@
       // cross-page: full navigation; boot re-enters review at this point
       navGuarded(physicalPath(pt.page, S.side) +
         '?wk-review=' + encodeURIComponent(S.reviewBatchId) + '&wk-point=' + pt.number,
-        "This point's page no longer exists on this side — the agent may have removed or renamed it.");
+        "This point's page no longer exists on this side - the agent may have removed or renamed it.");
       return;
     }
     restoreReviewSurfaces(pt);
@@ -1891,10 +2790,10 @@
       // instant, not smooth: the flash should land where the eye already is, and
       // smooth scrolls never finish in a backgrounded tab (the jump idiom the
       // abc widget's RELOAD mode uses is instant for the same reason). A
-      // viewport-anchored (fixed/sticky) point is on screen at any scroll — skip.
+      // viewport-anchored (fixed/sticky) point is on screen at any scroll - skip.
       window.scrollTo({ top: Math.max(0, box.y + box.h / 2 - innerHeight / 2), behavior: 'instant' });
     }
-    // flash twice — the CSS animation runs 2 iterations; restart it
+    // flash twice - the CSS animation runs 2 iterations; restart it
     if (S.curPinEls) {
       for (const n of [S.curPinEls.rect, S.curPinEls.pin]) {
         n.classList.remove('wk-flash');
@@ -1907,7 +2806,7 @@
   // ===== BEFORE|AFTER: in-place swap =========================================
   // A full navigation to /__wk/before/<page> is correct but brutal on a long
   // scroll story: seconds of reload, the scroll story replays, the eye loses the
-  // spot. So we swap like an A/B variant instead — fetch the before document
+  // spot. So we swap like an A/B variant instead - fetch the before document
   // once, lift out the container the current point lives in, and put it in the
   // live DOM, keeping the live node in memory for the way back. Two things make
   // this useful: the reveal/doodle machinery is nudged so the swapped subtree
@@ -1917,20 +2816,67 @@
   const SWAP = {
     doc: null,      // parsed before-document (per logical page)
     docPath: '',
+    docKey: '',     // beforeRef plus logical page
     sel: '',        // selector of the swapped container
     live: null,     // the AFTER node, detached, waiting to go back
     placed: null,   // the BEFORE node currently in the document
   };
   let swapBusy = false, swapQueued = null;
+  let swapGeneration = 0;
 
-  async function beforeDocument() {
-    const page = logicalPath();
-    if (SWAP.doc && SWAP.docPath === page) return SWAP.doc;
-    const r = await fetch(BEFORE_PREFIX + page, { cache: 'no-store' });
+  function newSwapContext(pt) {
+    return {
+      generation: ++swapGeneration,
+      batchId: S.reviewBatchId,
+      round: S.reviewRound,
+      pointId: pt && pt.id,
+      beforeRef: S.review?.beforeRef || '',
+      page: logicalPath(),
+      scope: S.compareScope,
+    };
+  }
+
+  function invalidateSwapWork() {
+    swapGeneration += 1;
+  }
+
+  function swapContextIsCurrent(context) {
+    const pt = currentPoint();
+    return !!context && context.generation === swapGeneration && S.reviewing &&
+      (S.phase === 'reviewing' || S.phase === 'verdicts_sent') &&
+      S.reviewBatchId === context.batchId && S.reviewRound === context.round &&
+      S.batch?.batchId === context.batchId && S.batch?.round === context.round &&
+      S.review?.batchId === context.batchId &&
+      S.review?.round === context.round && S.review?.beforeRef === context.beforeRef &&
+      logicalPath() === context.page && S.compareScope === context.scope && pt?.id === context.pointId;
+  }
+
+  function requireCurrentSwap(context) {
+    if (swapContextIsCurrent(context)) return;
+    const error = new Error('comparison target changed');
+    error.wkStaleSwap = true;
+    throw error;
+  }
+
+  function resetSwapDocumentCache() {
+    SWAP.doc = null;
+    SWAP.docPath = '';
+    SWAP.docKey = '';
+  }
+
+  async function beforeDocument(context) {
+    requireCurrentSwap(context);
+    const key = context.beforeRef + '\n' + context.page;
+    if (SWAP.doc && SWAP.docKey === key) return SWAP.doc;
+    const r = await fetch(BEFORE_PREFIX + context.page, { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status === 409 ? 'round just ended' : 'HTTP ' + r.status);
-    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    const html = await r.text();
+    requireCurrentSwap(context);
+    const doc = new DOMParser().parseFromString(asTrustedHTML(html), 'text/html');
+    requireCurrentSwap(context);
     SWAP.doc = doc;
-    SWAP.docPath = page;
+    SWAP.docPath = context.page;
+    SWAP.docKey = key;
     return doc;
   }
 
@@ -1964,7 +2910,7 @@
   // Reveal machinery is class-driven here (.is-in / .is-active land once, from an
   // IntersectionObserver that already fired): a freshly parsed before-node would
   // arrive without them and render as an invisible/unstarted scene. Copy state
-  // classes across, stopping at the first structural divergence — below that the
+  // classes across, stopping at the first structural divergence - below that the
   // trees aren't comparable and positional matching would paint the wrong nodes.
   const SWAP_STATE_CLASS = /^(?:is-|has-|js-)|^(?:in|active|visible|shown|open|current|played|done)$/;
   function carryState(from, to) {
@@ -2016,9 +2962,10 @@
     for (let i = 0; i < sourceKids.length; i++) copyComputedTree(sourceKids[i], targetKids[i]);
   }
 
-  async function styledBeforeNode(sel, fallback) {
+  async function styledBeforeNode(sel, fallback, context) {
     const frame = document.createElement('iframe');
     frame.setAttribute('aria-hidden', 'true');
+    frame.setAttribute('sandbox', 'allow-same-origin');
     frame.style.cssText = 'position:fixed;left:-100000px;top:0;width:' + innerWidth +
       'px;height:' + innerHeight + 'px;visibility:hidden;pointer-events:none;border:0;';
     frame.src = BEFORE_PREFIX + logicalPath() + '?wk-style-probe=' + Date.now();
@@ -2029,10 +2976,12 @@
         frame.addEventListener('load', () => { clearTimeout(timer); resolve(); }, { once: true });
         frame.addEventListener('error', () => { clearTimeout(timer); reject(new Error('before style probe failed')); }, { once: true });
       });
+      requireCurrentSwap(context);
       let source = null;
       try { source = frame.contentDocument.querySelector(sel); } catch (e) { /* fallback below */ }
       const node = document.importNode(source || fallback, true);
       if (source) copyComputedTree(source, node);
+      requireCurrentSwap(context);
       return node;
     } finally {
       frame.remove();
@@ -2042,10 +2991,10 @@
   // Keep the eye on the thing being compared. A swap changes the height of the
   // container (and on a scroll-driven page the synthetic scroll/resize above can
   // make the host's own story JS re-snap), so without this the page can end up
-  // thousands of px away from the point — toggling BEFORE|AFTER would show you
+  // thousands of px away from the point - toggling BEFORE|AFTER would show you
   // somewhere else entirely. Capture where the anchor sits in the viewport, then
   // put it back there afterwards. Returns a restore fn; call it AFTER the paint.
-  function anchorViewport(pt) {
+  function anchorViewport(pt, context) {
     const sels = [];
     for (const c of ((pt && pt.context) || []).slice(0, 4)) if (c.selector) sels.push(c.selector);
     if (SWAP.sel) sels.push(SWAP.sel);
@@ -2058,6 +3007,7 @@
     return () => {
       if (sel == null || top == null) return;
       const settle = () => {
+        if (context && !swapContextIsCurrent(context)) return;
         let el = null;
         try { el = document.querySelector(sel); } catch (e) { return; }
         if (!el) return;
@@ -2070,12 +3020,16 @@
     };
   }
 
-  async function applySwap(pt) {
-    const doc = await beforeDocument();
+  async function applySwap(pt, context) {
+    requireCurrentSwap(context);
+    const doc = await beforeDocument(context);
+    requireCurrentSwap(context);
     const t = resolveSwapTarget(pt, doc);
     if (!t) throw new Error('no container shared by both versions');
-    const reanchor = anchorViewport(pt);
-    const node = await styledBeforeNode(t.sel, t.incoming);
+    const reanchor = anchorViewport(pt, context);
+    const node = await styledBeforeNode(t.sel, t.incoming, context);
+    requireCurrentSwap(context);
+    if (!t.live.isConnected) throw new Error('live comparison container changed');
     carryState(t.live, node);
     t.live.replaceWith(node);
     SWAP.sel = t.sel;
@@ -2121,24 +3075,39 @@
   }
 
   function setSide(side) {
+    if (side !== S.side && S.mini) S.mini.cancel();
     if (S.compareScope === 'site') {
       if (side !== S.side) navSide(side);
       return;
     }
     // A document actually SERVED from /__wk/before is a git snapshot with no
-    // live tree to restore — only a navigation can leave it.
+    // live tree to restore - only a navigation can leave it.
     if (IS_BEFORE) { if (side !== S.side) navSide(side); return; }
     // The first BEFORE costs a fetch; a click landing during it must not be
-    // swallowed (the button would just look dead) — remember it and settle there.
-    if (swapBusy) { swapQueued = side; return; }
+    // swallowed (the button would just look dead) - remember it and settle there.
+    if (swapBusy) {
+      invalidateSwapWork();
+      swapQueued = { kind: 'side', side };
+      return;
+    }
     if (side === S.side) return;
-    if (side === 'after') { restoreSwap(); markSide('after'); return; }
+    if (side === 'after') {
+      invalidateSwapWork();
+      restoreSwap();
+      markSide('after');
+      return;
+    }
     const pt = currentPoint();
     if (!pt) return navSide('before');
+    const context = newSwapContext(pt);
     swapBusy = true;
-    applySwap(pt).then(() => { markSide('before'); }).catch((e) => {
+    applySwap(pt, context).then(() => {
+      requireCurrentSwap(context);
+      markSide('before');
+    }).catch((e) => {
+      if (e.wkStaleSwap) return;
       restoreSwap();
-      toast('In-place BEFORE not possible here (' + e.message + ') — loading the snapshot page.',
+      toast('In-place BEFORE not possible here (' + e.message + ') - loading the snapshot page.',
         { kind: 'warn' });
       navSide('before');
     }).finally(() => { swapBusy = false; drainSwapQueue(); });
@@ -2146,22 +3115,34 @@
   function drainSwapQueue() {
     const q = swapQueued;
     swapQueued = null;
-    if (q && q !== S.side) setSide(q);
+    if (!q) return;
+    if (q.kind === 'resync') {
+      if (S.side === 'before' && !IS_BEFORE) resyncSwap(currentPoint());
+      return;
+    }
+    if (q.side !== S.side) setSide(q.side);
   }
 
   // Moving to another point while BEFORE is showing: the swapped container is
   // per-point, so re-resolve it. If the new point has no shared container we are
-  // honestly on AFTER for it — say so rather than mislabel the bar.
+  // honestly on AFTER for it - say so rather than mislabel the bar.
   function resyncSwap(pt) {
-    if (swapBusy || !SWAP.placed) return;
+    if (swapBusy) {
+      invalidateSwapWork();
+      swapQueued = { kind: 'resync' };
+      return;
+    }
+    if (!SWAP.placed) return;
     const t = resolveSwapTarget(pt, SWAP.doc);
     if (t && t.sel === SWAP.sel) return;
+    const context = newSwapContext(pt);
     swapBusy = true;
     restoreSwap();
-    applySwap(pt).catch(() => {
+    applySwap(pt, context).catch((error) => {
+      if (error.wkStaleSwap) return;
       restoreSwap();
       markSide('after');
-      toast('No in-place BEFORE for this point — showing AFTER.', { kind: 'warn' });
+      toast('No in-place BEFORE for this point - showing AFTER.', { kind: 'warn' });
     }).finally(() => { swapBusy = false; drainSwapQueue(); });
   }
 
@@ -2174,10 +3155,14 @@
     B.prev.type = B.next.type = 'button';
     B.prev.title = 'previous point (←)';
     B.next.title = 'next point (→)';
+    B.prev.setAttribute('aria-label', 'Previous review point');
+    B.next.setAttribute('aria-label', 'Next review point');
     B.counter = el('span', 'wk-bar-count');
     B.dots = el('span', 'wk-dots');
 
     B.seg = el('div', 'wk-seg wk-side');
+    B.seg.setAttribute('role', 'group');
+    B.seg.setAttribute('aria-label', 'Choose before or after view');
     B.before = el('button', 'wk-seg-btn', 'BEFORE');
     B.after = el('button', 'wk-seg-btn', 'AFTER');
     B.before.type = B.after.type = 'button';
@@ -2185,6 +3170,7 @@
     B.scopeWrap = el('div', 'wk-scope-wrap');
     B.scope = el('button', 'wk-scope-btn', '▾');
     B.scope.type = 'button';
+    B.scope.setAttribute('aria-label', 'Choose comparison scope');
     B.scope.setAttribute('aria-haspopup', 'menu');
     B.scopeMenu = el('div', 'wk-scope-menu');
     B.scopeMenu.hidden = true;
@@ -2201,6 +3187,7 @@
     B.abcChip = el('button', 'wk-abc-chip');
     B.abcChip.type = 'button';
     B.abcChip.hidden = true;
+    B.abcChip.setAttribute('aria-label', 'Cycle comparison variant');
 
     B.note = el('span', 'wk-bar-note');
     B.noteText = el('span', 'wk-bar-note-text');
@@ -2253,7 +3240,7 @@
     B.dismiss.addEventListener('click', () => recordVerdict({ verdict: 'delete' }));
     B.redo.addEventListener('click', openMini);
     B.sendv.addEventListener('click', sendVerdicts);
-    // the chip's title promises "click to cycle" — honour it by driving the abc
+    // the chip's title promises "click to cycle" - honour it by driving the abc
     // widget's own switch button (reuses its handler: RELOAD-mode reloads AND the
     // abc:change dispatch that registers the toggle so Accept isn't gated).
     B.abcChip.addEventListener('click', () => {
@@ -2266,6 +3253,8 @@
   function setCompareScope(scope) {
     if (scope !== 'point' && scope !== 'site') return;
     if (scope === S.compareScope) { updateBar(); return; }
+    invalidateSwapWork();
+    swapQueued = null;
     S.compareScope = scope;
     LS.set('wk:compareScope', scope);
     updateBar();
@@ -2279,6 +3268,15 @@
   }
 
   function currentPoint() { return S.reviewList[S.cursor] || null; }
+
+  function reviewTargetIsCurrent(target) {
+    if (!target || !S.reviewing || S.phase !== 'reviewing' || S.sentVerdicts) return false;
+    if (target.batchId !== S.reviewBatchId || target.round !== S.reviewRound) return false;
+    if (!S.review || target.batchId !== S.review.batchId || target.round !== S.review.round) return false;
+    const pt = currentPoint();
+    if (!pt || pt.id !== target.pointId) return false;
+    return ((S.batch && S.batch.points) || []).some((point) => point.id === target.pointId);
+  }
 
   let autoOpenedReviewSurfaces = [];
   function closeAutoOpenedReviewSurfaces() {
@@ -2330,7 +3328,7 @@
   function paintAbcChip(letter, letters) {
     B.abcChip.textContent = '';
     B.abcChip.append(el('span', 'wk-chip-flask', '⚗'), el('span', 'wk-chip-letter', String(letter)));
-    // the run only earns its width while it's short — /ABC allows up to 10
+    // the run only earns its width while it's short - /ABC allows up to 10
     // variants, and ten pips would push the review bar into a second row
     if (letters && letters.length > 1 && letters.length <= 5) {
       const run = el('span', 'wk-chip-run');
@@ -2357,13 +3355,18 @@
       const dv = S.verdicts[p.id];
       const d = el('button', 'wk-dot-i' + (dv ? ' v-' + dv.verdict : '') + (i === S.cursor ? ' cur' : ''));
       d.type = 'button';
-      d.title = 'point ' + p.number + (dv ? ' — ' + dv.verdict : '');
+      d.title = 'point ' + p.number + (dv ? ' - ' + dv.verdict : '');
+      d.setAttribute('aria-label', 'Review point ' + p.number +
+        (dv ? ', marked ' + dv.verdict : ', not yet decided'));
+      if (i === S.cursor) d.setAttribute('aria-current', 'true');
       d.addEventListener('click', () => jumpTo(i));
       B.dots.appendChild(d);
     });
 
     B.before.classList.toggle('active', S.side === 'before');
     B.after.classList.toggle('active', S.side === 'after');
+    B.before.setAttribute('aria-pressed', String(S.side === 'before'));
+    B.after.setAttribute('aria-pressed', String(S.side === 'after'));
     B.scope.title = 'BEFORE/AFTER Comparison scope';
     B.scope.setAttribute('aria-label', B.scope.title);
     B.scope.setAttribute('aria-expanded', String(!B.scopeMenu.hidden));
@@ -2375,29 +3378,35 @@
     B.scopeSite.setAttribute('aria-checked', String(S.compareScope === 'site'));
 
     // abc chip: live current letter, bound to abc:change. This is the ONLY
-    // switcher the user should see for the point under review — hidePageAbc
+    // switcher the user should see for the point under review - hidePageAbc
     // parks the page's own duplicate button for the same scope.
     const isAbc = !!(h && h.abc);
     B.abcChip.hidden = !isAbc;
+    B.abcChip.disabled = false;
+    B.abcChip.setAttribute('aria-disabled', 'false');
     hidePageAbc(isAbc && !IS_BEFORE ? h.abc.scopeId : null);
     let abcBlocked = false;
     if (isAbc) {
       const inst = currentAbcInst();
       if (IS_BEFORE) {
-        paintAbcChip('—', null);
+        paintAbcChip('-', null);
+        B.abcChip.disabled = true;
+        B.abcChip.setAttribute('aria-disabled', 'true');
         B.abcChip.classList.add('disabled');
         B.abcChip.classList.remove('error');
-        B.abcChip.title = 'Variants live in the AFTER view — toggle AFTER to compare A/B/C';
+        B.abcChip.title = 'Variants live in the AFTER view - toggle AFTER to compare A/B/C';
       } else if (!inst) {
         paintAbcChip('?', null);
+        B.abcChip.disabled = true;
+        B.abcChip.setAttribute('aria-disabled', 'true');
         B.abcChip.classList.add('error');
         B.abcChip.classList.remove('disabled');
-        B.abcChip.title = 'abc scope "' + h.abc.scopeId + '" not found on this page — accept blocked';
+        B.abcChip.title = 'abc scope "' + h.abc.scopeId + '" not found on this page - accept blocked';
         abcBlocked = true;
       } else {
         paintAbcChip(inst.current, inst.letters);
         B.abcChip.classList.remove('disabled', 'error');
-        B.abcChip.title = 'variant ' + inst.current + ' of ' + inst.letters + ' — click to cycle';
+        B.abcChip.title = 'variant ' + inst.current + ' of ' + inst.letters + ' - click to cycle';
       }
     }
 
@@ -2417,13 +3426,15 @@
     B.dismiss.hidden = !skipped || S.sentVerdicts;
     B.redo.hidden = S.sentVerdicts;
     B.accept.disabled = abcBlocked;
-    B.accept.title = abcBlocked ? 'The abc switcher for this point is missing — cannot record a chosen letter'
+    B.accept.title = abcBlocked ? 'The abc switcher for this point is missing - cannot record a chosen letter'
       : (isAbc ? 'Keep the variant currently shown' : 'Keep this change');
     B.accept.classList.toggle('armed', S.acceptArmed === pt.id);
     B.accept.textContent = S.acceptArmed === pt.id ? 'Accept ✓?' : 'Accept';
 
     for (const [btn, name] of [[B.accept, 'accept'], [B.redo, 'redo'], [B.del, 'delete'], [B.dismiss, 'delete']]) {
-      btn.classList.toggle('active', !!v && v.verdict === name);
+      const selected = !!v && v.verdict === name;
+      btn.classList.toggle('active', selected);
+      btn.setAttribute('aria-pressed', String(selected));
     }
 
     const all = total > 0 && done === total;
@@ -2442,10 +3453,10 @@
       const inst = currentAbcInst();
       if (!inst) return;   // button disabled anyway
       if (!S.abcToggled.has(h.abc.scopeId) && S.acceptArmed !== pt.id) {
-        // the user never flipped through the variants — one warning, then allow
+        // the user never flipped through the variants - one warning, then allow
         S.acceptArmed = pt.id;
         toast('You haven’t tried the other variants (' + inst.letters +
-          ') — click Accept again to keep "' + inst.current + '".', { kind: 'warn' });
+          ') - click Accept again to keep "' + inst.current + '".', { kind: 'warn' });
         updateBar();
         return;
       }
@@ -2454,15 +3465,21 @@
     recordVerdict(entry);
   }
 
-  function recordVerdict(entry) {
+  function recordVerdict(entry, target) {
+    if (target && !reviewTargetIsCurrent(target)) return false;
     const pt = currentPoint();
-    if (!pt || S.sentVerdicts) return;
+    if (!pt || !S.reviewing || S.phase !== 'reviewing' || S.sentVerdicts) return false;
     const existing = S.verdicts[pt.id];
+    let next = entry;
     if (existing && existing.verdict === entry.verdict && entry.verdict !== 'redo' &&
       existing.chosenLetter === entry.chosenLetter) {
+      next = null;
       delete S.verdicts[pt.id];   // click the active verdict again = clear it
     } else {
       S.verdicts[pt.id] = entry;
+    }
+    if (existing?.redoVoiceNote?.path !== next?.redoVoiceNote?.path) {
+      deleteVoiceNote(existing?.redoVoiceNote);
     }
     S.acceptArmed = null;
     LS.setJSON(S.verdictsKey, S.verdicts);
@@ -2472,9 +3489,10 @@
     if (S.verdicts[pt.id]) {
       for (let k = 1; k <= S.reviewList.length; k++) {
         const i = (S.cursor + k) % S.reviewList.length;
-        if (!S.verdicts[S.reviewList[i].id]) { jumpTo(i); return; }
+        if (!S.verdicts[S.reviewList[i].id]) { jumpTo(i); return true; }
       }
     }
+    return true;
   }
 
   // --- redo mini-input --------------------------------------------------------
@@ -2482,19 +3500,29 @@
     if (S.mini || S.sentVerdicts) return;
     const pt = currentPoint();
     if (!pt) return;
+    const target = { batchId: S.reviewBatchId, round: S.reviewRound, pointId: pt.id };
+    if (!reviewTargetIsCurrent(target)) return;
     const existing = S.verdicts[pt.id];
     const node = el('div', 'wk-mini');
-    const label = el('div', 'wk-mini-label', 'Redo point ' + pt.number + ' — what’s still wrong?');
+    const label = el('div', 'wk-mini-label', 'Redo point ' + pt.number + ' - what’s still wrong?');
+    node.setAttribute('role', 'dialog');
+    label.id = 'wk-redo-title-' + rand4();
+    node.setAttribute('aria-labelledby', label.id);
     const row = el('div', 'wk-row');
     const ta = el('textarea', 'wk-ta wk-mini-ta');
+    ta.setAttribute('aria-label', 'Redo instructions for point ' + pt.number);
     ta.placeholder = 'e.g. closer, but make it half the size…';
     ta.value = (existing && existing.redoText) || '';
     const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
     let redoVoiceNote = originalRedoVoiceNote;
+    let miniOwner = null;
+    let saveBusy = false;
+    let closed = false;
     const micBtn = el('button', 'wk-mic');
     micBtn.type = 'button';
     micBtn.title = MIC_TITLE;
-    micBtn.innerHTML = micGlyph;
+    micBtn.setAttribute('aria-label', MIC_ARIA_LABEL);
+    micBtn.appendChild(microphoneIcon());
     const langSelect = speechLanguageSelect();
     const cancel = el('button', 'wk-btn ghost', 'Cancel');
     const save = el('button', 'wk-btn primary', 'Redo it');
@@ -2510,27 +3538,66 @@
         redoVoiceNote = note;
       }, null)
       : makeMic(ta, micBtn, langSelect, null);
-    function close() { mic.stop(); node.remove(); S.mini = null; }
+    function close(discardNew) {
+      if (closed) return;
+      closed = true;
+      mic.stop();
+      if (discardNew && redoVoiceNote?.path !== originalRedoVoiceNote?.path) {
+        deleteVoiceNote(redoVoiceNote);
+      }
+      node.remove();
+      if (S.mini === miniOwner) S.mini = null;
+    }
     function cancelMini() {
-      if (redoVoiceNote && redoVoiceNote.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
-      close();
+      close(true);
     }
     cancel.addEventListener('click', cancelMini);
     save.addEventListener('click', async () => {
-      if (mic.on && mic.finishAndWait) await mic.finishAndWait();
-      else if (mic.uploading && mic.finishAndWait) await mic.finishAndWait();
-      const txt = ta.value.trim();
-      if (!txt && !redoVoiceNote) { ta.focus(); return; }
-      if (originalRedoVoiceNote && originalRedoVoiceNote.path !== redoVoiceNote?.path) deleteVoiceNote(originalRedoVoiceNote);
-      close();
-      recordVerdict({ verdict: 'redo', redoText: txt, redoVoiceNote });
+      if (saveBusy || !miniOwner || S.mini !== miniOwner) return;
+      if (!reviewTargetIsCurrent(target)) {
+        cancelMini();
+        toast('That review target changed. Open Redo again on the current point.', { kind: 'warn' });
+        return;
+      }
+      if (mic.starting) {
+        toast('Wait for microphone permission before saving this redo.', { kind: 'warn' });
+        return;
+      }
+      saveBusy = true;
+      save.disabled = true;
+      try {
+        let voiceReady = true;
+        if (mic.on && mic.finishAndWait) voiceReady = await mic.finishAndWait();
+        else if ((mic.stopping || mic.uploading) && mic.finishAndWait) {
+          voiceReady = await mic.finishAndWait();
+        }
+        if (voiceReady === false || S.mini !== miniOwner || !node.isConnected) return;
+        if (!reviewTargetIsCurrent(target)) {
+          cancelMini();
+          toast('That review target changed. Open Redo again on the current point.', { kind: 'warn' });
+          return;
+        }
+        const txt = ta.value.trim();
+        if (!txt && !redoVoiceNote) { ta.focus(); return; }
+        close(false);
+        const saved = recordVerdict({ verdict: 'redo', redoText: txt, redoVoiceNote }, target);
+        if (!saved && redoVoiceNote?.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
+      } finally {
+        saveBusy = false;
+        if (S.mini === miniOwner && node.isConnected) save.disabled = false;
+      }
     });
-    S.mini = { node, ta, micBtn, close: cancelMini };
+    miniOwner = { node, ta, micBtn, target, close: cancelMini, cancel: cancelMini };
+    S.mini = miniOwner;
     ta.focus();
   }
 
   // --- send verdicts ----------------------------------------------------------
   async function sendVerdicts() {
+    if (S.mini) {
+      toast('Finish or cancel the open Redo note before sending verdicts.', { kind: 'warn' });
+      return;
+    }
     const verdicts = S.reviewList
       .filter((p) => S.verdicts[p.id])
       .map((p) => ({ pointId: p.id, ...S.verdicts[p.id] }));
@@ -2547,12 +3614,12 @@
     try {
       await api('/__wk/verdicts', body);
       S.sentVerdicts = true;
-      toast('Verdicts sent — the ' + EMOJI + ' agent takes it from here.');
+      toast('Verdicts sent - the ' + EMOJI + ' agent takes it from here.');
       updateBar();
       pollNow();
     } catch (e) {
       if (e.status === 409) {
-        toast('The round changed underneath you — refreshing state.', { kind: 'error' });
+        toast('The round changed underneath you - refreshing state.', { kind: 'error' });
         pollNow();
       } else {
         toast('Sending verdicts failed: ' + e.message, { kind: 'error' });
@@ -2567,18 +3634,20 @@
   // handling; composedPath()[0] sees through shadow retargeting.
   window.addEventListener('keydown', (e) => {
     const t = e.composedPath ? e.composedPath()[0] : e.target;
-    // t can be window/document for programmatic dispatch — contains() would throw
+    // t can be window/document for programmatic dispatch - contains() would throw
     const isNode = t instanceof Node;
-    const editable = isNode && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    const editable = isNode && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
+      t.tagName === 'SELECT' || t.isContentEditable);
+    if (e.repeat) return;
 
-    // THE toggle — deliberately the only one. Matched by CODE so a Hebrew (or
+    // THE toggle - deliberately the only one. Matched by CODE so a Hebrew (or
     // any) layout can't move it. Editable fields always win, including Webkit's
     // own feedback textarea: C must remain a normal typed character there.
     if (e.code === HOTKEY_TOGGLE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       if (editable) return;
       e.preventDefault();
       e.stopPropagation();
-      // With a review waiting, the key walks into it rather than just unhiding —
+      // With a review waiting, the key walks into it rather than just unhiding -
       // this was the corner button's job before it was removed, and the offer
       // toast is dismissable, so without this a dismissed toast would strand you.
       if (S.phase === 'reviewing' && !S.reviewing && S.review && S.batch) enterReview({});
@@ -2595,7 +3664,8 @@
       if (liveMic && liveMic.on) {
         e.preventDefault();
         e.stopPropagation();
-        liveMic.stop();
+        if (liveMic.finishAndWait) liveMic.finishAndWait();
+        else liveMic.stop();
         return;
       }
       if (S.mode !== 'feedback') return;     // overlay hidden: don't dictate into an invisible card
@@ -2611,9 +3681,25 @@
     // toggle key is deliberately the single way to switch modes now.
     if (e.key === 'Escape') {
       if (S.mode === 'feedback') {
-        if (S.drag) { S.drag.cancel && S.drag.cancel(); S.drag = null; e.stopPropagation(); return; }
-        if (S.mini) { S.mini.close(); e.stopPropagation(); return; }
-        if (S.card) { S.card.cancel(); e.stopPropagation(); return; }
+        if (S.drag) {
+          S.drag.cancel && S.drag.cancel();
+          S.drag = null;
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        if (S.mini) {
+          S.mini.close();
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        if (S.card) {
+          S.card.cancel();
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
       }
       return;
     }
@@ -2638,12 +3724,12 @@
   async function boot() {
     await installCss();
 
-    // BEFORE|AFTER navigation left us a scroll position — restore it exactly
+    // BEFORE|AFTER navigation left us a scroll position - restore it exactly
     const sc = SS.getJSON('wk:scroll', null);
     if (sc && sc.path === logicalPath()) {
       SS.remove('wk:scroll');
       window.scrollTo(sc.x, sc.y);
-      // some pages relayout late (fonts, images) — re-assert once
+      // some pages relayout late (fonts, images) - re-assert once
       setTimeout(() => window.scrollTo(sc.x, sc.y), 120);
     }
 
@@ -2677,7 +3763,7 @@
         }
       } else if (IS_BEFORE) {
         // serve-then-archive race: the BEFORE snapshot loaded but the round is
-        // already gone — hand off to the live AFTER document at the same spot
+        // already gone - hand off to the live AFTER document at the same spot
         // rather than leaving the user on an orphaned git-snapshot page.
         SS.setJSON('wk:scroll', { path: logicalPath(), x: Math.round(scrollX), y: Math.round(scrollY) });
         location.replace(physicalPath(logicalPath(), 'after'));
@@ -2693,4 +3779,6 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
-})();
+})().catch((error) => {
+  console.error('[wk] overlay failed to initialize:', error);
+});

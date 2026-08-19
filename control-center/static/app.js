@@ -1,10 +1,43 @@
-const COLORS = [
-  { slug: "blue", emoji: "🔵", hex: "#3294e2" },
-  { slug: "red", emoji: "🔴", hex: "#ed5d55" },
-  { slug: "green", emoji: "🟢", hex: "#44aa71" },
-  { slug: "orange", emoji: "🟠", hex: "#ee9c3a" },
-  { slug: "purple", emoji: "🟣", hex: "#9b6bd6" },
-];
+const COLOR_ACCENT_NAMES = new Set(["blue", "red", "green", "orange", "purple"]);
+const MAX_PROVIDER_PROMPT_BYTES = 16 * 1024;
+const MAX_PROJECT_BRIEF_CHARS = 20000;
+const MAX_SEED_NOTES_CHARS = 12000;
+const MAX_CHAT_ATTACHMENTS = 20;
+const MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENTS_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_PROJECT_ASSETS = 500;
+const MAX_PROJECT_ASSET_BYTES = 15 * 1024 * 1024;
+const MAX_PROJECT_ASSETS_TOTAL_BYTES = 20 * 1024 * 1024;
+const MAX_PROJECT_DROP_ENTRIES = 2000;
+const MAX_PROJECT_DROP_DEPTH = 32;
+const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const AUTH_STORAGE_KEY = "awesome-webkit-control-token";
+
+function safeLocalStorageGet(key) {
+  try { return window.localStorage.getItem(key); } catch (_error) { return null; }
+}
+
+function safeLocalStorageSet(key, value) {
+  try { window.localStorage.setItem(key, value); } catch (_error) {}
+}
+
+function controlCenterToken() {
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const launched = fragment.get("token") || "";
+  if (AUTH_TOKEN_PATTERN.test(launched)) {
+    try { window.sessionStorage.setItem(AUTH_STORAGE_KEY, launched); } catch (_error) {}
+    window.history.replaceState(null, "", window.location.pathname);
+    return launched;
+  }
+  try {
+    const stored = window.sessionStorage.getItem(AUTH_STORAGE_KEY) || "";
+    return AUTH_TOKEN_PATTERN.test(stored) ? stored : "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+const CONTROL_CENTER_TOKEN = controlCenterToken();
 
 const DEFAULT_SETTINGS = {
   dictationMode: "speech",
@@ -27,27 +60,57 @@ const state = {
   system: {},
   settings: { ...DEFAULT_SETTINGS },
   selectedProjectId: null,
+  homeSelected: false,
   chatSessionId: null,
   chatCursor: 0,
   projectMode: "create",
   confirmCallback: null,
   pendingAttachments: [],
+  chatAttachmentReadsPending: 0,
+  chatSendInFlight: false,
   projectsSignature: "",
   createStep: 1,
   onboardingAssets: [],
   seedSessionId: null,
+  seedProjectId: null,
   seedCurrentId: null,
   seedSelected: new Set(),
   seedSignature: "",
   seedData: null,
+  seedSelectionInFlight: false,
+  chatGeneration: 0,
+  chatReasoningRequest: 0,
+  chatReturnFocus: null,
+  seedGeneration: 0,
+  projectGeneration: 0,
+  projectSaveInFlight: false,
+  projectAssetOperationsPending: 0,
+  confirmGeneration: 0,
+  confirmBusy: false,
+  settingsGeneration: 0,
+  settingsSaveInFlight: false,
 };
 let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
 let hotkeyCapture = null;
+let projectsRefreshPromise = null;
+let projectsRefreshQueued = false;
+let eventsPollPromise = null;
+let eventsPollQueued = false;
+let seedPollPromise = null;
+let seedPollQueued = false;
 
 const $ = (selector) => document.querySelector(selector);
 
 async function api(path, options = {}) {
-  const request = { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } };
+  if (!CONTROL_CENTER_TOKEN) throw new Error("Open the Control Center with its launcher.");
+  const request = {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+      "X-WKCC-Token": CONTROL_CENTER_TOKEN,
+    },
+  };
   if (request.body && typeof request.body !== "string") request.body = JSON.stringify(request.body);
   const response = await fetch(path, request);
   const data = await response.json().catch(() => ({}));
@@ -63,10 +126,40 @@ function toast(message) {
   toast.timer = setTimeout(() => { node.hidden = true; }, 3800);
 }
 
+function reservePreviewWindow(name) {
+  const tab = window.open("about:blank", name);
+  if (tab) tab.opener = null;
+  return tab;
+}
+
+function navigatePreviewWindow(tab, url) {
+  if (!tab) return false;
+  tab.location.replace(url);
+  tab.focus();
+  return true;
+}
+
 function setBusy(button, busy, label) {
-  if (!button.dataset.label) button.dataset.label = button.textContent;
   button.disabled = busy;
-  button.textContent = busy ? label : button.dataset.label;
+  button.setAttribute("aria-busy", String(busy));
+  const existingContent = button.querySelector(":scope > .busy-preserved-content");
+  const existingLabel = button.querySelector(":scope > .busy-status-label");
+  if (busy && !existingContent) {
+    const preserved = document.createElement("span");
+    preserved.className = "busy-preserved-content";
+    preserved.hidden = true;
+    while (button.firstChild) preserved.appendChild(button.firstChild);
+    const status = document.createElement("span");
+    status.className = "busy-status-label";
+    status.textContent = label;
+    button.append(preserved, status);
+  } else if (busy && existingLabel) {
+    existingLabel.textContent = label;
+  } else if (!busy && existingContent) {
+    const children = [...existingContent.childNodes];
+    existingLabel?.remove();
+    existingContent.replaceWith(...children);
+  }
 }
 
 function reasoningLevels(provider) {
@@ -95,6 +188,8 @@ function renderShortcutGuide() {
   $("#guideDictateKey").textContent = hotkeyLabel(state.settings.dictateHotkey || "KeyV");
   const optionAction = state.settings.interactionMode === "draw-default" ? "Click" : "Draw";
   $("#guideOptionAction").textContent = optionAction;
+  const optionLabel = state.system.platform === "darwin" ? "⌥" : "Alt";
+  document.querySelectorAll(".option-key").forEach((node) => { node.textContent = optionLabel; });
 }
 
 function renderHotkeySettings() {
@@ -130,7 +225,7 @@ function captureHotkey(event) {
     return;
   }
   if (!event.code || event.code === "Unidentified" || RESERVED_HOTKEYS.has(event.code)) {
-    $("#settingsError").textContent = "Choose a regular key—not a modifier or Escape.";
+    $("#settingsError").textContent = "Choose a regular key, not a modifier or Escape.";
     return;
   }
   const otherSetting = hotkeyCapture === "toggleHotkey" ? "dictateHotkey" : "toggleHotkey";
@@ -148,14 +243,23 @@ function renderStatus() {
   const target = $("#systemStatus");
   target.replaceChildren();
   const visibleTools = ["git", ...state.providers].filter((name, index, tools) => (
-    tools.indexOf(name) === index && !(state.system[name] || {}).installed
+    tools.indexOf(name) === index
+      && (!(state.system[name] || {}).installed || (state.system[name] || {}).supported === false)
   ));
   visibleTools.forEach((name) => {
     const info = state.system[name] || { installed: false };
+    const outdatedGit = name === "git" && info.supported === false;
+    const minimumGit = typeof info.minimumVersion === "string"
+      ? info.minimumVersion.replace(/\.0$/, "")
+      : "2.30";
     const pill = document.createElement(name === "git" ? "button" : "span");
     pill.className = "status-pill missing";
-    pill.textContent = `${name === "claude" ? "Claude" : name[0].toUpperCase() + name.slice(1)} missing`;
-    pill.title = info.version || info.path || "Not found on PATH";
+    pill.textContent = outdatedGit
+      ? `Git ${minimumGit}+ required`
+      : `${name === "claude" ? "Claude" : name[0].toUpperCase() + name.slice(1)} missing`;
+    pill.title = outdatedGit
+      ? `Detected ${info.version || "an older Git version"}. Git ${minimumGit} or newer is required.`
+      : info.version || info.path || "Not found on PATH";
     if (name === "git") pill.addEventListener("click", installGit);
     target.appendChild(pill);
   });
@@ -183,6 +287,7 @@ async function installShortcut() {
 }
 
 function openSettings() {
+  state.settingsGeneration += 1;
   const capability = state.system.voiceTranscription || { available: false };
   const voiceInput = document.querySelector('input[name="dictationMode"][value="voice-note"]');
   voiceInput.disabled = !capability.available;
@@ -201,10 +306,10 @@ function openSettings() {
   });
   $("#settingsCodexStatus").textContent = state.system.codex?.installed
     ? "Ready on this computer"
-    : "CLI not found — install it before adding";
+    : "CLI not found; install it before adding";
   $("#settingsClaudeStatus").textContent = state.system.claude?.installed
     ? "Ready on this computer"
-    : "CLI not found — install it before adding";
+    : "CLI not found; install it before adding";
   const github = state.system.github || { installed: false, authenticated: false };
   $("#githubConnectionStatus").textContent = github.authenticated
     ? "GitHub CLI is connected. New websites become private GitHub repositories and accepted merges push automatically."
@@ -214,45 +319,74 @@ function openSettings() {
     dictateHotkey: state.settings.dictateHotkey || "KeyV",
   };
   hotkeyCapture = null;
+  $("#settingsDialogClose").disabled = state.settingsSaveInFlight;
+  setBusy($("#saveSettings"), state.settingsSaveInFlight, "Saving…");
   renderHotkeySettings();
   $("#settingsError").textContent = "";
+  const settingsForm = $("#settingsForm");
+  settingsForm.scrollTop = 0;
   $("#settingsDialog").showModal();
+  $("#settingsDialogClose").focus({ preventScroll: true });
+  settingsForm.scrollTop = 0;
 }
 
 async function saveSettings(event) {
   event.preventDefault();
+  if (state.settingsSaveInFlight) return;
+  const generation = state.settingsGeneration;
   const dictationInput = document.querySelector('input[name="dictationMode"]:checked');
   const interactionInput = document.querySelector('input[name="interactionMode"]:checked');
   const providers = [...document.querySelectorAll('input[name="settingsProvider"]:checked')]
     .map((input) => input.value);
+  const preferences = {
+    providers,
+    dictationMode: dictationInput ? dictationInput.value : "speech",
+    interactionMode: interactionInput ? interactionInput.value : "browse-default",
+    toggleHotkey: hotkeyDraft.toggleHotkey,
+    dictateHotkey: hotkeyDraft.dictateHotkey,
+  };
+  const submitted = JSON.stringify({ ...preferences, providers: [...providers].sort() });
   const button = $("#saveSettings");
   $("#settingsError").textContent = "";
+  state.settingsSaveInFlight = true;
+  $("#settingsDialogClose").disabled = true;
   setBusy(button, true, "Saving…");
   try {
-    const providerResult = await api("/api/providers", {
+    const result = await api("/api/preferences", {
       method: "POST",
-      body: { providers },
+      body: preferences,
     });
-    const result = await api("/api/settings", {
-      method: "POST",
-      body: {
-        dictationMode: dictationInput ? dictationInput.value : "speech",
-        interactionMode: interactionInput ? interactionInput.value : "browse-default",
-        toggleHotkey: hotkeyDraft.toggleHotkey,
-        dictateHotkey: hotkeyDraft.dictateHotkey,
-      },
-    });
-    state.providers = providerResult.providers;
-    state.settings = result.settings;
+    state.providers = result.providers;
     renderStatus();
+    state.settings = result.settings;
     renderShortcutGuide();
+    if (generation !== state.settingsGeneration || !$("#settingsDialog").open) return;
+    const current = JSON.stringify({
+      providers: [...document.querySelectorAll('input[name="settingsProvider"]:checked')]
+        .map((input) => input.value).sort(),
+      dictationMode: document.querySelector('input[name="dictationMode"]:checked')?.value || "speech",
+      interactionMode: document.querySelector('input[name="interactionMode"]:checked')?.value || "browse-default",
+      toggleHotkey: hotkeyDraft.toggleHotkey,
+      dictateHotkey: hotkeyDraft.dictateHotkey,
+    });
+    if (current !== submitted) {
+      $("#settingsError").textContent = "The submitted settings were saved. Review and save your newer edits.";
+      return;
+    }
     $("#settingsDialog").close();
     const restarted = result.previews.restarted || 0;
     const deferred = result.previews.deferred || 0;
     toast(`Settings saved.${restarted ? ` Restarted ${restarted} preview${restarted === 1 ? "" : "s"}.` : ""}${deferred ? ` ${deferred} busy preview will use it next time.` : ""}`);
   } catch (error) {
+    if (generation !== state.settingsGeneration || !$("#settingsDialog").open) return;
     $("#settingsError").textContent = error.message;
-  } finally { setBusy(button, false); }
+  } finally {
+    state.settingsSaveInFlight = false;
+    if ($("#settingsDialog").open) {
+      $("#settingsDialogClose").disabled = false;
+      setBusy(button, false);
+    }
+  }
 }
 
 function renderProjects() {
@@ -262,6 +396,7 @@ function renderProjects() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `project-link ${project.id === state.selectedProjectId ? "active" : ""}`;
+    if (project.id === state.selectedProjectId) button.setAttribute("aria-current", "page");
     const icon = document.createElement("span");
     icon.className = "project-icon";
     icon.textContent = project.name.slice(0, 2);
@@ -280,15 +415,30 @@ function selectedProject() {
   return state.projects.find((project) => project.id === state.selectedProjectId) || null;
 }
 
+function targetBranch(project = selectedProject()) {
+  return project?.targetBranch || "main";
+}
+
+function projectForSessionId(sessionId) {
+  return state.projects.find((project) => (
+    project.sessions || []
+  ).some((session) => session.id === sessionId)) || null;
+}
+
+function targetBranchForSession(session) {
+  return targetBranch(projectForSessionId(session?.id));
+}
+
 function selectProject(id) {
+  state.homeSelected = false;
   state.selectedProjectId = id;
   renderProjects();
   renderProjectView();
 }
 
 function openSessionPreview(session) {
-  const tab = window.open(session.previewUrl, `webkit-${session.projectId}-${session.color}`);
-  if (tab) tab.focus();
+  const tab = reservePreviewWindow(`webkit-${session.projectId}-${session.color}`);
+  if (navigatePreviewWindow(tab, session.previewUrl)) return;
   else toast(`Preview ready at ${session.previewUrl}. Allow popups to focus it automatically.`);
 }
 
@@ -298,6 +448,10 @@ function renderProjectView() {
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
+  const chatSession = currentSession();
+  $("#mergeButton").textContent = `Merge to ${
+    chatSession ? targetBranchForSession(chatSession) : targetBranch(project)
+  }`;
   const github = project.github || {};
   const pushButton = $("#pushGithubButton");
   pushButton.hidden = !(github.connected && github.unpushed);
@@ -314,20 +468,28 @@ function renderProjectView() {
     finalizing: "Building selected direction…",
     error: onboarding.sessionId ? "Seed agent needs attention" : "Retry seed onboarding",
   })[onboarding.status] || "Continue seed onboarding";
-  const defaultEffort = localStorage.getItem(`wkcc:reasoning:${project.provider}`) || "medium";
+  const defaultEffort = safeLocalStorageGet(`wkcc:reasoning:${project.provider}`) || "medium";
   fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
-  const active = (project.sessions || []).filter((session) => (
-    session.kind !== "seeds" && ["active", "busy", "merging", "error"].includes(session.status)
+  const live = (project.sessions || []).filter((session) => (
+    ["active", "busy", "merging", "error"].includes(session.status)
   ));
-  const byColor = new Map(active.map((session) => [session.color, session]));
+  const active = live.filter((session) => session.kind !== "seeds");
+  const byColor = new Map(live.map((session) => [session.color, session]));
   const grid = $("#colorGrid");
   grid.replaceChildren();
-  COLORS.forEach((color) => {
+  if (project.configError) {
+    const error = document.createElement("p");
+    error.className = "modal-error";
+    error.setAttribute("role", "alert");
+    error.textContent = project.configError;
+    grid.appendChild(error);
+  }
+  (project.palette || []).forEach((color) => {
     const session = byColor.get(color.slug);
     const card = document.createElement("button");
     card.type = "button";
     card.className = `color-card ${session ? "active" : ""}`;
-    card.style.setProperty("--color", color.hex);
+    card.dataset.color = COLOR_ACCENT_NAMES.has(color.slug) ? color.slug : "neutral";
     const emoji = document.createElement("span");
     emoji.className = "emoji";
     emoji.textContent = color.emoji;
@@ -362,9 +524,6 @@ function renderSessions(sessions) {
   sessions.forEach((session) => {
     const row = document.createElement("article");
     row.className = "session-row";
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `Open ${session.color} website preview`);
     const emoji = document.createElement("span");
     emoji.className = "session-emoji";
     emoji.textContent = session.emoji;
@@ -377,19 +536,21 @@ function renderSessions(sessions) {
     const status = document.createElement("span");
     status.className = `session-state ${session.status}`;
     status.textContent = session.status;
-    const open = document.createElement("button");
-    open.type = "button";
-    open.className = "open-chat";
-    open.textContent = "Chat";
-    open.addEventListener("click", (event) => { event.stopPropagation(); openSession(session); });
-    row.addEventListener("click", () => openSessionPreview(session));
-    row.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openSessionPreview(session);
-      }
-    });
-    row.append(emoji, info, status, open);
+    const actions = document.createElement("div");
+    actions.className = "session-actions";
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "open-chat";
+    preview.textContent = "Preview";
+    preview.setAttribute("aria-label", `Open ${session.color} website preview`);
+    preview.addEventListener("click", () => openSessionPreview(session));
+    const chat = document.createElement("button");
+    chat.type = "button";
+    chat.className = "open-chat";
+    chat.textContent = "Chat";
+    chat.addEventListener("click", (event) => openSession(session, event.currentTarget));
+    actions.append(preview, chat);
+    row.append(emoji, info, status, actions);
     list.appendChild(row);
   });
 }
@@ -398,19 +559,25 @@ async function startColor(color, button) {
   const project = selectedProject();
   if (!project) return;
   const tabName = `webkit-${project.id}-${color}`;
-  const previewTab = window.open("about:blank", tabName);
+  const previewTab = reservePreviewWindow(tabName);
+  let startedSession = null;
   setBusy(button, true, "Starting…");
   try {
     const { session } = await api("/api/sessions/start", {
       method: "POST", body: { projectId: project.id, color, reasoningEffort: $("#newAgentReasoning").value },
     });
-    if (previewTab) previewTab.location.replace(session.previewUrl);
+    startedSession = session;
+    if (previewTab) navigatePreviewWindow(previewTab, session.previewUrl);
     else toast(`Preview ready at ${session.previewUrl}. Allow popups to open it automatically.`);
     await refreshProjects();
     toast(`${session.emoji} ${capitalize(color)} agent is live.`);
   } catch (error) {
-    if (previewTab) previewTab.close();
-    toast(error.message);
+    if (startedSession) {
+      toast(`${startedSession.emoji} ${capitalize(color)} agent is live, but the project list could not refresh yet: ${error.message}`);
+    } else {
+      if (previewTab) previewTab.close();
+      toast(error.message);
+    }
   } finally { setBusy(button, false); }
 }
 
@@ -418,31 +585,54 @@ async function pushSelectedProject() {
   const project = selectedProject();
   if (!project) return;
   const button = $("#pushGithubButton");
+  let pushResult = null;
   setBusy(button, true, "Pushing…");
   try {
     const result = await api(`/api/projects/${project.id}/push`, { method: "POST", body: {} });
+    pushResult = result;
     await refreshProjects();
-    toast(result.alreadyCurrent ? "GitHub is already up to date." : "Main is now updated on GitHub.");
+    toast(result.alreadyCurrent
+      ? "GitHub is already up to date."
+      : `${targetBranch(project)} is now updated on GitHub.`);
   } catch (error) {
-    toast(error.message);
+    toast(pushResult
+      ? `GitHub was updated, but the project list could not refresh yet: ${error.message}`
+      : error.message);
   } finally {
     setBusy(button, false);
   }
 }
 
-function openSession(session) {
+function setChatStatus(session) {
+  $("#chatStatus").className = `live-dot ${session.status}`;
+  $("#chatStatusText").textContent = `Session status: ${session.status}`;
+}
+
+function openSession(session, returnFocus = document.activeElement) {
+  state.chatGeneration += 1;
+  state.chatReasoningRequest += 1;
   state.chatSessionId = session.id;
   state.chatCursor = 0;
+  state.chatReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : null;
   $("#chatDrawer").hidden = false;
   $("#chatColor").textContent = `${session.emoji} ${session.color} worktree`;
   $("#chatTitle").textContent = session.provider === "codex" ? "Codex" : "Claude Code";
-  $("#chatStatus").className = `live-dot ${session.status}`;
+  setChatStatus(session);
   $("#chatReasoningLabel").textContent = session.provider === "codex" ? "Codex reasoning" : "Claude effort";
+  $("#mergeButton").textContent = `Merge to ${targetBranchForSession(session)}`;
+  $("#mergeButton").hidden = session.kind === "seeds";
+  $("#chatReasoning").disabled = false;
   fillReasoning($("#chatReasoning"), session.provider, session.reasoningEffort || "medium");
+  $("#chatInput").value = "";
+  $("#chatFiles").value = "";
   state.pendingAttachments = [];
+  state.chatAttachmentReadsPending = 0;
+  state.chatSendInFlight = false;
   renderAttachments();
+  setBusy($("#chatForm button.primary"), false);
   $("#chatEvents").replaceChildren();
   pollEvents();
+  requestAnimationFrame(() => $("#closeChat").focus());
 }
 
 function currentSession() {
@@ -471,116 +661,263 @@ function renderAttachments() {
   });
 }
 
+function beginChatAttachmentRead(expectedSessionId, generation) {
+  if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration) return false;
+  state.chatAttachmentReadsPending += 1;
+  setBusy($("#chatForm button.primary"), true, "Reading attachment…");
+  return true;
+}
+
+function endChatAttachmentRead(expectedSessionId, generation) {
+  if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration) return;
+  state.chatAttachmentReadsPending = Math.max(0, state.chatAttachmentReadsPending - 1);
+  if (!state.chatAttachmentReadsPending && !state.chatSendInFlight) {
+    setBusy($("#chatForm button.primary"), false);
+  }
+}
+
 async function addChatFiles(files) {
-  const incoming = [...files].filter((file) => file && file.size);
-  for (const file of incoming) {
-    if (file.size > 20 * 1024 * 1024) {
-      toast(`${file.name} is larger than 20 MB.`);
-      continue;
+  const expectedSessionId = state.chatSessionId;
+  const generation = state.chatGeneration;
+  if (!expectedSessionId) return;
+  if (!beginChatAttachmentRead(expectedSessionId, generation)) return;
+  try {
+    const incoming = [...files].filter((file) => file && file.size);
+    const combined = [...state.pendingAttachments, ...incoming];
+    const total = combined.reduce((sum, file) => sum + (file.size || 0), 0);
+    if (combined.length > MAX_CHAT_ATTACHMENTS) {
+      toast(`Chat messages are limited to ${MAX_CHAT_ATTACHMENTS} attachments.`);
+      return;
     }
-    const data = await new Promise((resolve, reject) => {
+    if (incoming.some((file) => file.size > MAX_CHAT_ATTACHMENT_BYTES)
+        || total > MAX_CHAT_ATTACHMENTS_TOTAL_BYTES) {
+      toast("Chat attachments must be 20 MB each and 20 MB total or smaller.");
+      return;
+    }
+    const prepared = await Promise.all(incoming.map(async (file) => {
+      const data = await new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
       reader.onerror = reject;
       reader.readAsDataURL(file);
-    });
-    state.pendingAttachments.push({ name: file.name || "pasted-file", type: file.type || "application/octet-stream", data });
+      });
+      return {
+        name: file.name || "pasted-file",
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        data,
+      };
+    }));
+    if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration) return;
+    const updated = [...state.pendingAttachments, ...prepared];
+    const updatedTotal = updated.reduce((sum, file) => sum + (file.size || 0), 0);
+    if (updated.length > MAX_CHAT_ATTACHMENTS) {
+      toast(`Chat messages are limited to ${MAX_CHAT_ATTACHMENTS} attachments.`);
+      return;
+    }
+    if (updatedTotal > MAX_CHAT_ATTACHMENTS_TOTAL_BYTES) {
+      toast("Chat attachments must be 20 MB each and 20 MB total or smaller.");
+      return;
+    }
+    state.pendingAttachments.push(...prepared);
+    renderAttachments();
+  } catch (error) {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration) {
+      toast(`Could not read the selected attachments: ${error.message || error}`);
+    }
+    return;
+  } finally {
+    endChatAttachmentRead(expectedSessionId, generation);
   }
-  renderAttachments();
 }
 
 async function changeChatReasoning() {
   const session = currentSession();
   if (!session) return;
+  const expectedSessionId = session.id;
+  const generation = state.chatGeneration;
+  const select = $("#chatReasoning");
+  const reasoningEffort = select.value;
+  const previous = session.reasoningEffort || "medium";
+  const request = ++state.chatReasoningRequest;
+  select.disabled = true;
   try {
     const result = await api(`/api/sessions/${session.id}/reasoning`, {
-      method: "POST", body: { reasoningEffort: $("#chatReasoning").value },
+      method: "POST", body: { reasoningEffort },
     });
+    if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration
+        || request !== state.chatReasoningRequest) return;
     session.reasoningEffort = result.reasoningEffort;
+    select.value = result.reasoningEffort;
     toast(`${session.provider === "codex" ? "Codex reasoning" : "Claude effort"} set to ${result.reasoningEffort}.`);
-  } catch (error) { toast(error.message); }
+  } catch (error) {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration
+        && request === state.chatReasoningRequest) {
+      select.value = reasoningLevels(session.provider).includes(previous) ? previous : "medium";
+      toast(error.message);
+    }
+  } finally {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration
+        && request === state.chatReasoningRequest) select.disabled = false;
+  }
 }
 
 async function pollEvents() {
-  if (!state.chatSessionId || $("#chatDrawer").hidden) return;
-  const expected = state.chatSessionId;
+  if (eventsPollPromise) {
+    eventsPollQueued = true;
+    return eventsPollPromise;
+  }
+  eventsPollPromise = (async () => {
+    do {
+      eventsPollQueued = false;
+      if (!state.chatSessionId || $("#chatDrawer").hidden) return;
+      const expected = state.chatSessionId;
+      const generation = state.chatGeneration;
+      const cursor = state.chatCursor;
+      try {
+        const data = await api(`/api/sessions/${expected}/events?after=${cursor}`);
+        if (expected !== state.chatSessionId || generation !== state.chatGeneration) continue;
+        const target = $("#chatEvents");
+        if (data.reset) target.replaceChildren();
+        data.events.forEach((event) => {
+          const node = document.createElement("div");
+          node.className = `event ${event.role} ${event.kind}`;
+          node.textContent = event.text;
+          target.appendChild(node);
+        });
+        if (data.events.length) target.scrollTop = target.scrollHeight;
+        state.chatCursor = data.next;
+      } catch (error) {
+        if (expected === state.chatSessionId && generation === state.chatGeneration) toast(error.message);
+      }
+    } while (eventsPollQueued);
+  })();
   try {
-    const data = await api(`/api/sessions/${expected}/events?after=${state.chatCursor}`);
-    if (expected !== state.chatSessionId) return;
-    const target = $("#chatEvents");
-    data.events.forEach((event) => {
-      const node = document.createElement("div");
-      node.className = `event ${event.role} ${event.kind}`;
-      node.textContent = event.text;
-      target.appendChild(node);
-    });
-    if (data.events.length) target.scrollTop = target.scrollHeight;
-    state.chatCursor = data.next;
-  } catch (error) {
-    if (expected === state.chatSessionId) toast(error.message);
+    await eventsPollPromise;
+  } finally {
+    eventsPollPromise = null;
   }
 }
 
 async function sendChat(event) {
   event.preventDefault();
   const input = $("#chatInput");
+  const draft = input.value;
   const message = input.value.trim();
   if ((!message && !state.pendingAttachments.length) || !state.chatSessionId) return;
+  if (state.chatAttachmentReadsPending) {
+    toast("Wait for the selected attachments to finish loading.");
+    return;
+  }
+  if (state.chatSendInFlight) return;
+  const expectedSessionId = state.chatSessionId;
+  const generation = state.chatGeneration;
+  const attachments = [...state.pendingAttachments];
+  const estimatedPathBytes = attachments.reduce(
+    (sum, item) => sum + new TextEncoder().encode(item.name || "attachment").length + 256,
+    80,
+  );
+  if (new TextEncoder().encode(message).length + estimatedPathBytes > MAX_PROVIDER_PROMPT_BYTES) {
+    toast("The message and attachment names exceed the 16 KB agent prompt limit.");
+    return;
+  }
   const button = $("#chatForm button.primary");
+  state.chatSendInFlight = true;
   setBusy(button, true, "Queued");
   try {
-    await api(`/api/sessions/${state.chatSessionId}/message`, {
-      method: "POST", body: { message, attachments: state.pendingAttachments },
+    await api(`/api/sessions/${expectedSessionId}/message`, {
+      method: "POST", body: { message, attachments },
     });
-    input.value = "";
-    state.pendingAttachments = [];
-    renderAttachments();
-    setTimeout(pollEvents, 150);
-  } catch (error) { toast(error.message); }
-  finally { setBusy(button, false); }
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration) {
+      if (input.value === draft) input.value = "";
+      const sent = new Set(attachments);
+      state.pendingAttachments = state.pendingAttachments.filter((item) => !sent.has(item));
+      renderAttachments();
+      setTimeout(pollEvents, 150);
+    }
+  } catch (error) {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration) toast(error.message);
+  } finally {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration) {
+      state.chatSendInFlight = false;
+      if (!state.chatAttachmentReadsPending) setBusy(button, false);
+    }
+  }
 }
 
 function askConfirm(kind) {
   const session = currentSession();
   if (!session) return;
+  state.confirmGeneration += 1;
+  state.confirmBusy = false;
+  const generation = state.confirmGeneration;
   const isMerge = kind === "merge";
+  const branch = targetBranchForSession(session);
   $("#confirmEyebrow").textContent = isMerge ? "Keep the work" : "Permanent action";
-  $("#confirmTitle").textContent = isMerge ? "Merge this color into main?" : "Discard this color session?";
+  $("#confirmTitle").textContent = isMerge ? `Merge this color into ${branch}?` : "Discard this color session?";
   $("#confirmText").textContent = isMerge
-    ? `The ${session.emoji} branch will be merged into main, then its worktree will close.`
+    ? `The ${session.emoji} branch will be merged into ${branch}, then its worktree will close.`
     : `All unmerged work in ${session.branch} will be deleted. This cannot be undone.`;
-  $("#confirmAction").textContent = isMerge ? "Merge to main" : "Discard forever";
+  $("#confirmAction").textContent = isMerge ? `Merge to ${branch}` : "Discard forever";
   $("#confirmAction").className = isMerge ? "primary" : "danger";
-  state.confirmCallback = () => finishSession(session, kind);
+  setBusy($("#confirmAction"), false);
+  $("#confirmDialog button[value=\"cancel\"]").disabled = false;
+  state.confirmCallback = () => finishSession(session, kind, generation);
   $("#confirmDialog").showModal();
 }
 
-async function finishSession(session, kind) {
+async function finishSession(session, kind, confirmationGeneration) {
+  if (confirmationGeneration !== state.confirmGeneration || state.confirmBusy) return;
   const button = $("#confirmAction");
+  const cancel = $("#confirmDialog button[value=\"cancel\"]");
+  const branch = targetBranchForSession(session);
+  const expectedChatSessionId = state.chatSessionId;
+  const chatGeneration = state.chatGeneration;
+  state.confirmBusy = true;
+  cancel.disabled = true;
   setBusy(button, true, kind === "merge" ? "Merging…" : "Discarding…");
   try {
     const body = kind === "discard" ? { confirmation: session.id } : {};
     const result = await api(`/api/sessions/${session.id}/${kind}`, { method: "POST", body });
-    $("#confirmDialog").close();
+    const confirmationCurrent = confirmationGeneration === state.confirmGeneration;
+    if (confirmationCurrent) {
+      state.confirmBusy = false;
+      cancel.disabled = false;
+      setBusy(button, false);
+      $("#confirmDialog").close();
+    }
     if (kind === "merge") {
       if (result.queued) {
-        toast("The agent is integrating the branch. Open chat if it needs help with a conflict.");
+        if (confirmationCurrent) toast("The agent is integrating the branch. Open chat if it needs help with a conflict.");
         await refreshProjects();
         return;
       }
       const github = result.github || { connected: false, pushed: false };
-      if (github.pushed) toast("Merged and updated main on GitHub.");
-      else if (github.connected) toast(`Merged locally, but GitHub push failed: ${github.error || "try again when connected"}`);
-      else toast("Merged locally. Connect GitHub to your coding agent so future merges update main automatically.");
-    } else toast("Color worktree discarded.");
-    $("#chatDrawer").hidden = true;
-    state.chatSessionId = null;
+      if (confirmationCurrent) {
+        if (github.pushed) toast(`Merged and updated ${branch} on GitHub.`);
+        else if (github.connected) toast(`Merged locally, but GitHub push failed: ${github.error || "try again when connected"}`);
+        else toast(`Merged locally. Connect GitHub so future merges update ${branch} automatically.`);
+      }
+    } else if (confirmationCurrent) toast("Color worktree discarded.");
+    if (expectedChatSessionId === state.chatSessionId && chatGeneration === state.chatGeneration) {
+      state.chatGeneration += 1;
+      $("#chatDrawer").hidden = true;
+      state.chatSessionId = null;
+    }
     await refreshProjects();
-  } catch (error) { toast(error.message); }
-  finally { setBusy(button, false); }
+  } catch (error) {
+    if (confirmationGeneration === state.confirmGeneration) toast(error.message);
+  } finally {
+    if (confirmationGeneration === state.confirmGeneration) {
+      state.confirmBusy = false;
+      cancel.disabled = false;
+      setBusy(button, false);
+    }
+  }
 }
 
 function openProjectDialog() {
+  state.projectGeneration += 1;
   $("#projectError").textContent = "";
   state.createStep = 1;
   state.onboardingAssets = [];
@@ -595,6 +932,8 @@ function openProjectDialog() {
     option.textContent = provider === "codex" ? "Codex" : "Claude Code";
     select.appendChild(option);
   });
+  setBusy($("#saveProject"), state.projectSaveInFlight, "Finishing previous request…");
+  document.querySelectorAll("[data-folder-target]").forEach((button) => setBusy(button, false));
   renderProjectWizard();
   $("#projectDialog").showModal();
 }
@@ -623,7 +962,10 @@ function setProjectMode(mode) {
   state.projectMode = mode;
   state.createStep = 1;
   document.querySelectorAll("[data-project-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.projectMode === mode);
+    const selected = button.dataset.projectMode === mode;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
   });
   $("#createFields").hidden = mode !== "create";
   $("#existingFields").hidden = mode !== "existing";
@@ -647,38 +989,92 @@ function renderProjectAssets() {
   });
 }
 
-async function addProjectAssets(files) {
-  let total = state.onboardingAssets.reduce((sum, item) => sum + (item.size || 0), 0);
-  const incoming = [...files].filter((item) => item && item.size).slice(0, 500);
-  for (const file of incoming) {
-    if (file.size > 15 * 1024 * 1024 || total + file.size > 20 * 1024 * 1024) {
-      toast("Project references must be 15 MB each and 20 MB total or smaller.");
-      continue;
-    }
-    const data = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-    const relativePath = String(file.webkitRelativePath || file._relativePath || file.name || "reference")
-      .replaceAll("\\", "/").replace(/^\/+/, "");
-    state.onboardingAssets.push({
-      name: file.name || "reference",
-      path: relativePath,
-      type: file.type || "application/octet-stream",
-      size: file.size,
-      data,
-    });
-    total += file.size;
-  }
-  renderProjectAssets();
+function beginProjectAssetOperation(expectedGeneration) {
+  if (expectedGeneration !== state.projectGeneration || !$("#projectDialog").open) return false;
+  state.projectAssetOperationsPending += 1;
+  setBusy($("#saveProject"), true, "Reading references…");
+  return true;
 }
 
-function readDroppedEntry(entry, prefix = "") {
+function endProjectAssetOperation(expectedGeneration) {
+  if (expectedGeneration !== state.projectGeneration) return;
+  state.projectAssetOperationsPending = Math.max(0, state.projectAssetOperationsPending - 1);
+  if (!state.projectAssetOperationsPending && !state.projectSaveInFlight) {
+    setBusy($("#saveProject"), false);
+  }
+}
+
+async function addProjectAssets(files, expectedGeneration = state.projectGeneration) {
+  if (!beginProjectAssetOperation(expectedGeneration)) return;
+  try {
+    const incoming = [...files].filter((item) => item && item.size);
+    const combinedCount = state.onboardingAssets.length + incoming.length;
+    const total = state.onboardingAssets.reduce((sum, item) => sum + (item.size || 0), 0)
+      + incoming.reduce((sum, item) => sum + item.size, 0);
+    if (combinedCount > MAX_PROJECT_ASSETS) {
+      toast(`Project references are limited to ${MAX_PROJECT_ASSETS} files.`);
+      return;
+    }
+    if (incoming.some((file) => file.size > MAX_PROJECT_ASSET_BYTES)
+        || total > MAX_PROJECT_ASSETS_TOTAL_BYTES) {
+      toast("Project references must be 15 MB each and 20 MB total or smaller.");
+      return;
+    }
+    const prepared = await Promise.all(incoming.map(async (file) => {
+      const data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const relativePath = String(file.webkitRelativePath || file._relativePath || file.name || "reference")
+        .replace(/\\/g, "/").replace(/^\/+/, "");
+      return {
+        name: file.name || "reference",
+        path: relativePath,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        data,
+      };
+    }));
+    if (expectedGeneration !== state.projectGeneration || !$("#projectDialog").open) return;
+    const updated = [...state.onboardingAssets, ...prepared];
+    const updatedTotal = updated.reduce((sum, item) => sum + (item.size || 0), 0);
+    if (updated.length > MAX_PROJECT_ASSETS) {
+      toast(`Project references are limited to ${MAX_PROJECT_ASSETS} files.`);
+      return;
+    }
+    if (updatedTotal > MAX_PROJECT_ASSETS_TOTAL_BYTES) {
+      toast("Project references must be 15 MB each and 20 MB total or smaller.");
+      return;
+    }
+    state.onboardingAssets.push(...prepared);
+    renderProjectAssets();
+  } catch (error) {
+    if (expectedGeneration === state.projectGeneration && $("#projectDialog").open) {
+      toast(`Could not read the selected project references: ${error.message || error}`);
+    }
+    return;
+  } finally {
+    endProjectAssetOperation(expectedGeneration);
+  }
+}
+
+function readDroppedEntry(entry, prefix, budget, depth) {
   if (!entry) return Promise.resolve([]);
+  if (depth > MAX_PROJECT_DROP_DEPTH) {
+    return Promise.reject(new Error(`Dropped folders may be at most ${MAX_PROJECT_DROP_DEPTH} levels deep.`));
+  }
+  budget.entries += 1;
+  if (budget.entries > MAX_PROJECT_DROP_ENTRIES) {
+    return Promise.reject(new Error(`Dropped folders may contain at most ${MAX_PROJECT_DROP_ENTRIES} entries.`));
+  }
   const relativePath = `${prefix}${entry.name}`;
   if (entry.isFile) {
+    budget.files += 1;
+    if (budget.files > budget.maxFiles) {
+      return Promise.reject(new Error(`Project references are limited to ${MAX_PROJECT_ASSETS} files.`));
+    }
     return new Promise((resolve, reject) => entry.file((file) => {
       Object.defineProperty(file, "_relativePath", { value: relativePath, configurable: true });
       resolve([file]);
@@ -687,17 +1083,18 @@ function readDroppedEntry(entry, prefix = "") {
   if (!entry.isDirectory) return Promise.resolve([]);
   return new Promise((resolve, reject) => {
     const reader = entry.createReader();
-    const children = [];
+    const results = [];
     const readBatch = () => reader.readEntries(async (batch) => {
       if (!batch.length) {
-        try {
-          const nested = await Promise.all(children.map((child) => readDroppedEntry(child, `${relativePath}/`)));
-          resolve(nested.flat());
-        } catch (error) { reject(error); }
+        resolve(results);
         return;
       }
-      children.push(...batch);
-      readBatch();
+      try {
+        for (const child of batch) {
+          results.push(...await readDroppedEntry(child, `${relativePath}/`, budget, depth + 1));
+        }
+        readBatch();
+      } catch (error) { reject(error); }
     }, reject);
     readBatch();
   });
@@ -706,12 +1103,26 @@ function readDroppedEntry(entry, prefix = "") {
 async function projectFilesFromDrop(dataTransfer) {
   const entries = [...(dataTransfer?.items || [])]
     .map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
-  if (!entries.length) return [...(dataTransfer?.files || [])];
-  return (await Promise.all(entries.map((entry) => readDroppedEntry(entry)))).flat();
+  if (!entries.length) {
+    const files = [...(dataTransfer?.files || [])];
+    if (state.onboardingAssets.length + files.length > MAX_PROJECT_ASSETS) {
+      throw new Error(`Project references are limited to ${MAX_PROJECT_ASSETS} files.`);
+    }
+    return files;
+  }
+  const budget = {
+    entries: 0,
+    files: 0,
+    maxFiles: Math.max(0, MAX_PROJECT_ASSETS - state.onboardingAssets.length),
+  };
+  const files = [];
+  for (const entry of entries) files.push(...await readDroppedEntry(entry, "", budget, 0));
+  return files;
 }
 
 async function chooseProjectFolder(event) {
   const button = event.currentTarget;
+  const generation = state.projectGeneration;
   const field = $(`#${button.dataset.folderTarget}`);
   const errorNode = $("#projectError");
   errorNode.textContent = "";
@@ -721,28 +1132,51 @@ async function chooseProjectFolder(event) {
       method: "POST",
       body: { initial: field.value, purpose: button.dataset.folderPurpose },
     });
-    if (!result.cancelled && result.path) {
+    if (generation === state.projectGeneration && $("#projectDialog").open
+        && !result.cancelled && result.path) {
       field.value = result.path;
       field.title = result.path;
     }
-  } catch (error) { errorNode.textContent = error.message; }
-  finally { setBusy(button, false); }
+  } catch (error) {
+    if (generation === state.projectGeneration && $("#projectDialog").open) errorNode.textContent = error.message;
+  } finally {
+    if (generation === state.projectGeneration) setBusy(button, false);
+  }
 }
 
 async function saveProject(event) {
   event.preventDefault();
+  const generation = state.projectGeneration;
   const button = $("#saveProject");
   const errorNode = $("#projectError");
+  let createdResult = null;
   errorNode.textContent = "";
   if (state.projectMode === "create" && state.createStep < 3) {
     if (state.createStep === 1 && (!$("#newName").value.trim() || !$("#newParent").value.trim())) {
       errorNode.textContent = "Enter a website name and choose its parent folder.";
       return;
     }
+    if (state.projectAssetOperationsPending) {
+      errorNode.textContent = "Wait for the selected project references to finish loading.";
+      return;
+    }
     state.createStep += 1;
     renderProjectWizard();
     return;
   }
+  if (state.projectMode === "create" && $("#newBrandBrief").value.length > MAX_PROJECT_BRIEF_CHARS) {
+    errorNode.textContent = `Brand and design brief must be ${MAX_PROJECT_BRIEF_CHARS} characters or fewer.`;
+    return;
+  }
+  if (state.projectAssetOperationsPending) {
+    errorNode.textContent = "Wait for the selected project references to finish loading.";
+    return;
+  }
+  if (state.projectSaveInFlight) {
+    errorNode.textContent = "Wait for the previous project request to finish.";
+    return;
+  }
+  state.projectSaveInFlight = true;
   setBusy(button, true, state.projectMode === "create" ? "Creating & starting seeds…" : "Adding…");
   try {
     const provider = $("#projectProviderSelect").value;
@@ -763,25 +1197,47 @@ async function saveProject(event) {
       }
       : { path: $("#existingPath").value, provider };
     const result = await api(path, { method: "POST", body });
+    createdResult = result;
     const project = result.project;
-    $("#projectDialog").close();
     await refreshProjects();
+    if (generation !== state.projectGeneration || !$("#projectDialog").open) {
+      toast(`${project.name || "Project"} was added.`);
+      return;
+    }
+    $("#projectDialog").close();
     selectProject(project.id);
+    const githubSetup = result.githubSetup;
+    const githubWarning = isCreate && githubSetup?.attempted && !githubSetup?.verified
+      ? " GitHub setup did not verify the initial push. Your local project is safe; retry from Push to GitHub."
+      : "";
     if (isCreate && result.seedSession) {
       openSeedOnboarding(result.seedSession.id);
-      toast(`Creating ${body.onboarding.seedCount} distinct directions in an isolated worktree.`);
+      toast(`Creating ${body.onboarding.seedCount} distinct directions in an isolated worktree.${githubWarning}`);
       return;
     }
     if (isCreate && result.seedError) {
-      toast(`Website created, but seeds could not start: ${result.seedError}`);
+      toast(`Website created, but seeds could not start: ${result.seedError}${githubWarning}`);
       return;
     }
     const registeredProject = state.projects.find((item) => item.id === project.id) || project;
-    toast(registeredProject.github?.connected
+    const verifiedCurrent = githubSetup?.verified === true || (
+      registeredProject.github?.connected && !registeredProject.github?.unpushed
+    );
+    toast(githubWarning || (verifiedCurrent
       ? "Project ready with automatic GitHub sync."
-      : "Project ready locally. Connect GitHub to your coding agent and WebKit will detect it automatically.");
-  } catch (error) { errorNode.textContent = error.message; }
-  finally { setBusy(button, false); }
+      : "Project ready locally. Connect GitHub to your coding agent and WebKit will detect it automatically."));
+  } catch (error) {
+    if (createdResult) {
+      if (generation === state.projectGeneration && $("#projectDialog").open) $("#projectDialog").close();
+      toast(`${createdResult.project?.name || "Project"} was added, but the project list could not refresh yet: ${error.message}`);
+      setTimeout(() => refreshProjects().catch(() => {}), 500);
+    } else if (generation === state.projectGeneration && $("#projectDialog").open) {
+      errorNode.textContent = error.message;
+    }
+  } finally {
+    state.projectSaveInFlight = false;
+    if ($("#projectDialog").open) setBusy(button, false);
+  }
 }
 
 function sessionById(sessionId) {
@@ -793,7 +1249,9 @@ function sessionById(sessionId) {
 }
 
 function openSeedOnboarding(sessionId) {
+  state.seedGeneration += 1;
   state.seedSessionId = sessionId;
+  state.seedProjectId = projectForSessionId(sessionId)?.id || state.selectedProjectId;
   state.seedCurrentId = null;
   state.seedSelected = new Set();
   state.seedSignature = "";
@@ -805,6 +1263,7 @@ function openSeedOnboarding(sessionId) {
   $("#seedDialogEyebrow").textContent = "Creating directions";
   $("#seedDialogTitle").textContent = "Your seeds are growing.";
   $("#seedDialogText").textContent = "The agent is building distinct visual approaches in an isolated worktree.";
+  setBusy($("#finishSeeds"), state.seedSelectionInFlight, "Starting…");
   if (!$("#seedDialog").open) $("#seedDialog").showModal();
   pollSeedStatus();
 }
@@ -842,7 +1301,11 @@ function renderSeedReview(data) {
     const copy = document.createElement("button");
     copy.type = "button";
     copy.className = "seed-option-view";
-    copy.innerHTML = `<b>${index + 1}. ${escapeHtml(seed.title)}</b><small>${escapeHtml(seed.direction || seed.summary || "Distinct direction")}</small>`;
+    const title = document.createElement("b");
+    title.textContent = `${index + 1}. ${seed.title}`;
+    const summary = document.createElement("small");
+    summary.textContent = seed.direction || seed.summary || "Distinct direction";
+    copy.append(title, summary);
     copy.addEventListener("click", () => showSeed(seed));
     check.addEventListener("change", () => {
       if (check.checked) state.seedSelected.add(seed.id);
@@ -856,56 +1319,68 @@ function renderSeedReview(data) {
   showSeed(data.seeds.find((seed) => seed.id === state.seedCurrentId) || data.seeds[0]);
 }
 
-function escapeHtml(value) {
-  const node = document.createElement("span");
-  node.textContent = value || "";
-  return node.innerHTML;
-}
-
 async function pollSeedStatus() {
-  const sessionId = state.seedSessionId;
-  if (!sessionId || !$("#seedDialog").open) return;
-  try {
-    const data = await api(`/api/sessions/${sessionId}/seeds`);
-    if (sessionId !== state.seedSessionId) return;
-    state.seedData = data;
-    if (data.complete) {
-      $("#seedDialog").close();
-      state.seedSessionId = null;
-      await refreshProjects();
-      toast("The selected direction is now your website, and main has been updated.");
-      return;
-    }
-    if (data.ready) {
-      $("#seedLoading").hidden = true;
-      $("#seedReview").hidden = false;
-      $("#openSeedChat").hidden = false;
-      $("#seedDialogEyebrow").textContent = `${data.seeds.length} design directions`;
-      $("#seedDialogTitle").textContent = "Choose what should become the website.";
-      $("#seedDialogText").textContent = "Preview every seed. Select one, or select several and describe which parts to combine.";
-      renderSeedReview(data);
-    } else {
-      $("#seedReview").hidden = true;
-      $("#seedLoading").hidden = false;
-      const finalizing = data.status === "finalizing" || data.sessionStatus === "merging";
-      $("#seedDialogEyebrow").textContent = finalizing ? "Building your selection" : "Creating directions";
-      $("#seedDialogTitle").textContent = finalizing ? "Turning the seeds into one website." : "Your seeds are growing.";
-      $("#seedDialogText").textContent = finalizing
-        ? "The agent is combining your choices, cleaning up the exploration, and preparing main."
-        : "The agent is building distinct visual approaches in an isolated worktree.";
-      const errored = data.sessionStatus === "error" || data.status === "error";
-      $("#openSeedChat").hidden = !errored;
-      if (errored) {
+  if (seedPollPromise) {
+    seedPollQueued = true;
+    return seedPollPromise;
+  }
+  seedPollPromise = (async () => {
+    do {
+      seedPollQueued = false;
+      const sessionId = state.seedSessionId;
+      const generation = state.seedGeneration;
+      if (!sessionId || !$("#seedDialog").open) return;
+      const seedProject = state.projects.find((project) => project.id === state.seedProjectId);
+      const seedTarget = targetBranch(seedProject);
+      try {
+        const data = await api(`/api/sessions/${sessionId}/seeds`);
+        if (sessionId !== state.seedSessionId || generation !== state.seedGeneration) continue;
+        state.seedData = data;
+        if (data.complete) {
+          toast(`The selected direction is now your website, and ${seedTarget} has been updated.`);
+          $("#seedDialog").close();
+          state.seedSessionId = null;
+          await refreshProjects();
+          return;
+        }
+        if (data.ready) {
+          $("#seedLoading").hidden = true;
+          $("#seedReview").hidden = false;
+          $("#openSeedChat").hidden = false;
+          $("#seedDialogEyebrow").textContent = `${data.seeds.length} design directions`;
+          $("#seedDialogTitle").textContent = "Choose what should become the website.";
+          $("#seedDialogText").textContent = "Preview every seed. Select one, or select several and describe which parts to combine.";
+          renderSeedReview(data);
+        } else {
+          $("#seedReview").hidden = true;
+          $("#seedLoading").hidden = false;
+          const finalizing = data.status === "finalizing" || data.sessionStatus === "merging";
+          $("#seedDialogEyebrow").textContent = finalizing ? "Building your selection" : "Creating directions";
+          $("#seedDialogTitle").textContent = finalizing ? "Turning the seeds into one website." : "Your seeds are growing.";
+          $("#seedDialogText").textContent = finalizing
+            ? `The agent is combining your choices, cleaning up the exploration, and preparing ${seedTarget}.`
+            : "The agent is building distinct visual approaches in an isolated worktree.";
+          const errored = data.sessionStatus === "error" || data.status === "error";
+          $("#openSeedChat").hidden = !errored;
+          if (errored) {
+            $("#seedLoading").hidden = true;
+            $("#seedDialogTitle").textContent = "The seed agent needs a hand.";
+            $("#seedDialogText").textContent = data.error || "Open the agent chat to resolve the issue, then return here.";
+          }
+        }
+      } catch (error) {
+        if (sessionId !== state.seedSessionId || generation !== state.seedGeneration) continue;
         $("#seedLoading").hidden = true;
-        $("#seedDialogTitle").textContent = "The seed agent needs a hand.";
-        $("#seedDialogText").textContent = data.error || "Open the agent chat to resolve the issue, then return here.";
+        $("#openSeedChat").hidden = false;
+        $("#seedDialogTitle").textContent = "Could not read the seed session.";
+        $("#seedDialogText").textContent = error.message;
       }
-    }
-  } catch (error) {
-    $("#seedLoading").hidden = true;
-    $("#openSeedChat").hidden = false;
-    $("#seedDialogTitle").textContent = "Could not read the seed session.";
-    $("#seedDialogText").textContent = error.message;
+    } while (seedPollQueued);
+  })();
+  try {
+    await seedPollPromise;
+  } finally {
+    seedPollPromise = null;
   }
 }
 
@@ -917,20 +1392,46 @@ async function finishSeedSelection() {
   }
   const button = $("#finishSeeds");
   $("#seedError").textContent = "";
+  if ($("#seedCombinationNotes").value.length > MAX_SEED_NOTES_CHARS) {
+    $("#seedError").textContent = `Seed combination notes must be ${MAX_SEED_NOTES_CHARS} characters or fewer.`;
+    return;
+  }
+  if (state.seedSelectionInFlight) {
+    $("#seedError").textContent = "Wait for the previous seed selection to finish.";
+    return;
+  }
+  const sessionId = state.seedSessionId;
+  const generation = state.seedGeneration;
+  const selected = [...state.seedSelected];
+  const notes = $("#seedCombinationNotes").value;
+  let selectionAccepted = false;
+  state.seedSelectionInFlight = true;
   setBusy(button, true, "Starting…");
   try {
-    await api(`/api/sessions/${state.seedSessionId}/seeds-select`, {
+    await api(`/api/sessions/${sessionId}/seeds-select`, {
       method: "POST",
-      body: { selected: [...state.seedSelected], notes: $("#seedCombinationNotes").value },
+      body: { selected, notes },
     });
+    selectionAccepted = true;
+    if (sessionId !== state.seedSessionId || generation !== state.seedGeneration) return;
     state.seedSignature = "";
     $("#seedReview").hidden = true;
     $("#seedLoading").hidden = false;
     await refreshProjects();
-    pollSeedStatus();
+    if (sessionId === state.seedSessionId && generation === state.seedGeneration) pollSeedStatus();
   } catch (error) {
-    $("#seedError").textContent = error.message;
-  } finally { setBusy(button, false); }
+    if (selectionAccepted) {
+      if (sessionId === state.seedSessionId && generation === state.seedGeneration) {
+        toast(`The seed selection was accepted, but status could not refresh yet: ${error.message}`);
+        pollSeedStatus();
+      }
+    } else if (sessionId === state.seedSessionId && generation === state.seedGeneration) {
+      $("#seedError").textContent = error.message;
+    }
+  } finally {
+    state.seedSelectionInFlight = false;
+    if ($("#seedDialog").open) setBusy(button, false);
+  }
 }
 
 async function continueSeedOnboarding() {
@@ -945,7 +1446,11 @@ async function continueSeedOnboarding() {
   setBusy(button, true, "Starting…");
   try {
     const result = await api(`/api/projects/${project.id}/seeds-start`, { method: "POST", body: {} });
-    await refreshProjects();
+    try {
+      await refreshProjects();
+    } catch (error) {
+      toast(`The seed agent started, but the project list could not refresh yet: ${error.message}`);
+    }
     openSeedOnboarding(result.seedSession.id);
   } catch (error) { toast(error.message); }
   finally { setBusy(button, false); }
@@ -966,19 +1471,33 @@ async function saveProviders() {
 }
 
 async function refreshProjects() {
-  const data = await api("/api/projects");
-  const signature = JSON.stringify(data.projects);
-  const changed = signature !== state.projectsSignature;
-  state.projects = data.projects;
-  state.projectsSignature = signature;
-  if (state.selectedProjectId && !state.projects.some((p) => p.id === state.selectedProjectId)) state.selectedProjectId = null;
-  if (!state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
-  if (changed) {
-    renderProjects();
-    renderProjectView();
+  if (projectsRefreshPromise) {
+    projectsRefreshQueued = true;
+    return projectsRefreshPromise;
   }
-  const session = currentSession();
-  if (session) $("#chatStatus").className = `live-dot ${session.status}`;
+  projectsRefreshPromise = (async () => {
+    do {
+      projectsRefreshQueued = false;
+      const data = await api("/api/projects");
+      const signature = JSON.stringify(data.projects);
+      const changed = signature !== state.projectsSignature;
+      state.projects = data.projects;
+      state.projectsSignature = signature;
+      if (state.selectedProjectId && !state.projects.some((p) => p.id === state.selectedProjectId)) state.selectedProjectId = null;
+      if (!state.homeSelected && !state.selectedProjectId && state.projects.length) state.selectedProjectId = state.projects[0].id;
+      if (changed) {
+        renderProjects();
+        renderProjectView();
+      }
+      const session = currentSession();
+      if (session) setChatStatus(session);
+    } while (projectsRefreshQueued);
+  })();
+  try {
+    await projectsRefreshPromise;
+  } finally {
+    projectsRefreshPromise = null;
+  }
 }
 
 async function initialize() {
@@ -1000,7 +1519,11 @@ async function initialize() {
 
 function capitalize(value) { return value ? value[0].toUpperCase() + value.slice(1) : ""; }
 
-$("#homeButton").addEventListener("click", () => { state.selectedProjectId = null; renderProjects(); });
+$("#homeButton").addEventListener("click", () => {
+  state.homeSelected = true;
+  state.selectedProjectId = null;
+  renderProjects();
+});
 [$("#addProjectButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
 $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
@@ -1013,6 +1536,17 @@ document.querySelectorAll("[data-hotkey-setting]").forEach((button) => button.ad
 document.querySelectorAll('input[name="interactionMode"]').forEach((input) => input.addEventListener("change", renderHotkeySettings));
 document.addEventListener("keydown", captureHotkey, true);
 document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("click", () => setProjectMode(button.dataset.projectMode)));
+document.querySelectorAll("[data-project-mode]").forEach((button) => button.addEventListener("keydown", (event) => {
+  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+  event.preventDefault();
+  const tabs = [...document.querySelectorAll("[data-project-mode]")];
+  const current = tabs.indexOf(event.currentTarget);
+  const next = event.key === "Home" ? 0
+    : event.key === "End" ? tabs.length - 1
+      : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+  setProjectMode(tabs[next].dataset.projectMode);
+  tabs[next].focus();
+}));
 document.querySelectorAll("[data-folder-target]").forEach((button) => button.addEventListener("click", chooseProjectFolder));
 $("#projectForm").addEventListener("submit", saveProject);
 $("#projectBack").addEventListener("click", () => {
@@ -1035,9 +1569,10 @@ function openProjectAssetPicker({ folder = false } = {}) {
   input.hidden = true;
   input.setAttribute("aria-hidden", "true");
   if (folder) input.setAttribute("webkitdirectory", "");
+  const generation = state.projectGeneration;
   const cleanup = () => input.remove();
   input.addEventListener("change", async () => {
-    try { await addProjectAssets(input.files || []); }
+    try { await addProjectAssets(input.files || [], generation); }
     finally { cleanup(); }
   }, { once: true });
   input.addEventListener("cancel", cleanup, { once: true });
@@ -1070,9 +1605,6 @@ $("#projectAssetsDropzone").addEventListener("click", (event) => {
     openProjectAssetPicker();
   }
 });
-$("#projectAssetsDropzone").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openProjectAssetPicker(); }
-});
 $("#projectAssetsDropzone").addEventListener("dragover", (event) => {
   event.preventDefault();
   event.currentTarget.classList.add("dragging");
@@ -1081,7 +1613,19 @@ $("#projectAssetsDropzone").addEventListener("dragleave", (event) => event.curre
 $("#projectAssetsDropzone").addEventListener("drop", async (event) => {
   event.preventDefault();
   event.currentTarget.classList.remove("dragging");
-  await addProjectAssets(await projectFilesFromDrop(event.dataTransfer));
+  const generation = state.projectGeneration;
+  if (!beginProjectAssetOperation(generation)) return;
+  try {
+    const files = await projectFilesFromDrop(event.dataTransfer);
+    if (generation !== state.projectGeneration || !$("#projectDialog").open) return;
+    await addProjectAssets(files, generation);
+  } catch (error) {
+    if (generation === state.projectGeneration && $("#projectDialog").open) {
+      toast(`Could not add the dropped project references: ${error.message || error}`);
+    }
+  } finally {
+    endProjectAssetOperation(generation);
+  }
 });
 $("#seedMinus").addEventListener("click", () => {
   $("#newSeedCount").value = String(Math.max(2, (Number($("#newSeedCount").value) || 10) - 1));
@@ -1090,29 +1634,55 @@ $("#seedPlus").addEventListener("click", () => {
   $("#newSeedCount").value = String(Math.min(20, (Number($("#newSeedCount").value) || 10) + 1));
 });
 $("#projectDialogClose").addEventListener("click", () => $("#projectDialog").close());
+$("#projectDialog").addEventListener("close", () => {
+  state.projectGeneration += 1;
+  state.projectAssetOperationsPending = 0;
+  setProjectAssetMenu(false);
+});
 $("#seedDialogClose").addEventListener("click", () => $("#seedDialog").close());
 $("#seedDialog").addEventListener("close", () => {
+  state.seedGeneration += 1;
   state.seedSessionId = null;
+  state.seedProjectId = null;
   $("#seedPreview").src = "about:blank";
 });
 $("#finishSeeds").addEventListener("click", finishSeedSelection);
 $("#openSeedPreview").addEventListener("click", () => {
   const url = $("#openSeedPreview").dataset.url;
-  if (url) window.open(url, `webkit-seed-${state.seedCurrentId || "preview"}`)?.focus();
+  if (url) {
+    const tab = reservePreviewWindow(`webkit-seed-${state.seedCurrentId || "preview"}`);
+    if (!navigatePreviewWindow(tab, url)) toast(`Preview ready at ${url}. Allow popups to open it automatically.`);
+  }
 });
 $("#openSeedChat").addEventListener("click", () => {
   const session = sessionById(state.seedSessionId);
   if (!session) return;
   $("#seedDialog").close();
-  openSession(session);
+  openSession(session, $("#seedOnboardingButton"));
 });
 $("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").close());
-$("#settingsDialog").addEventListener("close", () => { hotkeyCapture = null; });
-$("#closeChat").addEventListener("click", () => { $("#chatDrawer").hidden = true; state.chatSessionId = null; });
+$("#settingsDialog").addEventListener("cancel", (event) => {
+  if (state.settingsSaveInFlight) event.preventDefault();
+});
+$("#settingsDialog").addEventListener("close", () => {
+  state.settingsGeneration += 1;
+  hotkeyCapture = null;
+});
+$("#closeChat").addEventListener("click", () => {
+  const returnFocus = state.chatReturnFocus;
+  state.chatGeneration += 1;
+  state.chatAttachmentReadsPending = 0;
+  state.chatSendInFlight = false;
+  $("#chatDrawer").hidden = true;
+  state.chatSessionId = null;
+  state.chatReturnFocus = null;
+  if (returnFocus && returnFocus.isConnected && !returnFocus.closest("[hidden]")) returnFocus.focus();
+  else $("#addProjectButton").focus();
+});
 $("#chatForm").addEventListener("submit", sendChat);
 $("#newAgentReasoning").addEventListener("change", () => {
   const project = selectedProject();
-  if (project) localStorage.setItem(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
+  if (project) safeLocalStorageSet(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
 });
 $("#chatReasoning").addEventListener("change", changeChatReasoning);
 $("#attachButton").addEventListener("click", () => $("#chatFiles").click());
@@ -1141,6 +1711,16 @@ $("#chatInput").addEventListener("paste", async (event) => {
 $("#mergeButton").addEventListener("click", () => askConfirm("merge"));
 $("#discardButton").addEventListener("click", () => askConfirm("discard"));
 $("#confirmAction").addEventListener("click", () => state.confirmCallback && state.confirmCallback());
+$("#confirmDialog").addEventListener("cancel", (event) => {
+  if (state.confirmBusy) event.preventDefault();
+});
+$("#confirmDialog").addEventListener("close", () => {
+  state.confirmGeneration += 1;
+  state.confirmBusy = false;
+  state.confirmCallback = null;
+  $("#confirmDialog button[value=\"cancel\"]").disabled = false;
+  setBusy($("#confirmAction"), false);
+});
 
 initialize();
 setInterval(() => refreshProjects().catch(() => {}), 2200);

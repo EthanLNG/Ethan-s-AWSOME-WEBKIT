@@ -1320,8 +1320,10 @@ through the existing local preview server without a build step.
 
 Finally write `seed-directions/manifest.json` with this exact shape:
 {{"version":1,"seeds":[{{"id":"seed-01","title":"short name","direction":"one-line art direction","summary":"what makes it distinct","path":"seed-directions/seed-01/index.html"}}]}}
-Include one entry for every seed, validate that every path opens, then commit
-all seed work. Do not merge, push, or modify the controller checkout.
+Include one entry for every seed and validate that every path opens. Do not run
+Git commands: Codex intentionally protects worktree Git metadata in its safe
+sandbox. The trusted Control Center will validate and commit the completed seed
+folder after this turn. Do not merge, push, or modify the controller checkout.
 """.format(
             count=seed_count,
             last=str(seed_count).zfill(2),
@@ -1388,6 +1390,10 @@ all seed work. Do not merge, push, or modify the controller checkout.
             })
         expected = int(session.get("seedCount") or 0)
         result["seeds"] = seeds
+        if len(seeds) >= expected >= 2 and session.get("status") not in ("busy", "merging"):
+            commit_error = self._commit_generated_seeds(worktree, expected)
+            if commit_error:
+                result["error"] = commit_error
         clean = run_command(["git", "status", "--porcelain"], cwd=worktree, check=False)
         result["ready"] = (
             len(seeds) >= expected >= 2
@@ -1398,6 +1404,51 @@ all seed work. Do not merge, push, or modify the controller checkout.
         if result["ready"]:
             result["status"] = "review"
         return result
+
+    @staticmethod
+    def _worktree_change_paths(worktree):
+        paths = set()
+        commands = (
+            ["git", "diff", "--name-only"],
+            ["git", "diff", "--cached", "--name-only"],
+            ["git", "ls-files", "--others", "--exclude-standard"],
+        )
+        for command in commands:
+            inspected = run_command(command, cwd=worktree, check=False)
+            if inspected.returncode != 0:
+                raise ControlCenterError(
+                    (inspected.stderr or inspected.stdout or "Could not inspect generated files.").strip(), 409
+                )
+            paths.update(line.strip() for line in inspected.stdout.splitlines() if line.strip())
+        return paths
+
+    def _commit_generated_seeds(self, worktree, expected):
+        """Commit validated seed output outside the coding-agent sandbox."""
+        with self.lock:
+            try:
+                paths = self._worktree_change_paths(worktree)
+                if not paths:
+                    return None
+                unexpected = sorted(
+                    path for path in paths
+                    if path != "seed-directions" and not path.startswith("seed-directions/")
+                )
+                if unexpected:
+                    return "The seed agent changed files outside seed-directions: {}".format(
+                        ", ".join(unexpected[:8])
+                    )
+                run_command(["git", "add", "-A", "--", "seed-directions"], cwd=worktree)
+                staged = run_command(["git", "diff", "--cached", "--quiet"], cwd=worktree, check=False)
+                if staged.returncode == 1:
+                    run_command(
+                        ["git", "commit", "-m", "Generate {} design seeds".format(expected)],
+                        cwd=worktree,
+                    )
+                elif staged.returncode != 0:
+                    return "The Control Center could not validate the generated seed commit."
+            except ControlCenterError as exc:
+                return "The Control Center could not commit the generated seeds: {}".format(exc)
+        return None
 
     def choose_seeds(self, session_id, selected, notes=""):
         session = self._get_session(session_id)
@@ -1437,9 +1488,11 @@ production site starting at `{default_page}` with the finished responsive
 website. Move any needed assets into sensible production locations and remove
 the entire `seed-directions/` exploration folder when finished.
 
-Commit all intended work. Merge the local base branch `{base}` into this branch
-and resolve conflicts carefully. Do not merge, push, delete this worktree, or
-change the controller checkout yourself. When the branch is clean and ready,
+Do not run Git commands: Codex intentionally protects worktree Git metadata in
+its safe sandbox. The trusted Control Center will commit the finished files,
+integrate `{base}`, and update the controller checkout after validation. Do not
+merge, push, delete this worktree, or change the controller checkout yourself.
+When the production files are complete and `seed-directions/` is removed,
 write exactly {{"status":"ready","message":"ready to finish onboarding"}}
 to `{marker}`. If user input is required, write
 {{"status":"conflict","message":"<short question>"}} instead.
@@ -1494,6 +1547,7 @@ to `{marker}`. If user input is required, write
         status = self.seed_status(session_id)
         if not status["ready"]:
             raise ControlCenterError(
+                status.get("error") or
                 "The agent finished without a complete, valid seed manifest. Open its chat to continue.", 409
             )
         self._set_project_onboarding(session["projectId"], {
@@ -1522,8 +1576,18 @@ to `{marker}`. If user input is required, write
                 "status": "error", "sessionId": session_id, "message": message,
             })
             raise ControlCenterError(message, 409)
+        config = json.loads((worktree / "webkit" / "webkit.config.json").read_text(encoding="utf-8"))
+        default_page = worktree / str(config.get("default_page", "index.html")).lstrip("/")
+        if not default_page.is_file():
+            raise ControlCenterError("The seed agent did not produce the configured website entry page.", 409)
+        if (worktree / "seed-directions").exists():
+            raise ControlCenterError("The seed agent did not finish cleaning up the exploration folder.", 409)
         if run_command(["git", "status", "--porcelain"], cwd=worktree).stdout.strip():
-            raise ControlCenterError("The seed agent reported ready, but its worktree is not clean.", 409)
+            run_command(["git", "add", "-A"], cwd=worktree)
+            run_command(["git", "commit", "-m", "Build website from selected design seeds"], cwd=worktree)
+        run_command(["git", "merge", "--no-edit", project.get("baseBranch", "main")], cwd=worktree)
+        if run_command(["git", "status", "--porcelain"], cwd=worktree).stdout.strip():
+            raise ControlCenterError("The finalized seed worktree is not clean after integration.", 409)
         project_path = Path(project["path"])
         if run_command(["git", "status", "--porcelain"], cwd=project_path).stdout.strip():
             raise ControlCenterError("The main checkout has uncommitted changes.", 409)
@@ -1797,6 +1861,7 @@ fast-forward, GitHub push, and lifecycle cleanup after your ready signal.
                                 "status": "review", "sessionId": session["id"],
                                 "seedCount": session.get("seedCount", len(status.get("seeds", []))),
                             })
+                            self._set_seed_stage(session["id"], "review")
                         elif session.get("seedPrompt"):
                             runtime.enqueue(
                                 session["seedPrompt"], "seed-generation",

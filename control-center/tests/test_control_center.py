@@ -146,11 +146,6 @@ class ControlCenterTests(unittest.TestCase):
             {"id": "seed-01", "title": "Editorial", "direction": "Type-led", "summary": "Quiet", "path": "seed-directions/seed-01/index.html"},
             {"id": "seed-02", "title": "Kinetic", "direction": "Motion-led", "summary": "Bold", "path": "seed-directions/seed-02/index.html"},
         ]}), encoding="utf-8")
-        subprocess.run(["git", "add", "seed-directions"], cwd=worktree, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "Generate design seeds"], cwd=worktree,
-            check=True, capture_output=True,
-        )
         session = {
             "id": "seed-review", "projectId": project["id"], "projectName": project["name"],
             "provider": "codex", "color": "blue", "emoji": "🔵", "port": 6317,
@@ -168,6 +163,20 @@ class ControlCenterTests(unittest.TestCase):
         status = self.app.sessions.seed_status(session["id"])
         self.assertTrue(status["ready"])
         self.assertEqual([item["id"] for item in status["seeds"]], ["seed-01", "seed-02"])
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain"], cwd=worktree,
+                text=True, capture_output=True, check=True,
+            ).stdout,
+            "",
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "log", "-1", "--pretty=%s"], cwd=worktree,
+                text=True, capture_output=True, check=True,
+            ).stdout.strip(),
+            "Generate 2 design seeds",
+        )
         runtime = mock.Mock()
         runtime.session = session
         self.app.sessions.runtimes[session["id"]] = runtime
@@ -179,6 +188,8 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("Editorial type with kinetic navigation", prompt)
         self.assertIn("seed-01", prompt)
         self.assertIn("seed-02", prompt)
+        self.assertIn("Control Center will commit", prompt)
+        self.assertNotIn("Commit all intended work", prompt)
         self.assertEqual(self.app.projects.get_project(project["id"])["onboarding"]["status"], "finalizing")
 
     def test_add_existing_initializes_git_and_claude_entrypoint(self):

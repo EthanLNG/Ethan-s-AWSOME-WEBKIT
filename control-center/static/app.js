@@ -1024,6 +1024,27 @@ function setProjectAssetMenu(open) {
   $("#projectAssetMenu").hidden = !open;
   $("#projectAssetPicker").setAttribute("aria-expanded", String(open));
 }
+
+function openProjectAssetPicker({ folder = false } = {}) {
+  // Build a new input for every invocation. Chromium can retain directory
+  // chooser state on a reused file input; a fresh input also guarantees that
+  // the individual-file path never carries webkitdirectory/directory.
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.hidden = true;
+  input.setAttribute("aria-hidden", "true");
+  if (folder) input.setAttribute("webkitdirectory", "");
+  const cleanup = () => input.remove();
+  input.addEventListener("change", async () => {
+    try { await addProjectAssets(input.files || []); }
+    finally { cleanup(); }
+  }, { once: true });
+  input.addEventListener("cancel", cleanup, { once: true });
+  document.body.appendChild(input);
+  input.click();
+}
+
 $("#projectAssetPicker").addEventListener("click", (event) => {
   event.stopPropagation();
   setProjectAssetMenu($("#projectAssetMenu").hidden);
@@ -1031,12 +1052,12 @@ $("#projectAssetPicker").addEventListener("click", (event) => {
 $("#chooseProjectAssets").addEventListener("click", (event) => {
   event.stopPropagation();
   setProjectAssetMenu(false);
-  $("#projectAssets").click();
+  openProjectAssetPicker();
 });
 $("#chooseProjectFolder").addEventListener("click", (event) => {
   event.stopPropagation();
   setProjectAssetMenu(false);
-  $("#projectFolder").click();
+  openProjectAssetPicker({ folder: true });
 });
 document.addEventListener("click", (event) => {
   if (!event.target.closest(".project-assets-actions")) setProjectAssetMenu(false);
@@ -1044,21 +1065,13 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#projectAssetMenu").hidden) setProjectAssetMenu(false);
 }, true);
-$("#projectAssets").addEventListener("change", async (event) => {
-  await addProjectAssets(event.target.files || []);
-  event.target.value = "";
-});
-$("#projectFolder").addEventListener("change", async (event) => {
-  await addProjectAssets(event.target.files || []);
-  event.target.value = "";
-});
 $("#projectAssetsDropzone").addEventListener("click", (event) => {
   if (event.target === event.currentTarget || event.target.tagName === "B" || event.target.tagName === "SMALL") {
-    $("#projectAssets").click();
+    openProjectAssetPicker();
   }
 });
 $("#projectAssetsDropzone").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); $("#projectAssets").click(); }
+  if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openProjectAssetPicker(); }
 });
 $("#projectAssetsDropzone").addEventListener("dragover", (event) => {
   event.preventDefault();

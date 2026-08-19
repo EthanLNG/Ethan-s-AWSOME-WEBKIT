@@ -2,6 +2,7 @@ import io
 import json
 import base64
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,61 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("Control Center will commit", prompt)
         self.assertNotIn("Commit all intended work", prompt)
         self.assertEqual(self.app.projects.get_project(project["id"])["onboarding"]["status"], "finalizing")
+
+    def test_seed_finalize_is_committed_and_merged_by_controller(self):
+        parent = self.root / "projects"
+        parent.mkdir()
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6318), mock.patch.object(
+            self.app.projects, "_ensure_github_repo"
+        ):
+            project = self.app.projects.create_project("Finished Seeds", str(parent), "codex")
+        project_path = Path(project["path"])
+        branch = "webkit/red/seed-finalize"
+        worktree = self.root / "seed-finalize-worktree"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", branch, str(worktree), "main"],
+            cwd=project_path, check=True, capture_output=True,
+        )
+        seed_page = worktree / "seed-directions" / "seed-01" / "index.html"
+        seed_page.parent.mkdir(parents=True)
+        seed_page.write_text("<title>Seed</title>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "seed-directions"], cwd=worktree, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Generate 1 design seed"], cwd=worktree,
+            check=True, capture_output=True,
+        )
+        (worktree / "index.html").write_text("<title>Chosen direction</title>\n", encoding="utf-8")
+        shutil.rmtree(worktree / "seed-directions")
+        marker = worktree / ".webkit" / "seed-selection.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text('{"status":"ready","message":"ready to finish onboarding"}\n', encoding="utf-8")
+        session = {
+            "id": "seed-finalize", "projectId": project["id"], "projectName": project["name"],
+            "provider": "codex", "color": "red", "emoji": "🔴", "port": 6318,
+            "branch": branch, "worktree": str(worktree),
+            "previewUrl": "http://127.0.0.1:6318/index.html", "feedbackDir": ".webkit/feedback",
+            "status": "merging", "threadId": None, "hasRun": True, "kind": "seeds",
+            "seedCount": 1, "seedStage": "finalizing", "createdAt": "2026-08-18T00:00:00Z",
+        }
+        self.app.store.update(lambda state: (
+            state.setdefault("sessions", []).append(session),
+            next(item for item in state["projects"] if item["id"] == project["id"]).update({
+                "onboarding": {"status": "finalizing", "sessionId": session["id"], "selected": ["seed-01"]}
+            }),
+        ))
+
+        self.app.sessions._complete_seed_onboarding(session["id"])
+
+        self.assertEqual((project_path / "index.html").read_text(), "<title>Chosen direction</title>\n")
+        self.assertFalse(worktree.exists())
+        self.assertEqual(
+            subprocess.run(
+                ["git", "log", "-1", "--pretty=%s"], cwd=project_path,
+                text=True, capture_output=True, check=True,
+            ).stdout.strip(),
+            "Build website from selected design seeds",
+        )
+        self.assertEqual(self.app.sessions._get_session(session["id"])["status"], "merged")
 
     def test_add_existing_initializes_git_and_claude_entrypoint(self):
         project_path = self.root / "legacy-site"

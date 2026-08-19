@@ -391,7 +391,8 @@ class ReleaseQualityTests(unittest.TestCase):
                     input=source,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
                     check=False,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)

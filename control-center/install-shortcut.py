@@ -23,9 +23,9 @@ def windows_launcher(script_path):
         str(script_path).encode("utf-8", "surrogatepass")
     ).decode("ascii")
     invoke = (
-        "import base64,os,sys;"
+        "import base64,subprocess,sys;"
         "path=base64.b64decode(sys.argv[1]).decode('utf-8','surrogatepass');"
-        "os.execv(sys.executable,[sys.executable,path]+sys.argv[2:])"
+        "raise SystemExit(subprocess.call([sys.executable,path]+sys.argv[2:]))"
     )
     return (
         "@echo off\n"

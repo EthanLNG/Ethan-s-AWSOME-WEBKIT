@@ -195,7 +195,7 @@ class TranscriptionTests(unittest.TestCase):
                 RuntimeError, "Python Whisper transcription timed out after 1.5 seconds"
             ):
                 TRANSCRIBE.run_local_command(["whisper"], "Python Whisper transcription")
-        self.assertEqual(run.call_args.kwargs["timeout"], 1.5)
+        self.assertEqual(run.call_args[1]["timeout"], 1.5)
 
     def test_transcription_timeout_must_be_positive_and_finite(self):
         for value in ("0", "-1", "nan", "inf", "not-a-number"):

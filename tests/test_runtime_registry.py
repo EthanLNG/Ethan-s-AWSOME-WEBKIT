@@ -67,6 +67,64 @@ class RuntimeRegistryTests(unittest.TestCase):
         probe.close()
         return port
 
+    def test_touch_path_falls_back_when_nofollow_utime_is_unavailable(self):
+        target = self.root / "legacy-utime.lock"
+        target.mkdir()
+        real_utime = os.utime
+        calls = []
+
+        def legacy_utime(path, times=None, **options):
+            calls.append(dict(options))
+            if "follow_symlinks" in options:
+                raise NotImplementedError("nofollow utime unavailable")
+            return real_utime(path, times)
+
+        with mock.patch(
+            "runtime_registry.os.utime", side_effect=legacy_utime
+        ):
+            self.assertTrue(runtime_registry.touch_path_nofollow(target))
+
+        self.assertEqual(calls, [{"follow_symlinks": False}, {}])
+
+    def test_binding_canonicalizes_equivalent_color_lock_paths(self):
+        colors = self.root / "colors"
+        (colors / "nested").mkdir(parents=True)
+        direct = colors / "blue.lock"
+        alias = colors / "nested" / ".." / "blue.lock"
+        expected = runtime_registry._validate_binding(
+            5311, "owner", str(direct), "blue"
+        )
+        actual = runtime_registry._validate_binding(
+            5311, "owner", str(alias), "blue"
+        )
+        self.assertEqual(actual, expected)
+
+    def test_binding_matches_equivalent_absolute_owner_paths(self):
+        owners = self.root / "owners"
+        (owners / "nested").mkdir(parents=True)
+        direct = str(owners.absolute())
+        alias = str((owners / "nested" / "..").absolute())
+        record = {
+            "version": 1,
+            "port": 5311,
+            "owner": alias,
+            "colorLock": str((self.root / "colors" / "blue.lock").absolute()),
+            "color": "blue",
+            "token": "a" * 32,
+            "instance": None,
+            "pid": None,
+        }
+        self.assertTrue(
+            runtime_registry._binding_matches(
+                record,
+                5311,
+                direct,
+                record["colorLock"],
+                "blue",
+                record["token"],
+            )
+        )
+
     def test_atomic_port_claim_rolls_back_losing_project_color(self):
         port = self.free_port()
         barrier = threading.Barrier(2)
@@ -526,7 +584,12 @@ class RuntimeRegistryTests(unittest.TestCase):
                     text=True,
                 )
                 time.sleep(0.25)
-                self.assertIsNone(process.poll())
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.fail(
+                        "registry subprocess exited before waiting for the lock: {}"
+                        .format(stdout + stderr)
+                    )
             stdout, stderr = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0, stdout + stderr)
         finally:

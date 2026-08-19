@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import socket
 import stat
 import subprocess
@@ -586,7 +587,10 @@ class LauncherTests(unittest.TestCase):
                 before = {
                     path.name: path.read_bytes()
                     for path in state_dir.iterdir()
-                    if path.is_file()
+                    if (
+                        path.is_file()
+                        and path.name != launch.INSTANCE_LOCK_NAME
+                    )
                 }
                 try:
                     with mock.patch.object(launch, "STATE_DIR", state_dir), mock.patch.object(
@@ -605,9 +609,8 @@ class LauncherTests(unittest.TestCase):
                     self.assertEqual(state_file.read_text(encoding="utf-8"), '{"sentinel":"unchanged"}\n')
                     if corrupt:
                         self.assertEqual(runtime_file.read_text(encoding="utf-8"), "not json\n")
-                    self.assertEqual(
-                        before[launch.INSTANCE_LOCK_NAME],
-                        (state_dir / launch.INSTANCE_LOCK_NAME).read_bytes(),
+                    self.assertTrue(
+                        launch.instance_lock_held(state_dir)
                     )
                 finally:
                     launch.release_instance_lock(owner)
@@ -751,7 +754,7 @@ class LauncherTests(unittest.TestCase):
             launch.stop_spawned_process(process)
         run.assert_called_once()
         self.assertEqual(
-            run.call_args.args[0], ["taskkill", "/PID", "7312", "/T", "/F"]
+            run.call_args[0][0], ["taskkill", "/PID", "7312", "/T", "/F"]
         )
         process.wait.assert_called_once_with(timeout=5)
         process.terminate.assert_not_called()
@@ -822,8 +825,8 @@ class LauncherTests(unittest.TestCase):
                         ((state_dir / launch.STARTUP_LOCK_NAME).stat().st_mode & 0o777),
                         0o600,
                     )
-        self.assertEqual(popen.call_args.kwargs["creationflags"], 520)
-        self.assertNotIn("start_new_session", popen.call_args.kwargs)
+        self.assertEqual(popen.call_args[1]["creationflags"], 520)
+        self.assertNotIn("start_new_session", popen.call_args[1])
 
     def test_main_cleans_up_its_child_when_startup_times_out(self):
         process = mock.Mock(pid=321)
@@ -839,10 +842,16 @@ class LauncherTests(unittest.TestCase):
                 launch, "startup_timeout_seconds", return_value=0
             ), mock.patch.object(
                 launch.subprocess, "Popen", return_value=process
-            ):
+            ), mock.patch.object(
+                launch.subprocess, "run"
+            ) as run:
                 with self.assertRaisesRegex(RuntimeError, "failed to start"):
                     launch.main()
-        process.terminate.assert_called_once_with()
+        if os.name == "nt" and shutil.which("taskkill"):
+            run.assert_called_once()
+            process.terminate.assert_not_called()
+        else:
+            process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)
 
     def test_windows_launcher_prefers_available_python_three_runtimes(self):
@@ -852,7 +861,8 @@ class LauncherTests(unittest.TestCase):
         self.assertLess(text.index("where python3"), text.index("where python >"))
         self.assertIn("sys.version_info[1] not in range(7, 100)", text)
         encoded = base64.b64encode(script_path.encode("utf-8")).decode("ascii")
-        self.assertIn('py -3 -c "import base64,os,sys;', text)
+        self.assertIn('py -3 -c "import base64,subprocess,sys;', text)
+        self.assertIn("subprocess.call([sys.executable,path]+sys.argv[2:])", text)
         self.assertEqual(text.count('"{}" %*'.format(encoded)), 3)
         self.assertNotIn(script_path, text)
         text.encode("ascii")

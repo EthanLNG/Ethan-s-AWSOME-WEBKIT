@@ -59,7 +59,12 @@ def read_bounded_regular_text(path, maximum, label):
         raise ValueError("{} must be a regular file, not a link or special path".format(label))
     if before.st_size > maximum:
         raise ValueError("{} exceeds {} bytes".format(label, maximum))
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = None
     try:
         descriptor = os.open(str(path), flags)
@@ -185,7 +190,12 @@ def read_private_token(path):
         raise ValueError("transition token is unexpectedly large")
     if os.name == "posix" and before.st_mode & 0o077:
         raise ValueError("transition token permissions are not private")
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(str(path), flags)
         try:
@@ -227,7 +237,12 @@ def load_review(path):
     if before.st_size > _MAX_NEXT_REVIEW:
         raise ValueError("next review exceeds 2 MB")
 
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(str(path), flags)
         try:

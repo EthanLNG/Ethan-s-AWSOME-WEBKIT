@@ -68,6 +68,15 @@ from html.parser import HTMLParser
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import parse_qs, unquote, urlparse
 
+if __name__ == "__main__":
+    for _console_stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_console_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            try:
+                _reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _MAX_PROTOCOL_FILE = 2 * 1024 * 1024
 _MAX_CONFIG_FILE = 1024 * 1024
@@ -81,12 +90,99 @@ try:
     from runtime_registry import (  # noqa: E402
         RegistryError as _RuntimeRegistryError,
         inspect_reservation as _inspect_port_reservation,
+        _normalized_binding_path as _normalize_runtime_path,
         read_color_lock as _read_color_lock,
         register_instance as _register_preview_instance,
+        touch_path_nofollow as _touch_path_nofollow,
         touch_reservation as _touch_port_reservation,
     )
 except (ImportError, OSError) as exc:
     sys.exit("preview-server.py: runtime port registry support is unavailable: {}".format(exc))
+
+
+def _normalize_owner_path(path):
+    if os.name == "nt":
+        return _canonical_path(path)
+    return os.path.realpath(path)
+
+
+def _canonical_path(path):
+    """Resolve aliases and reparse points on every supported Python version."""
+    path = os.path.abspath(str(path))
+    if os.name != "nt":
+        return os.path.realpath(path)
+    missing = []
+    existing = path
+    while not os.path.lexists(existing):
+        parent, name = os.path.split(existing)
+        if parent == existing:
+            return _normalize_runtime_path(path)
+        missing.append(name)
+        existing = parent
+    handle = None
+    close_handle = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        handle = create_file(
+            existing,
+            0,
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,
+            0x02000000,
+            None,
+        )
+        if handle == wintypes.HANDLE(-1).value:
+            handle = None
+            return _normalize_runtime_path(path)
+        final_path = kernel32.GetFinalPathNameByHandleW
+        final_path.argtypes = [
+            wintypes.HANDLE,
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        final_path.restype = wintypes.DWORD
+        size = final_path(handle, None, 0, 0)
+        if not size:
+            return _normalize_runtime_path(path)
+        buffer = ctypes.create_unicode_buffer(size + 1)
+        written = final_path(handle, buffer, len(buffer), 0)
+        if not written or written >= len(buffer):
+            return _normalize_runtime_path(path)
+        resolved = buffer.value
+        if resolved.startswith("\\\\?\\UNC\\"):
+            resolved = "\\\\" + resolved[8:]
+        elif resolved.startswith("\\\\?\\"):
+            resolved = resolved[4:]
+        for name in reversed(missing):
+            resolved = os.path.join(resolved, name)
+        return os.path.normcase(os.path.normpath(resolved))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return _normalize_runtime_path(path)
+    finally:
+        if handle is not None and close_handle is not None:
+            try:
+                close_handle(handle)
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass
 
 
 def _reject_json_constant(value):
@@ -124,7 +220,12 @@ def _read_config_text(path):
         raise ValueError("config must be a regular file, not a link or special path")
     if before.st_size > _MAX_CONFIG_FILE:
         raise ValueError("config exceeds 1 MB")
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = None
     try:
         descriptor = os.open(path, flags)
@@ -421,8 +522,8 @@ else:
             sys.exit(
                 "preview-server.py: site_root must be a non-empty relative path."
             )
-        _project_dir = os.path.realpath(os.path.dirname(os.path.dirname(CONFIG_PATH)))
-        ROOT = os.path.realpath(os.path.join(_project_dir, _site_root))
+        _project_dir = _canonical_path(os.path.dirname(os.path.dirname(CONFIG_PATH)))
+        ROOT = _canonical_path(os.path.join(_project_dir, _site_root))
         try:
             _inside_project = os.path.commonpath((_project_dir, ROOT)) == _project_dir
         except ValueError:
@@ -434,14 +535,14 @@ else:
     else:
         ROOT = os.getcwd()
 
-ROOT = os.path.realpath(ROOT)
+ROOT = _canonical_path(ROOT)
 if not os.path.isdir(ROOT):
     sys.exit("preview-server.py: root directory does not exist or is not a directory.")
 
 
 def _path_is_within(base, candidate):
-    base = os.path.realpath(base)
-    candidate = os.path.realpath(candidate)
+    base = _canonical_path(base)
+    candidate = _canonical_path(candidate)
     try:
         return os.path.commonpath((base, candidate)) == base
     except ValueError:
@@ -449,8 +550,8 @@ def _path_is_within(base, candidate):
 
 
 def _path_is_lexically_within(base, candidate):
-    base = os.path.abspath(base)
-    candidate = os.path.abspath(candidate)
+    base = _normalize_runtime_path(base)
+    candidate = _normalize_runtime_path(candidate)
     try:
         return os.path.commonpath((base, candidate)) == base
     except ValueError:
@@ -499,10 +600,10 @@ def _static_path_allowed(request_path, translated_path):
     requested = [part for part in decoded.split("/") if part]
     if any(part in (".", "..") or _private_static_component(part) for part in requested):
         return False
-    resolved = os.path.realpath(translated_path)
+    resolved = _canonical_path(translated_path)
     if not _path_is_within(ROOT, resolved):
         return False
-    relative = os.path.relpath(resolved, ROOT)
+    relative = os.path.relpath(resolved, _canonical_path(ROOT))
     if relative == os.curdir:
         return True
     return not any(
@@ -533,7 +634,7 @@ def _verify_claim():
         not isinstance(lockdir, str)
         or not lockdir
         or not os.path.isabs(lockdir)
-        or os.path.realpath(lockdir) == os.path.realpath(os.path.sep)
+        or _canonical_path(lockdir) == _canonical_path(os.path.abspath(os.path.sep))
         or os.path.islink(lockdir)
     ):
         sys.exit(
@@ -560,8 +661,8 @@ def _verify_claim():
                 COLOR, lock, exc
             )
         )
-    claimed_root = os.path.realpath(GIT_ROOT or ROOT)
-    if os.path.realpath(owner) != claimed_root:
+    claimed_root = _normalize_owner_path(GIT_ROOT or ROOT)
+    if _normalize_owner_path(owner) != claimed_root:
         sys.exit(
             "preview-server.py: refusing to stamp {} - its lock is owned by another "
             "agent's worktree:\n    {}\nThis server's worktree is:\n    {}\n"
@@ -625,14 +726,15 @@ def _touch_owned_claim(claim=None):
         after = os.lstat(lock)
         if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
             return False
-        if os.path.realpath(owner) != expected_owner:
+        if _normalize_owner_path(owner) != _normalize_owner_path(expected_owner):
             return False
         if reservation_token is not None and not _touch_port_reservation(
             PORT, owner, os.path.abspath(lock), SLUG, reservation_token,
             INSTANCE_TOKEN,
         ):
             return False
-        os.utime(lock, None, follow_symlinks=False)
+        if not _touch_path_nofollow(lock):
+            return False
     except (OSError, TypeError, ValueError):
         return False
     return True
@@ -673,7 +775,7 @@ def _git_root():
     if p.returncode != 0:
         return None
     top = p.stdout.strip()
-    return top or None
+    return _canonical_path(top) if top else None
 
 
 def _git_common_dir():
@@ -693,7 +795,7 @@ def _git_common_dir():
         return None
     if not os.path.isabs(value):
         value = os.path.join(ROOT, value)
-    return os.path.realpath(value)
+    return _canonical_path(value)
 
 
 GIT_ROOT = _git_root()
@@ -704,7 +806,7 @@ if _project_name is not None and (
     not isinstance(_project_name, str) or not _SLUG_RE.fullmatch(_project_name)
 ):
     sys.exit("preview-server.py: project_name must be a safe token up to 64 characters.")
-_project_identity_source = GIT_COMMON_DIR or os.path.realpath(ROOT)
+_project_identity_source = _normalize_owner_path(GIT_COMMON_DIR or ROOT)
 PROJECT_STORAGE_ID = "{}-{}".format(
     _project_name or "project",
     hashlib.sha256(_project_identity_source.encode("utf-8")).hexdigest()[:16],
@@ -719,7 +821,7 @@ if GIT_ROOT:
         or os.path.isabs(_feedback_value)
     ):
         sys.exit("preview-server.py: feedback_dir must be a non-empty relative path.")
-    _git_root_real = os.path.realpath(GIT_ROOT)
+    _git_root_real = _canonical_path(GIT_ROOT)
     _feedback_root_lexical = os.path.abspath(
         os.path.join(_git_root_real, _feedback_value)
     )
@@ -737,14 +839,15 @@ if GIT_ROOT:
     _feedback_lexical = os.path.abspath(
         os.path.join(_feedback_root_lexical, SLUG)
     )
-    FEEDBACK_DIR = os.path.realpath(_feedback_lexical)
+    FEEDBACK_DIR = _canonical_path(_feedback_lexical)
     if not _path_is_lexically_within(
         _git_root_real, _feedback_root_lexical
     ) or not _path_is_lexically_within(_git_root_real, _feedback_lexical):
         sys.exit("preview-server.py: feedback_dir must stay inside the git repository.")
     if (
-        os.path.realpath(_feedback_root_lexical) != _feedback_root_lexical
-        or FEEDBACK_DIR != _feedback_lexical
+        _canonical_path(_feedback_root_lexical)
+        != _normalize_runtime_path(_feedback_root_lexical)
+        or FEEDBACK_DIR != _normalize_runtime_path(_feedback_lexical)
     ):
         sys.exit("preview-server.py: feedback_dir must not traverse symbolic links.")
     try:
@@ -788,7 +891,7 @@ if GIT_ROOT:
         )
     os.makedirs(FEEDBACK_DIR, exist_ok=True)
     TRANSITION_TOKEN_PATH = os.path.join(FEEDBACK_DIR, "transition-token")
-OVERLAY_DIR = os.path.realpath(os.path.join(_HERE, "..", "overlay"))
+OVERLAY_DIR = _canonical_path(os.path.join(_HERE, "..", "overlay"))
 
 
 def _publish_transition_token():
@@ -2279,7 +2382,7 @@ def _voice_notes_directory(create=False):
         except FileExistsError:
             if os.path.islink(directory) or not os.path.isdir(directory):
                 return None
-    resolved = os.path.realpath(directory)
+    resolved = _canonical_path(directory)
     return resolved if _path_is_within(FEEDBACK_DIR, resolved) else None
 
 
@@ -2294,10 +2397,10 @@ def _voice_note_candidate(relative):
     directory = _voice_notes_directory()
     if directory is None:
         return None
-    candidate = os.path.abspath(os.path.join(GIT_ROOT, relative))
+    candidate = _normalize_runtime_path(os.path.join(GIT_ROOT, relative))
     stem, extension = os.path.splitext(os.path.basename(candidate))
     if (
-        os.path.dirname(candidate) != directory
+        _canonical_path(os.path.dirname(candidate)) != _canonical_path(directory)
         or os.path.relpath(candidate, GIT_ROOT).replace(os.sep, "/") != relative
         or not _VOICE_ID.fullmatch(stem)
         or extension not in set(_VOICE_TYPES.values())
@@ -2407,7 +2510,7 @@ def _gc_voice_notes(now=None, grace_seconds=None, include_counts=False):
                     )
                 )
             try:
-                before = entry.stat(follow_symlinks=False)
+                before = os.lstat(entry.path)
             except OSError as exc:
                 raise _VoiceStorageError(
                     "voice-note entry is unreadable: {}".format(exc)
@@ -3485,10 +3588,10 @@ class Handler(SimpleHTTPRequestHandler):
             fs = index_path
         if not _path_is_within(ROOT, fs):
             return self._send_json(403, {"error": "path escapes the preview root"})
-        fs = os.path.realpath(fs)
+        fs = _canonical_path(fs)
         if not _path_is_within(GIT_ROOT, fs):
             return self._send_json(403, {"error": "path escapes the git repository"})
-        rel = os.path.relpath(fs, os.path.realpath(GIT_ROOT))
+        rel = os.path.relpath(fs, _canonical_path(GIT_ROOT))
         before_ref = (review or {}).get("beforeRef")
         if not before_ref:
             return self._send_json(409, {"error": "no review round active"})
@@ -4461,6 +4564,8 @@ if __name__ == "__main__":
 
     signal.signal(signal.SIGINT, stop_on_signal)
     signal.signal(signal.SIGTERM, stop_on_signal)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, stop_on_signal)
     try:
         _publish_transition_token()
         if CLAIM is not None:

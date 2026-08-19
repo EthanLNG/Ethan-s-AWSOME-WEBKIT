@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import stat
@@ -26,9 +27,35 @@ sys.path.insert(0, str(RUNTIME_SCRIPTS))
 from runtime_registry import claim_color, release_color  # noqa: E402
 
 
+def _remove_test_tree(path):
+    def repair_and_retry(operation, target, _error):
+        try:
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD)
+            operation(target)
+        except OSError:
+            raise
+
+    last_error = None
+    for _attempt in range(5):
+        try:
+            shutil.rmtree(path, onerror=repair_and_retry)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05)
+    if last_error is not None:
+        raise last_error
+
+
+class _WritableTemporaryDirectory(tempfile.TemporaryDirectory):
+    def cleanup(self):
+        if self._finalizer.detach():
+            _remove_test_tree(self.name)
+
+
 class PreviewServerTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = _WritableTemporaryDirectory()
         self.root = Path(self.temp.name)
         (self.root / "webkit").mkdir()
         (self.root / "index.html").write_text("<html><head></head><body>Preview</body></html>", encoding="utf-8")
@@ -576,7 +603,9 @@ class PreviewServerTests(unittest.TestCase):
         valid = notes / "voice-123456.webm"
         valid.write_bytes(b"audio")
         valid_note = {
-            "path": os.path.relpath(valid, self.module.GIT_ROOT),
+            "path": os.path.relpath(valid, self.module.GIT_ROOT).replace(
+                os.sep, "/"
+            ),
             "mimeType": "audio/webm",
             "bytes": 5,
         }
@@ -821,7 +850,9 @@ class PreviewServerTests(unittest.TestCase):
         original_unlink = self.module.os.unlink
 
         def block_initial_cleanup(path):
-            if os.path.realpath(path) == os.path.realpath(initial_path):
+            if self.module._canonical_path(path) == self.module._canonical_path(
+                initial_path
+            ):
                 raise OSError("simulated cleanup interruption")
             return original_unlink(path)
 
@@ -947,7 +978,10 @@ class PreviewServerTests(unittest.TestCase):
                 self.assertEqual(
                     events[1], ("replace", os.path.realpath(target))
                 )
-                self.assertEqual(events[2], ("fsync", "directory"))
+                if os.name == "nt":
+                    self.assertEqual(len(events), 2)
+                else:
+                    self.assertEqual(events[2], ("fsync", "directory"))
                 self.assertTrue(target.is_file())
 
     def test_atomic_writers_leave_old_target_and_clean_temp_on_fsync_failure(self):
@@ -1078,7 +1112,7 @@ class PreviewServerTests(unittest.TestCase):
         self.assertFalse((self.inbox / "voice-notes").exists())
 
     def test_voice_notes_symlink_cannot_redirect_upload_or_delete(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             outside_path = Path(outside)
             (self.inbox / "voice-notes").symlink_to(outside_path, target_is_directory=True)
 
@@ -2276,7 +2310,8 @@ class PreviewServerTests(unittest.TestCase):
         config["palette"][0]["port"] = port
         self.config_path.write_text(json.dumps(config), encoding="utf-8")
         token_path = Path(self.module.TRANSITION_TOKEN_PATH)
-        original_token = token_path.read_text(encoding="utf-8").strip()
+        original_token = "foreign-transition-token-" + ("x" * 32)
+        token_path.write_text(original_token + "\n", encoding="utf-8")
         notes = self.inbox / "voice-notes"
         notes.mkdir()
         stale_orphan = notes / "voice-stale1.webm"
@@ -2289,6 +2324,9 @@ class PreviewServerTests(unittest.TestCase):
             "WK_COLOR_FORCE": "1",
             "PYTHONPYCACHEPREFIX": str(self.root / "pycache"),
         })
+        popen_options = {}
+        if os.name == "nt":
+            popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         process = subprocess.Popen(
             [sys.executable, str(SERVER_PATH), "🔵", str(port), str(self.root)],
             cwd=self.root,
@@ -2296,11 +2334,15 @@ class PreviewServerTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            **popen_options,
+        )
+        stop_signal = (
+            signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM
         )
         try:
-            deadline = time.time() + 5
+            deadline = time.monotonic() + 60
             child_token = original_token
-            while time.time() < deadline:
+            while time.monotonic() < deadline:
                 if token_path.is_file():
                     child_token = token_path.read_text(encoding="utf-8").strip()
                     if child_token != original_token:
@@ -2308,9 +2350,19 @@ class PreviewServerTests(unittest.TestCase):
                 if process.poll() is not None:
                     break
                 time.sleep(0.02)
+            if child_token == original_token:
+                if process.poll() is None:
+                    process.send_signal(stop_signal)
+                stdout, stderr = process.communicate(timeout=5)
+                self.fail(
+                    "preview subprocess did not publish its token; return code {}; "
+                    "stdout={!r}; stderr={!r}".format(
+                        process.returncode, stdout[-2000:], stderr[-2000:]
+                    )
+                )
             self.assertNotEqual(child_token, original_token)
             self.assertFalse(stale_orphan.exists())
-            process.send_signal(signal.SIGTERM)
+            process.send_signal(stop_signal)
             _, stderr = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0, stderr)
             self.assertFalse(token_path.exists())
@@ -2685,7 +2737,7 @@ class PreviewServerTests(unittest.TestCase):
         self.assertIn(b" 400 ", response.split(b"\r\n", 1)[0])
 
     def test_static_symlink_cannot_escape_document_root(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             secret = Path(outside) / "secret.txt"
             secret.write_text("not public", encoding="utf-8")
             (self.root / "leak.txt").symlink_to(secret)
@@ -2729,7 +2781,7 @@ class PreviewServerTests(unittest.TestCase):
         self.assertNotIn(b"TOP_SECRET", payload)
 
     def test_head_symlink_cannot_escape_document_root(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             secret = Path(outside) / "secret.txt"
             secret.write_text("not public", encoding="utf-8")
             (self.root / "head-leak.txt").symlink_to(secret)
@@ -2738,7 +2790,7 @@ class PreviewServerTests(unittest.TestCase):
             self.assertEqual(payload, b"")
 
     def test_before_route_symlink_cannot_escape_document_root(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             secret = Path(outside) / "secret.txt"
             secret.write_text("not public", encoding="utf-8")
             (self.root / "before-leak.txt").symlink_to(secret)
@@ -3031,7 +3083,7 @@ content="default-src 'none'; invalid@directive 'self'"></head><body>historical p
         self.assertEqual(status, 413, payload)
 
     def test_configured_site_root_cannot_escape_through_a_symlink(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             linked = self.root / "linked-site"
             linked.symlink_to(outside, target_is_directory=True)
             config = json.loads(self.config_path.read_text(encoding="utf-8"))
@@ -3068,7 +3120,7 @@ content="default-src 'none'; invalid@directive 'self'"></head><body>historical p
         self.assertEqual(module.COLOR, "😀")
 
     def test_feedback_directory_and_slug_cannot_escape_repository(self):
-        with tempfile.TemporaryDirectory() as outside:
+        with _WritableTemporaryDirectory() as outside:
             outside_path = Path(outside)
             linked = self.root / "linked-feedback"
             linked.symlink_to(outside_path, target_is_directory=True)
@@ -3143,7 +3195,7 @@ content="default-src 'none'; invalid@directive 'self'"></head><body>historical p
         self.assertTrue(Path(safe.FEEDBACK_DIR).is_dir())
 
     def test_project_storage_identity_is_repo_unique_and_shared_by_worktrees(self):
-        with tempfile.TemporaryDirectory() as workspace:
+        with _WritableTemporaryDirectory() as workspace:
             workspace = Path(workspace)
             main = workspace / "main"
             linked = workspace / "linked"

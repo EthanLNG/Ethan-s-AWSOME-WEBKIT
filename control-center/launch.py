@@ -193,7 +193,7 @@ def _open_private_regular(path, flags):
     ):
         raise RuntimeError("State file must be a regular file: {}".format(path))
 
-    open_flags = flags | os.O_CREAT
+    open_flags = flags | os.O_CREAT | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         open_flags |= os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):
@@ -235,7 +235,7 @@ def _read_private_regular(path, limit):
         raise RuntimeError("State file must be a regular file: {}".format(path))
     if before.st_size > limit:
         raise RuntimeError("State file is unexpectedly large: {}".format(path))
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NONBLOCK"):
         flags |= os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):

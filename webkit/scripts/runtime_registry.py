@@ -100,6 +100,77 @@ def _path_exists(path):
     return os.path.lexists(str(path))
 
 
+def _normalized_binding_path(path):
+    path = os.path.abspath(str(path))
+    if os.name == "nt":
+        missing = []
+        existing = path
+        while not os.path.lexists(existing):
+            parent, name = os.path.split(existing)
+            if parent == existing:
+                break
+            missing.append(name)
+            existing = parent
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            get_long_path = ctypes.WinDLL(
+                "kernel32", use_last_error=True
+            ).GetLongPathNameW
+            get_long_path.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.LPWSTR,
+                wintypes.DWORD,
+            ]
+            get_long_path.restype = wintypes.DWORD
+            required = get_long_path(existing, None, 0)
+            if required:
+                buffer = ctypes.create_unicode_buffer(required + 1)
+                written = get_long_path(existing, buffer, len(buffer))
+                if written and written < len(buffer):
+                    path = buffer.value
+                    for name in reversed(missing):
+                        path = os.path.join(path, name)
+        except (AttributeError, OSError, ValueError):
+            pass
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _normalized_owner_path(path):
+    path = str(path)
+    if not os.path.isabs(path):
+        return path
+    if os.name == "nt":
+        return _normalized_binding_path(path)
+    return os.path.realpath(path)
+
+
+def _owners_match(first, second):
+    return _normalized_owner_path(first) == _normalized_owner_path(second)
+
+
+def touch_path_nofollow(path):
+    """Refresh one real path without accepting a replacement or link."""
+    path = str(path)
+    try:
+        before = os.lstat(path)
+        if stat.S_ISLNK(before.st_mode):
+            return False
+        try:
+            os.utime(path, None, follow_symlinks=False)
+        except (NotImplementedError, TypeError):
+            os.utime(path, None)
+        after = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(after.st_mode)
+        and (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+        == (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+    )
+
+
 def _validate_port(port):
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise RegistryError("preview port must be an integer between 1 and 65535")
@@ -135,7 +206,7 @@ def _validate_binding(port, owner, color_lock, color, token=None):
     color_lock = str(color_lock)
     if not _safe_text(color_lock) or not os.path.isabs(color_lock):
         raise RegistryError("color lock path must be absolute")
-    color_lock = os.path.abspath(color_lock)
+    color_lock = _normalized_binding_path(color_lock)
     if not isinstance(color, str) or SLUG_RE.fullmatch(color) is None:
         raise RegistryError("color must be a safe palette slug")
     if token is not None and (
@@ -327,7 +398,11 @@ def _registry_mutation_lock(registry):
     handle = None
     with _PROCESS_REGISTRY_LOCK:
         try:
-            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            flags = (
+                os.O_RDWR
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
             created = False
             try:
                 descriptor = os.open(
@@ -452,7 +527,12 @@ def _read_record(lock):
             or stat.S_IMODE(record_stat.st_mode) & 0o077
         ):
             raise RegistryError("port reservation files must be private and user-owned")
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = None
     try:
         descriptor = os.open(str(record_path), flags)
@@ -607,7 +687,13 @@ def _write_new_record(lock, value):
     payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     descriptor = None
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(str(path), flags, 0o600)
         _write_all(descriptor, payload)
         os.fsync(descriptor)
@@ -634,7 +720,13 @@ def _replace_record_locked(lock, expected, updated):
         temporary = lock.parent / ".wk-update-{}".format(
             secrets.token_urlsafe(18)
         )
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = os.open(str(temporary), flags, 0o600)
         if os.name == "posix":
             os.fchmod(descriptor, 0o600)
@@ -658,7 +750,10 @@ def _replace_record_locked(lock, expected, updated):
             final_lock_stat.st_ino,
         ):
             raise RegistryError("port reservation changed after its record update")
-        os.utime(str(lock), None, follow_symlinks=False)
+        if not touch_path_nofollow(lock):
+            raise RegistryError(
+                "port reservation changed while its lease was refreshed"
+            )
         touched, touched_lock_stat = _read_record(lock)
         if touched != updated or (lock_stat.st_dev, lock_stat.st_ino) != (
             touched_lock_stat.st_dev,
@@ -677,11 +772,21 @@ def _replace_record_locked(lock, expected, updated):
 
 def _binding_matches(record, port, owner, color_lock, color, token=None):
     expected = _validate_binding(port, owner, color_lock, color, token)
-    actual = (
-        record.get("port"), record.get("owner"), record.get("colorLock"),
-        record.get("color"),
-    )
-    if actual != expected:
+    try:
+        actual = _validate_binding(
+            record.get("port"),
+            record.get("owner"),
+            record.get("colorLock"),
+            record.get("color"),
+        )
+    except RegistryError:
+        return False
+    if (
+        actual[0] != expected[0]
+        or _normalized_owner_path(actual[1])
+        != _normalized_owner_path(expected[1])
+        or actual[2:] != expected[2:]
+    ):
         return False
     return token is None or record.get("token") == token
 
@@ -739,7 +844,7 @@ def find_reservation(color_lock, token):
     """Find one reservation by its color-lock path and random token."""
     if not isinstance(token, str) or TOKEN_RE.fullmatch(token) is None:
         raise RegistryError("reservation token is invalid")
-    color_lock = os.path.abspath(str(color_lock))
+    color_lock = _normalized_binding_path(color_lock)
     registry = _validate_registry(runtime_registry_path(), create=False)
     if not _path_exists(registry):
         return None, None
@@ -748,7 +853,10 @@ def find_reservation(color_lock, token):
         if PORT_ENTRY_RE.fullmatch(name) is None:
             continue
         record, lock_stat = _read_record(registry / name)
-        if record.get("token") == token and record.get("colorLock") == color_lock:
+        if (
+            record.get("token") == token
+            and _normalized_binding_path(record.get("colorLock")) == color_lock
+        ):
             matches.append((record, lock_stat))
     if len(matches) > 1:
         raise RegistryError("reservation token is duplicated in the runtime registry")
@@ -771,7 +879,7 @@ def find_owner_reservations(owner, color=None):
         if PORT_ENTRY_RE.fullmatch(name) is None:
             continue
         record, lock_stat = _read_record(registry / name)
-        if record.get("owner") == owner and (
+        if _owners_match(record.get("owner"), owner) and (
             color is None or record.get("color") == color
         ):
             matches.append((record, lock_stat))
@@ -895,23 +1003,29 @@ def _reserve_port_locked(registry, port, owner, color_lock, color, grace_seconds
 
 
 def register_instance(port, owner, color_lock, color, token, instance, pid):
-    _validate_binding(port, owner, color_lock, color, token)
+    port, owner, color_lock, color = _validate_binding(
+        port, owner, color_lock, color, token
+    )
     if not isinstance(instance, str) or INSTANCE_RE.fullmatch(instance) is None:
         raise RegistryError("preview instance identity is invalid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise RegistryError("preview process identity is invalid")
     registry = _validate_registry(runtime_registry_path(), create=False)
-    lock = _record_path(registry, port)
-    record, _unused = _read_record(lock)
-    if not _binding_matches(record, port, owner, color_lock, color, token):
-        raise RegistryError("port reservation belongs to another claim")
-    updated = dict(record, instance=instance, pid=pid)
-    _replace_record(lock, record, updated)
-    return updated
+    with _registry_mutation_lock(registry):
+        _validate_registry(registry, create=False, recover=True)
+        lock = _record_path(registry, port)
+        record, _unused = _read_record(lock)
+        if not _binding_matches(record, port, owner, color_lock, color, token):
+            raise RegistryError("port reservation belongs to another claim")
+        updated = dict(record, instance=instance, pid=pid)
+        _replace_record_locked(lock, record, updated)
+        return updated
 
 
 def touch_reservation(port, owner, color_lock, color, token, instance=None):
-    _validate_binding(port, owner, color_lock, color, token)
+    port, owner, color_lock, color = _validate_binding(
+        port, owner, color_lock, color, token
+    )
     registry = _validate_registry(runtime_registry_path(), create=False)
     if not _path_exists(registry):
         return False
@@ -926,7 +1040,8 @@ def touch_reservation(port, owner, color_lock, color, token, instance=None):
         current = os.lstat(str(lock))
         if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
             return False
-        os.utime(str(lock), None, follow_symlinks=False)
+        if not touch_path_nofollow(lock):
+            return False
         after_record, after = _read_record(lock)
         return (
             after_record == record
@@ -935,7 +1050,9 @@ def touch_reservation(port, owner, color_lock, color, token, instance=None):
 
 
 def release_port(port, owner, color_lock, color, token, force=False):
-    _validate_binding(port, owner, color_lock, color, token)
+    port, owner, color_lock, color = _validate_binding(
+        port, owner, color_lock, color, token
+    )
     registry = _validate_registry(runtime_registry_path(), create=False)
     if not _path_exists(registry):
         return False
@@ -1006,7 +1123,12 @@ def read_color_lock(lock):
             raise RegistryError(
                 "color lock {} must be private and user-owned".format(name)
             )
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         descriptor = None
         try:
             descriptor = os.open(str(path), flags)
@@ -1052,7 +1174,13 @@ def _write_color_line(lock, name, value):
     temporary = lock / ".wk-write-{}-{}".format(
         name, secrets.token_urlsafe(18)
     )
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     descriptor = os.open(str(temporary), flags, 0o600)
     try:
         _write_all(descriptor, (value + "\n").encode("utf-8"))
@@ -1129,11 +1257,12 @@ def _reservations_for_color_lock(color_lock):
     if not _path_exists(registry):
         return []
     result = []
+    expected_lock = _normalized_binding_path(color_lock)
     for name in os.listdir(str(registry)):
         if PORT_ENTRY_RE.fullmatch(name) is None:
             continue
         record, lock_stat = _read_record(registry / name)
-        if record.get("colorLock") == os.path.abspath(str(color_lock)):
+        if _normalized_binding_path(record.get("colorLock")) == expected_lock:
             result.append((record, lock_stat))
     return result
 
@@ -1269,7 +1398,7 @@ def color_session_status(lock, port, color, expected_owner, grace_seconds=180):
         port, expected_owner, os.path.abspath(str(lock)), color
     )
     owner, token, color_stat = read_color_lock(lock)
-    if owner != expected_owner:
+    if not _owners_match(owner, expected_owner):
         return "foreign", None
     grace = _validate_grace_seconds(grace_seconds)
     if token is None:
@@ -1278,7 +1407,7 @@ def color_session_status(lock, port, color, expected_owner, grace_seconds=180):
     record, record_stat = find_reservation(str(Path(lock).absolute()), token)
     if record is None:
         return "missing", None
-    if record.get("owner") != owner or record.get("color") != color:
+    if not _owners_match(record.get("owner"), owner) or record.get("color") != color:
         return "foreign", record
     status = reservation_status(record, record_stat, grace_seconds)
     return status, record
@@ -1319,7 +1448,9 @@ def claim_color(lock_dir, color, port, owner, grace_seconds=180):
             owner_now, token_now, color_stat = read_color_lock(lock)
             if token_now is None:
                 age = max(0.0, time.time() - color_stat.st_mtime)
-                same_owner_stale = owner_now == owner and age > float(grace_seconds)
+                same_owner_stale = _owners_match(owner_now, owner) and age > float(
+                    grace_seconds
+                )
                 if not same_owner_stale:
                     raise ReservationBusy("{} is already claimed".format(color), status="legacy")
             else:
@@ -1332,7 +1463,7 @@ def claim_color(lock_dir, color, port, owner, grace_seconds=180):
                     )
             _cleanup_existing_color(
                 lock, owner_now, token_now, port, color,
-                force=(owner_now != owner),
+                force=(not _owners_match(owner_now, owner)),
             )
             continue
         except OSError as exc:
@@ -1393,13 +1524,13 @@ def release_color(lock_dir, color, port, owner, force=False):
         if actual_lock != actual_lock_dir / (color + ".lock") or not _path_exists(actual_lock):
             raise RegistryError("global reservation points to a missing color lock")
         actual_owner, actual_token, _unused = read_color_lock(actual_lock)
-        if actual_owner != owner or actual_token != record["token"]:
+        if not _owners_match(actual_owner, owner) or actual_token != record["token"]:
             raise RegistryError("global reservation and color lock do not match")
         return release_color(
             actual_lock_dir, color, record["port"], owner, force=force
         )
     existing_owner, token, _unused = read_color_lock(lock)
-    if existing_owner != owner and not force:
+    if not _owners_match(existing_owner, owner) and not force:
         raise ReservationBusy(
             "{} is claimed by another owner".format(color), status="foreign"
         )
@@ -1440,10 +1571,10 @@ def discover_active(palette, lock_dir, owner, grace_seconds=180):
             if not _path_exists(lock):
                 continue
             lock_owner, token, _unused = read_color_lock(lock)
-            if lock_owner != owner:
+            if not _owners_match(lock_owner, owner):
                 continue
             if token is not None:
-                seen.add((str(lock.absolute()), token))
+                seen.add((_normalized_binding_path(lock), token))
             status, record = color_session_status(
                 lock, port, color, owner, grace_seconds
             )
@@ -1459,10 +1590,10 @@ def discover_active(palette, lock_dir, owner, grace_seconds=180):
                 continue
             lock = lock_dir / name
             lock_owner, token, _unused = read_color_lock(lock)
-            if lock_owner != owner:
+            if not _owners_match(lock_owner, owner):
                 continue
             if token is not None:
-                seen.add((str(lock.absolute()), token))
+                seen.add((_normalized_binding_path(lock), token))
             status, _record = color_session_status(
                 lock, 1, color, owner, grace_seconds
             )
@@ -1471,7 +1602,7 @@ def discover_active(palette, lock_dir, owner, grace_seconds=180):
             ):
                 blockers.append(({"slug": color}, "unconfigured-" + status))
     for record, lock_stat in find_owner_reservations(owner):
-        key = (record["colorLock"], record["token"])
+        key = (_normalized_binding_path(record["colorLock"]), record["token"])
         if key in seen:
             continue
         color = record["color"]
@@ -1484,8 +1615,9 @@ def discover_active(palette, lock_dir, owner, grace_seconds=180):
             old_lock_dir = _validate_color_registry(old_lock.parent, create=False)
             old_owner, old_token, _unused = read_color_lock(old_lock)
             linked = (
-                old_lock == old_lock_dir / (color + ".lock")
-                and old_owner == owner
+                _normalized_binding_path(old_lock)
+                == _normalized_binding_path(old_lock_dir / (color + ".lock"))
+                and _owners_match(old_owner, owner)
                 and old_token == record["token"]
             )
         except RegistryError:

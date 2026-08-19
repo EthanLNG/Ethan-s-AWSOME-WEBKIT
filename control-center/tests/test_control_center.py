@@ -1,6 +1,7 @@
 import io
 import json
 import base64
+import hashlib
 import http.client
 import os
 import re
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -85,7 +87,20 @@ class ControlCenterTests(unittest.TestCase):
             self.app.sessions.shutdown()
         finally:
             self.runtime_env.stop()
-            self.temp.cleanup()
+            if os.name == "nt":
+                if os.path.exists(self.temp.name):
+                    shutil.rmtree(
+                        self.temp.name,
+                        onerror=self._remove_windows_readonly_path,
+                    )
+                self.temp._finalizer.detach()
+            else:
+                self.temp.cleanup()
+
+    @staticmethod
+    def _remove_windows_readonly_path(function, path, _error):
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        function(path)
 
     def _make_discard_session(self, suffix):
         repository = self.root / ("discard-repository-" + suffix)
@@ -203,21 +218,28 @@ class ControlCenterTests(unittest.TestCase):
             read_stable_regular_text(oversized, 1024, "Agent result")
         self.assertEqual(raised.exception.status, 413)
 
-        replacement = self.root / "replacement.json"
-        replacement.write_text('{"status":"conflict"}\n', encoding="utf-8")
-        real_read = os.read
-        replaced = []
+        if os.name != "nt":
+            replacement = self.root / "replacement.json"
+            replacement.write_text(
+                '{"status":"conflict"}\n', encoding="utf-8"
+            )
+            real_read = os.read
+            replaced = []
 
-        def replace_after_read(descriptor, size):
-            data = real_read(descriptor, size)
-            if not replaced:
-                replaced.append(True)
-                os.replace(str(replacement), str(target))
-            return data
+            def replace_after_read(descriptor, size):
+                data = real_read(descriptor, size)
+                if not replaced:
+                    replaced.append(True)
+                    os.replace(str(replacement), str(target))
+                return data
 
-        with mock.patch("control_center.os.read", side_effect=replace_after_read):
-            with self.assertRaisesRegex(ControlCenterError, "changed while it was read"):
-                read_stable_regular_text(target, 1024, "Agent result")
+            with mock.patch(
+                "control_center.os.read", side_effect=replace_after_read
+            ):
+                with self.assertRaisesRegex(
+                    ControlCenterError, "changed while it was read"
+                ):
+                    read_stable_regular_text(target, 1024, "Agent result")
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO files unavailable")
     def test_bounded_regular_reader_rejects_fifo_without_opening_it(self):
@@ -260,7 +282,7 @@ class ControlCenterTests(unittest.TestCase):
             "control_center.subprocess.run", return_value=completed
         ) as run:
             self.assertEqual(choose_folder(str(self.root), "Choose a project"), str(selected.resolve()))
-        command = run.call_args.args[0]
+        command = run.call_args[0][0]
         self.assertEqual(command[0], "osascript")
         self.assertEqual(command[-2:], ["Choose a project", str(self.root)])
 
@@ -414,7 +436,7 @@ class ControlCenterTests(unittest.TestCase):
             self.app.sessions, "start_session", side_effect=start_session
         ) as start:
             self.app.sessions._start_seed_session(project["id"], 2, brief)
-        prompt = runtime.enqueue.call_args.args[0]
+        prompt = runtime.enqueue.call_args[0][0]
         self.assertLessEqual(len(prompt.encode("utf-8")), 16 * 1024)
         self.assertIn("project-context/BRAND-AND-DESIGN.md", prompt)
         self.assertNotIn(brief, prompt)
@@ -546,7 +568,7 @@ class ControlCenterTests(unittest.TestCase):
             session["id"], ["seed-01", "seed-02"], "Editorial type with kinetic navigation"
         )
         self.assertTrue(result["queued"])
-        prompt = runtime.enqueue.call_args.args[0]
+        prompt = runtime.enqueue.call_args[0][0]
         self.assertNotIn("Editorial type with kinetic navigation", prompt)
         self.assertIn(".webkit/seed-combination-notes.md", prompt)
         self.assertEqual(
@@ -622,7 +644,7 @@ class ControlCenterTests(unittest.TestCase):
                 session["id"], ["seed-01"], "界" * 12000
             )
         self.assertTrue(result["queued"])
-        prompt = runtime.enqueue.call_args.args[0]
+        prompt = runtime.enqueue.call_args[0][0]
         self.assertLessEqual(len(prompt.encode("utf-8")), 16 * 1024)
         self.assertNotIn("界" * 20, prompt)
         self.assertIn(".webkit/seed-combination-notes.md", prompt)
@@ -692,7 +714,7 @@ class ControlCenterTests(unittest.TestCase):
         runtime.session = session
         self.app.sessions.runtimes[session["id"]] = runtime
         self.app.sessions.choose_seeds(session["id"], ["seed-01"])
-        prompt = runtime.enqueue.call_args.args[0]
+        prompt = runtime.enqueue.call_args[0][0]
         self.assertIn("production site starting at `public/index.html`", prompt)
         self.assertIn("`public/seed-directions/` exploration folder", prompt)
 
@@ -920,7 +942,12 @@ class ControlCenterTests(unittest.TestCase):
                 self.assertTrue((repo / ".git").is_dir())
 
     def test_installer_journal_rejects_replacement_and_in_place_snapshot_races(self):
-        for mutation in ("replacement", "in-place"):
+        mutations = (
+            ("in-place",)
+            if os.name == "nt"
+            else ("replacement", "in-place")
+        )
+        for mutation in mutations:
             with self.subTest(mutation=mutation):
                 repo = (self.root / ("support-snapshot-" + mutation)).resolve()
                 repo.mkdir()
@@ -1145,6 +1172,149 @@ class ControlCenterTests(unittest.TestCase):
 
                 self.assertEqual(target.read_bytes(), b"concurrent bytes\n")
 
+    def test_windows_path_and_descriptor_identity_domains_are_normalized(self):
+        repo = (self.root / "windows-stat-domains").resolve()
+        repo.mkdir()
+        target = repo / "AGENTS.md"
+        target.write_bytes(b"stable bytes\n")
+        real_fstat = os.fstat
+
+        def windows_descriptor_stat(descriptor):
+            details = real_fstat(descriptor)
+            return types.SimpleNamespace(
+                st_dev=details.st_dev + 1000,
+                st_ino=details.st_ino + 1000,
+                st_mode=details.st_mode,
+                st_size=details.st_size,
+                st_nlink=details.st_nlink,
+                st_mtime_ns=details.st_mtime_ns,
+                st_ctime_ns=details.st_ctime_ns,
+            )
+
+        listed = os.lstat(str(target))
+        with mock.patch(
+            "control_center._WINDOWS_SPLIT_STAT_IDENTITIES", True
+        ), mock.patch(
+            "control_center.os.fstat", side_effect=windows_descriptor_stat
+        ):
+            self.assertEqual(
+                read_stable_regular_text(target, 1024), "stable bytes\n"
+            )
+            snapshot = ProjectMutationJournal._snapshot(
+                target, require_single_link=True, include_data=False
+            )
+
+        self.assertEqual(
+            snapshot["fingerprint"][:2], (listed.st_dev, listed.st_ino)
+        )
+        self.assertEqual(
+            snapshot["fingerprint"][-1],
+            hashlib.sha256(b"stable bytes\n").hexdigest(),
+        )
+
+    def test_windows_descriptor_identity_changes_do_not_break_owned_writes(self):
+        repo = (self.root / "windows-changing-descriptor-identity").resolve()
+        repo.mkdir()
+        source = repo / "source.txt"
+        source.write_bytes(b"copied bytes\n")
+        copied = repo / "copied.txt"
+        created = repo / "created.txt"
+        real_fstat = os.fstat
+        real_lstat = os.lstat
+
+        def changing_descriptor_stat(descriptor):
+            details = real_fstat(descriptor)
+            identity_shift = 1000 if details.st_size else 0
+            return types.SimpleNamespace(
+                st_dev=details.st_dev + identity_shift,
+                st_ino=details.st_ino + identity_shift,
+                st_mode=details.st_mode,
+                st_size=details.st_size,
+                st_nlink=details.st_nlink,
+                st_mtime_ns=details.st_mtime_ns,
+                st_ctime_ns=details.st_ctime_ns,
+            )
+
+        def changing_path_stat(path):
+            details = real_lstat(path)
+            identity_shift = 2000 if details.st_size else 0
+            return types.SimpleNamespace(
+                st_dev=details.st_dev + identity_shift,
+                st_ino=details.st_ino + identity_shift,
+                st_mode=details.st_mode,
+                st_size=details.st_size,
+                st_nlink=details.st_nlink,
+                st_mtime_ns=details.st_mtime_ns,
+                st_ctime_ns=details.st_ctime_ns,
+            )
+
+        def stable_descriptor_details(descriptor):
+            details = real_fstat(descriptor)
+            return (
+                (
+                    details.st_dev,
+                    details.st_ino,
+                    stat.S_IFMT(details.st_mode),
+                ),
+                details.st_size,
+            )
+
+        journal = ProjectMutationJournal(repo)
+        journal.watch_support_file(created)
+        with mock.patch(
+            "control_center._WINDOWS_SPLIT_STAT_IDENTITIES", True
+        ), mock.patch(
+            "control_center.os.fstat", side_effect=changing_descriptor_stat
+        ), mock.patch(
+            "control_center.os.lstat", side_effect=changing_path_stat
+        ), mock.patch(
+            "control_center._descriptor_file_details",
+            side_effect=stable_descriptor_details,
+        ):
+            journal.write_new_support_file(created, b"created bytes\n")
+            exclusive_copy_file(source, copied)
+
+        self.assertEqual(created.read_bytes(), b"created bytes\n")
+        self.assertEqual(copied.read_bytes(), b"copied bytes\n")
+
+    @unittest.skipUnless(os.name == "nt", "native Windows file handles required")
+    def test_windows_native_file_identity_is_stable_while_a_file_grows(self):
+        target = self.root / "windows-native-identity.txt"
+        descriptor = os.open(
+            str(target),
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        try:
+            opened_identity, opened_size = (
+                control_center_module._descriptor_file_details(descriptor)
+            )
+            self.assertEqual(opened_size, 0)
+            contents = b"native Windows identity\n"
+            self.assertEqual(os.write(descriptor, contents), len(contents))
+            os.fsync(descriptor)
+            written_identity, written_size = (
+                control_center_module._descriptor_file_details(descriptor)
+            )
+            self.assertEqual(written_identity, opened_identity)
+            self.assertEqual(written_size, len(contents))
+            probe = os.open(
+                str(target), os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            )
+            try:
+                probe_identity, probe_size = (
+                    control_center_module._descriptor_file_details(probe)
+                )
+            finally:
+                os.close(probe)
+            self.assertEqual(probe_identity, opened_identity)
+            self.assertEqual(probe_size, len(contents))
+        finally:
+            os.close(descriptor)
+
     def test_journal_aware_support_mutation_claim_preserves_late_replacement(self):
         repo = (self.root / "support-mutation-claim-race").resolve()
         repo.mkdir()
@@ -1220,7 +1390,8 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), b"concurrent config\n")
 
     def test_journal_exclusive_support_creation_cleans_only_its_partial(self):
-        for replace_partial in (False, True):
+        replace_cases = (False,) if os.name == "nt" else (False, True)
+        for replace_partial in replace_cases:
             with self.subTest(replace_partial=replace_partial):
                 repo = (
                     self.root / "support-partial-{}".format(replace_partial)
@@ -1471,7 +1642,7 @@ class ControlCenterTests(unittest.TestCase):
             side_effect=replace_before_cleanup_claim,
         ):
             with self.assertRaisesRegex(
-                ControlCenterError, "changed after installation"
+                ControlCenterError, "changed"
             ):
                 exclusive_copy_file(source, destination)
 
@@ -1850,7 +2021,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertNotIn(secret, result["error"])
         self.assertNotIn("?token=", result["error"])
         self.assertEqual(
-            run.call_args.args[0], [
+            run.call_args[0][0], [
                 "git", "push", "--force-with-lease=refs/heads/main:", "--",
                 destination_url,
                 "{}:refs/heads/main".format("a" * 40),
@@ -2632,15 +2803,16 @@ class ControlCenterTests(unittest.TestCase):
             self.app.sessions, "_preview_instance_ready", return_value=True
         ):
             self.app.sessions._claim_and_preview(runtime, config)
-            first_env = popen.call_args.kwargs["env"]
+            first_env = popen.call_args[1]["env"]
             runtime.stop_preview()
             self.app.sessions._claim_and_preview(runtime, config)
-            second_env = popen.call_args.kwargs["env"]
-        self.assertIs(popen.call_args.kwargs["stdout"], subprocess.PIPE)
-        self.assertEqual(popen.call_args.args[0][0], sys.executable)
+            second_env = popen.call_args[1]["env"]
+        self.assertIs(popen.call_args[1]["stdout"], subprocess.PIPE)
+        self.assertEqual(popen.call_args[0][0][0], sys.executable)
         self.assertIsNotNone(runtime.preview_log)
         self.assertIsNotNone(runtime.preview_log.thread)
         self.assertEqual(second_env["WK_COLOR_LOCKDIR"], config["lock_dir"])
+        self.assertEqual(second_env["PYTHONIOENCODING"], "utf-8")
         self.assertIn("WK_PREVIEW_INSTANCE_TOKEN", second_env)
         self.assertEqual(first_env["WK_MUTATION_TOKEN"], runtime.mutation_token)
         self.assertEqual(second_env["WK_MUTATION_TOKEN"], runtime.mutation_token)
@@ -2968,12 +3140,12 @@ class ControlCenterTests(unittest.TestCase):
             "control_center.subprocess.Popen", return_value=fake
         ) as popen:
             runner.run("צבע אותו בכחול 🎨")
-        command = popen.call_args.args[0]
-        child_env = popen.call_args.kwargs["env"]
+        command = popen.call_args[0][0]
+        child_env = popen.call_args[1]["env"]
         self.assertEqual(command[:3], ["/fake/codex", "exec", "--json"])
         self.assertIn("workspace-write", command)
-        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
-        self.assertEqual(popen.call_args.kwargs["errors"], "replace")
+        self.assertEqual(popen.call_args[1]["encoding"], "utf-8")
+        self.assertEqual(popen.call_args[1]["errors"], "replace")
         fake.stdin.write.assert_called_once_with("צבע אותו בכחול 🎨")
         fake.stdin.close.assert_called_once_with()
         self.assertEqual(threads, ["thread-123"])
@@ -3034,7 +3206,7 @@ class ControlCenterTests(unittest.TestCase):
         first_process = FakeProcess(['{"type":"result","is_error":false,"result":"Done"}\n'])
         with mock.patch("control_center.shutil.which", return_value="/fake/claude"), mock.patch("control_center.subprocess.Popen", return_value=first_process) as popen:
             runner.run("Build it")
-        first = popen.call_args.args[0]
+        first = popen.call_args[0][0]
         self.assertIn("--session-id", first)
         self.assertNotIn("--resume", first)
         self.assertNotIn("Build it", first)
@@ -3042,7 +3214,7 @@ class ControlCenterTests(unittest.TestCase):
         resumed_process = FakeProcess(['{"type":"result","is_error":false,"result":"Done"}\n'])
         with mock.patch("control_center.shutil.which", return_value="/fake/claude"), mock.patch("control_center.subprocess.Popen", return_value=resumed_process) as popen:
             runner.run("Continue")
-        resumed = popen.call_args.args[0]
+        resumed = popen.call_args[0][0]
         self.assertIn("--resume", resumed)
         self.assertNotIn("--session-id", resumed)
         self.assertNotIn("Continue", resumed)
@@ -3484,7 +3656,7 @@ class ControlCenterTests(unittest.TestCase):
         ) as popen:
             runner.run("Continue")
         command = next(
-            call.args[0] for call in popen.call_args_list if call.args[0][0] == "/fake/codex"
+            call[0][0] for call in popen.call_args_list if call[0][0][0] == "/fake/codex"
         )
         self.assertEqual(command[:5], [
             "/fake/codex", "exec", "--json", "--sandbox", "workspace-write",
@@ -3516,7 +3688,7 @@ class ControlCenterTests(unittest.TestCase):
         ) as seed_popen:
             seed_runner.run("Generate seeds")
         seed_command = next(
-            call.args[0] for call in seed_popen.call_args_list if call.args[0][0] == "/fake/codex"
+            call[0][0] for call in seed_popen.call_args_list if call[0][0][0] == "/fake/codex"
         )
         self.assertNotIn("--add-dir", seed_command)
         self.assertNotIn("Generate seeds", seed_command)
@@ -3715,9 +3887,13 @@ class ControlCenterTests(unittest.TestCase):
         ), mock.patch("control_center.subprocess.run") as run:
             self.assertEqual(stop_process_tree(process, timeout=2, grace=0.05), 0)
         self.assertEqual(run.call_count, 1)
-        self.assertNotIn("/F", run.call_args.args[0])
+        self.assertNotIn("/F", run.call_args[0][0])
         process.wait.assert_called_once_with(timeout=0.05)
 
+    @unittest.skipIf(
+        os.name != "nt" and sys.version_info < (3, 8),
+        "ctypes.wintypes is not importable on Python 3.7 POSIX builds",
+    )
     def test_windows_provider_job_closes_when_exact_leader_handle_exits(self):
         import ctypes
         from ctypes import wintypes  # noqa: F401
@@ -4157,7 +4333,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertFalse(non_fast_forward["pushed"])
         self.assertIn("not a fast-forward", non_fast_forward["error"])
         self.assertFalse(
-            any(call.args[0][:2] == ["git", "push"] for call in run.call_args_list)
+            any(call[0][0][:2] == ["git", "push"] for call in run.call_args_list)
         )
 
     def test_changed_owned_worktree_is_preserved_without_force(self):

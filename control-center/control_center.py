@@ -517,6 +517,116 @@ def strict_json_loads(value):
     return parsed
 
 
+_WINDOWS_SPLIT_STAT_IDENTITIES = os.name == "nt"
+_BINARY_OPEN_FLAG = getattr(os, "O_BINARY", 0)
+_WINDOWS_FILE_API = None
+
+
+def _stat_identity(details):
+    """Return an identity comparable across repeated stats of the same kind."""
+    return (
+        details.st_dev,
+        details.st_ino,
+        stat.S_IFMT(details.st_mode),
+    )
+
+
+def _descriptor_file_details(descriptor):
+    """Return a stable file identity and size for one open descriptor."""
+    if os.name != "nt":
+        details = os.fstat(descriptor)
+        return _stat_identity(details), details.st_size
+
+    global _WINDOWS_FILE_API
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    if _WINDOWS_FILE_API is None:
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("fileAttributes", wintypes.DWORD),
+                ("creationTimeLow", wintypes.DWORD),
+                ("creationTimeHigh", wintypes.DWORD),
+                ("accessTimeLow", wintypes.DWORD),
+                ("accessTimeHigh", wintypes.DWORD),
+                ("writeTimeLow", wintypes.DWORD),
+                ("writeTimeHigh", wintypes.DWORD),
+                ("volumeSerialNumber", wintypes.DWORD),
+                ("fileSizeHigh", wintypes.DWORD),
+                ("fileSizeLow", wintypes.DWORD),
+                ("numberOfLinks", wintypes.DWORD),
+                ("fileIndexHigh", wintypes.DWORD),
+                ("fileIndexLow", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_information = kernel32.GetFileInformationByHandle
+        get_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(ByHandleFileInformation),
+        ]
+        get_information.restype = wintypes.BOOL
+        _WINDOWS_FILE_API = (ByHandleFileInformation, get_information)
+    ByHandleFileInformation, get_information = _WINDOWS_FILE_API
+    information = ByHandleFileInformation()
+    native_handle = msvcrt.get_osfhandle(descriptor)
+    if native_handle == -1 or not get_information(
+        wintypes.HANDLE(native_handle), ctypes.byref(information)
+    ):
+        error_number = ctypes.get_last_error()
+        raise OSError(
+            error_number,
+            "GetFileInformationByHandle failed for an installer file.",
+        )
+    identity = (
+        information.volumeSerialNumber,
+        (information.fileIndexHigh << 32) | information.fileIndexLow,
+    )
+    size = (information.fileSizeHigh << 32) | information.fileSizeLow
+    return identity, size
+
+
+def _stat_stable_signature(details):
+    return _stat_identity(details) + (
+        details.st_size,
+        stat.S_IMODE(details.st_mode),
+        details.st_nlink,
+        details.st_mtime_ns,
+        details.st_ctime_ns,
+    )
+
+
+def _opened_path_matches(before, opened, path=None, descriptor=None):
+    """Verify that a path still resolves to an already opened file."""
+    if not _WINDOWS_SPLIT_STAT_IDENTITIES:
+        return _stat_identity(before) == _stat_identity(opened)
+    if stat.S_IFMT(before.st_mode) != stat.S_IFMT(opened.st_mode):
+        return False
+    if path is None or descriptor is None:
+        return before.st_size == opened.st_size
+    flags = os.O_RDONLY | _BINARY_OPEN_FLAG
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    probe = None
+    try:
+        probe = os.open(str(path), flags)
+        opened_identity, opened_size = _descriptor_file_details(descriptor)
+        path_identity, path_size = _descriptor_file_details(probe)
+        return (
+            opened_identity == path_identity
+            and opened_size == path_size
+            and before.st_size == path_size
+        )
+    except OSError:
+        return False
+    finally:
+        if probe is not None:
+            os.close(probe)
+
+
 def read_stable_regular_text(path, limit, label="File"):
     """Read one bounded regular file without following or racing a replacement."""
     path = Path(path)
@@ -530,7 +640,7 @@ def read_stable_regular_text(path, limit, label="File"):
         raise ControlCenterError("{} must be a regular file, not a link or special file.".format(label), 409)
     if before.st_size > limit:
         raise ControlCenterError("{} is larger than {} bytes.".format(label, limit), 413)
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | _BINARY_OPEN_FLAG
     if hasattr(os, "O_NONBLOCK"):
         flags |= os.O_NONBLOCK
     if hasattr(os, "O_NOFOLLOW"):
@@ -543,7 +653,7 @@ def read_stable_regular_text(path, limit, label="File"):
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode):
             raise ControlCenterError("{} must remain a regular file.".format(label), 409)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        if not _opened_path_matches(before, opened, path, descriptor):
             raise ControlCenterError("{} changed while it was opened.".format(label), 409)
         chunks = []
         remaining = limit + 1
@@ -558,13 +668,14 @@ def read_stable_regular_text(path, limit, label="File"):
             current = os.lstat(str(path))
         except OSError as exc:
             raise ControlCenterError("{} changed while it was read: {}".format(label, exc), 409)
-        signature = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
-        if signature != (
-            before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
-        ) or signature != (
-            after_read.st_dev, after_read.st_ino, after_read.st_size, after_read.st_mtime_ns
-        ) or signature != (
-            current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+        opened_signature = _stat_stable_signature(opened)
+        if (
+            opened_signature != _stat_stable_signature(after_read)
+            or _stat_stable_signature(before) != _stat_stable_signature(current)
+            or (
+                not _WINDOWS_SPLIT_STAT_IDENTITIES
+                and opened_signature != _stat_stable_signature(current)
+            )
         ):
             raise ControlCenterError("{} changed while it was read.".format(label), 409)
         data = b"".join(chunks)
@@ -1242,7 +1353,7 @@ def _read_mutable_support_text(path):
         )
     if before.st_size > MAX_MUTABLE_SUPPORT_BYTES:
         raise ControlCenterError("Installer support files must be 8 MB or smaller.", 413)
-    flags = os.O_RDONLY
+    flags = os.O_RDONLY | _BINARY_OPEN_FLAG
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = os.open(str(path), flags)
@@ -1250,8 +1361,8 @@ def _read_mutable_support_text(path):
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or (not _WINDOWS_SPLIT_STAT_IDENTITIES and opened.st_nlink != 1)
+            or not _opened_path_matches(before, opened, path, descriptor)
         ):
             raise ControlCenterError(
                 "Installer support file changed while it was opened.", 409
@@ -1269,19 +1380,15 @@ def _read_mutable_support_text(path):
             raise ControlCenterError("Installer support files must be 8 MB or smaller.", 413)
         after = os.fstat(descriptor)
         current = os.lstat(str(path))
-        signature = (
-            opened.st_dev, opened.st_ino, opened.st_size,
-            stat.S_IMODE(opened.st_mode), opened.st_nlink,
-            opened.st_mtime_ns, opened.st_ctime_ns,
-        )
-        if signature != (
-            after.st_dev, after.st_ino, after.st_size,
-            stat.S_IMODE(after.st_mode), after.st_nlink,
-            after.st_mtime_ns, after.st_ctime_ns,
-        ) or signature != (
-            current.st_dev, current.st_ino, current.st_size,
-            stat.S_IMODE(current.st_mode), current.st_nlink,
-            current.st_mtime_ns, current.st_ctime_ns,
+        signature = _stat_stable_signature(opened)
+        if (
+            signature != _stat_stable_signature(after)
+            or _stat_stable_signature(before) != _stat_stable_signature(current)
+            or (
+                not _WINDOWS_SPLIT_STAT_IDENTITIES
+                and signature != _stat_stable_signature(current)
+            )
+            or current.st_nlink != 1
         ):
             raise ControlCenterError(
                 "Installer support file changed while it was read.", 409
@@ -1292,10 +1399,17 @@ def _read_mutable_support_text(path):
             raise ControlCenterError(
                 "Installer support file must be UTF-8 text: {}".format(exc), 409
             )
+        fingerprint_source = (
+            current if _WINDOWS_SPLIT_STAT_IDENTITIES else opened
+        )
         fingerprint = (
-            opened.st_dev, opened.st_ino, opened.st_size,
-            stat.S_IMODE(opened.st_mode), opened.st_nlink,
-            opened.st_mtime_ns, hashlib.sha256(data).hexdigest(),
+            fingerprint_source.st_dev,
+            fingerprint_source.st_ino,
+            fingerprint_source.st_size,
+            stat.S_IMODE(fingerprint_source.st_mode),
+            fingerprint_source.st_nlink,
+            fingerprint_source.st_mtime_ns,
+            hashlib.sha256(data).hexdigest(),
         )
         return text, fingerprint, stat.S_IMODE(opened.st_mode)
     finally:
@@ -1607,7 +1721,7 @@ class EventLog:
                 unlink_if_exists(temporary)
 
     def _open_binary_locked(self):
-        flags = os.O_RDONLY
+        flags = os.O_RDONLY | _BINARY_OPEN_FLAG
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
@@ -1741,7 +1855,7 @@ class EventLog:
                     newline = retained.find(b"\n")
                     retained = b"" if newline < 0 else retained[newline + 1:]
                 self._replace_locked(header + retained)
-            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _BINARY_OPEN_FLAG
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(str(self.path), flags, 0o600)
@@ -1833,15 +1947,7 @@ class ProjectMutationJournal:
 
     @staticmethod
     def _stable_signature(details):
-        return (
-            details.st_dev,
-            details.st_ino,
-            details.st_size,
-            stat.S_IMODE(details.st_mode),
-            details.st_nlink,
-            details.st_mtime_ns,
-            details.st_ctime_ns,
-        )
+        return _stat_stable_signature(details)
 
     @classmethod
     def _snapshot(
@@ -1862,7 +1968,7 @@ class ProjectMutationJournal:
             raise ControlCenterError(
                 "Installer support files must be 8 MB or smaller.", 413
             )
-        flags = os.O_RDONLY
+        flags = os.O_RDONLY | _BINARY_OPEN_FLAG
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
         if hasattr(os, "O_NOFOLLOW"):
@@ -1875,8 +1981,12 @@ class ProjectMutationJournal:
                     "Installer journal paths must be regular files.", 409
                 )
             if (
-                (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                or (require_single_link and opened.st_nlink != 1)
+                not _opened_path_matches(before, opened, path, descriptor)
+                or (
+                    require_single_link
+                    and not _WINDOWS_SPLIT_STAT_IDENTITIES
+                    and opened.st_nlink != 1
+                )
             ):
                 raise ControlCenterError(
                     "Installer support file changed while it was opened.", 409
@@ -1917,21 +2027,28 @@ class ProjectMutationJournal:
                 )
             signature = cls._stable_signature(opened)
             if (
-                signature != cls._stable_signature(before)
-                or signature != cls._stable_signature(after)
-                or signature != cls._stable_signature(current)
+                signature != cls._stable_signature(after)
+                or cls._stable_signature(before) != cls._stable_signature(current)
+                or (
+                    not _WINDOWS_SPLIT_STAT_IDENTITIES
+                    and signature != cls._stable_signature(current)
+                )
+                or (require_single_link and current.st_nlink != 1)
                 or total != opened.st_size
             ):
                 raise ControlCenterError(
                     "Installer support file changed while it was read.", 409
                 )
+            fingerprint_source = (
+                current if _WINDOWS_SPLIT_STAT_IDENTITIES else opened
+            )
             fingerprint = (
-                opened.st_dev,
-                opened.st_ino,
-                opened.st_size,
-                stat.S_IMODE(opened.st_mode),
-                opened.st_nlink,
-                opened.st_mtime_ns,
+                fingerprint_source.st_dev,
+                fingerprint_source.st_ino,
+                fingerprint_source.st_size,
+                stat.S_IMODE(fingerprint_source.st_mode),
+                fingerprint_source.st_nlink,
+                fingerprint_source.st_mtime_ns,
                 digest.hexdigest(),
             )
             return {
@@ -2025,16 +2142,29 @@ class ProjectMutationJournal:
                 "Installer support files must be 8 MB or smaller.", 413
             )
         self.validate_support_before_mutation(path, None)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY_OPEN_FLAG
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = None
         identity = None
+        opened_identity = None
         offset = 0
         try:
             descriptor = os.open(str(path), flags, mode)
             opened = os.fstat(descriptor)
-            identity = (opened.st_dev, opened.st_ino)
+            created = os.lstat(str(path))
+            opened_identity, _opened_size = _descriptor_file_details(descriptor)
+            identity = _stat_identity(created)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(created.st_mode)
+                or created.st_nlink != 1
+                or not _opened_path_matches(created, opened, path, descriptor)
+            ):
+                raise ControlCenterError(
+                    "Installer support file changed concurrently and was preserved.",
+                    409,
+                )
             if hasattr(os, "fchmod"):
                 os.fchmod(descriptor, mode)
             while offset < len(data):
@@ -2044,33 +2174,54 @@ class ProjectMutationJournal:
                 offset += written
             os.fsync(descriptor)
             details = os.fstat(descriptor)
+            details_identity, details_size = _descriptor_file_details(descriptor)
             if (
                 not stat.S_ISREG(details.st_mode)
-                or details.st_nlink != 1
-                or (details.st_dev, details.st_ino) != identity
-                or details.st_size != len(data)
+                or (
+                    not _WINDOWS_SPLIT_STAT_IDENTITIES
+                    and details.st_nlink != 1
+                )
+                or details_identity != opened_identity
+                or details_size != len(data)
             ):
                 raise ControlCenterError(
                     "Installer support file changed concurrently and was preserved.",
                     409,
                 )
-            fingerprint = (
-                details.st_dev, details.st_ino, details.st_size,
-                stat.S_IMODE(details.st_mode), details.st_nlink,
-                details.st_mtime_ns, hashlib.sha256(data).hexdigest(),
-            )
             current = self._snapshot(
                 path,
                 limit=self.MAX_SUPPORT_BYTES,
                 require_single_link=True,
                 include_data=False,
             )["fingerprint"]
-            if current != fingerprint:
+            current_details = os.lstat(str(path))
+            if (
+                not _opened_path_matches(current_details, details, path, descriptor)
+                or (
+                    not _WINDOWS_SPLIT_STAT_IDENTITIES
+                    and _stat_identity(current_details) != identity
+                )
+                or current[2] != len(data)
+                or current[-1] != hashlib.sha256(data).hexdigest()
+            ):
                 raise ControlCenterError(
                     "Installer support file changed concurrently and was preserved.",
                     409,
                 )
-            self.record_support_output(path, fingerprint)
+            os.close(descriptor)
+            descriptor = None
+            closed_current = self._snapshot(
+                path,
+                limit=self.MAX_SUPPORT_BYTES,
+                require_single_link=True,
+                include_data=False,
+            )["fingerprint"]
+            if closed_current != current:
+                raise ControlCenterError(
+                    "Installer support file changed concurrently and was preserved.",
+                    409,
+                )
+            self.record_support_output(path, closed_current)
         except FileExistsError as exc:
             raise ControlCenterError(
                 "Installer support file was created concurrently and was preserved.",
@@ -2081,22 +2232,55 @@ class ProjectMutationJournal:
             if descriptor is not None:
                 try:
                     details = os.fstat(descriptor)
-                    if (
+                    details_identity, _details_size = _descriptor_file_details(
+                        descriptor
+                    )
+                    descriptor_still_owned = (
                         stat.S_ISREG(details.st_mode)
-                        and identity == (details.st_dev, details.st_ino)
-                        and details.st_size == offset
-                        and details.st_nlink == 1
-                    ):
-                        partial_expected = (
-                            details.st_dev, details.st_ino, details.st_size,
-                            stat.S_IMODE(details.st_mode), details.st_nlink,
-                            details.st_mtime_ns,
-                            hashlib.sha256(data[:offset]).hexdigest(),
-                        )
+                        and details_identity == opened_identity
+                    )
                 except OSError:
-                    pass
+                    descriptor_still_owned = False
+                if descriptor_still_owned and identity is not None:
+                    try:
+                        current = self._snapshot(
+                            path,
+                            limit=self.MAX_SUPPORT_BYTES,
+                            require_single_link=True,
+                            include_data=False,
+                        )["fingerprint"]
+                        current_details = os.lstat(str(path))
+                    except (FileNotFoundError, ControlCenterError, OSError):
+                        current = None
+                    if (
+                        current is not None
+                        and _opened_path_matches(
+                            current_details, details, path, descriptor
+                        )
+                        and (
+                            _WINDOWS_SPLIT_STAT_IDENTITIES
+                            or _stat_identity(current_details) == identity
+                        )
+                        and current[2] == offset
+                        and current[-1]
+                        == hashlib.sha256(data[:offset]).hexdigest()
+                    ):
+                        partial_expected = current
                 os.close(descriptor)
                 descriptor = None
+                if partial_expected is not None:
+                    try:
+                        closed_partial = self._snapshot(
+                            path,
+                            limit=self.MAX_SUPPORT_BYTES,
+                            require_single_link=True,
+                            include_data=False,
+                        )["fingerprint"]
+                    except (FileNotFoundError, ControlCenterError, OSError):
+                        partial_expected = None
+                    else:
+                        if closed_partial != partial_expected:
+                            partial_expected = None
             if partial_expected is not None:
                 cleanup_errors = []
                 self._remove_owned_file(path, partial_expected, cleanup_errors)
@@ -2126,6 +2310,7 @@ class ProjectMutationJournal:
         for directory in reversed(missing):
             temporary = None
             identity = None
+            identity_descriptor = None
             for _attempt in range(16):
                 candidate = directory.parent / (".wk-mkdir-" + uuid.uuid4().hex)
                 try:
@@ -2140,11 +2325,18 @@ class ProjectMutationJournal:
                 )
             try:
                 details = os.lstat(str(temporary))
-                identity = (
-                    details.st_dev,
-                    details.st_ino,
-                    stat.S_IMODE(details.st_mode),
-                )
+                identity = _stat_identity(details)
+                if os.name == "posix":
+                    directory_flags = os.O_RDONLY
+                    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+                    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+                    identity_descriptor = os.open(str(temporary), directory_flags)
+                    os.set_inheritable(identity_descriptor, False)
+                    if _stat_identity(os.fstat(identity_descriptor)) != identity:
+                        raise ControlCenterError(
+                            "Installer destination directory changed while it was opened.",
+                            409,
+                        )
                 try:
                     rename_directory_noreplace(temporary, directory)
                 except FileExistsError as exc:
@@ -2154,15 +2346,24 @@ class ProjectMutationJournal:
                         409,
                     ) from exc
                 temporary = None
+                published = os.lstat(str(directory))
+                if _stat_identity(published) != identity:
+                    raise ControlCenterError(
+                        "Installer destination directory changed while it was published.",
+                        409,
+                    )
                 self.created_dirs.append({
                     "path": directory,
                     "identity": identity,
+                    "identityDescriptor": identity_descriptor,
                 })
+                identity_descriptor = None
             except Exception as primary_error:
                 if temporary is not None and identity is not None:
                     cleanup_errors = []
                     self._remove_owned_directory(
-                        temporary, identity, cleanup_errors
+                        temporary, identity, cleanup_errors,
+                        identity_descriptor=identity_descriptor,
                     )
                     if cleanup_errors:
                         raise ControlCenterError(
@@ -2179,6 +2380,8 @@ class ProjectMutationJournal:
                         ),
                         getattr(primary_error, "status", 409),
                     ) from primary_error
+                if identity_descriptor is not None:
+                    os.close(identity_descriptor)
                 raise
 
     def begin_created_file(self, path, details):
@@ -2389,7 +2592,9 @@ class ProjectMutationJournal:
             )
 
     @classmethod
-    def _remove_owned_directory(cls, path, expected, errors):
+    def _remove_owned_directory(
+        cls, path, expected, errors, identity_descriptor=None
+    ):
         """Remove a directory only after atomically claiming its exact inode."""
         try:
             quarantine = cls._claim_path(path)
@@ -2400,18 +2605,27 @@ class ProjectMutationJournal:
             return
         try:
             details = os.lstat(str(quarantine))
-            current = (
-                details.st_dev,
-                details.st_ino,
-                stat.S_IMODE(details.st_mode),
-            )
+            current = _stat_identity(details)
+            opened = None
+            if identity_descriptor is not None:
+                opened = os.fstat(identity_descriptor)
         except OSError as exc:
             recovery = cls._return_claim(quarantine, path)
             errors.append(
                 recovery or "could not inspect directory {}: {}".format(path, exc)
             )
             return
-        if not stat.S_ISDIR(details.st_mode) or current != expected:
+        if (
+            not stat.S_ISDIR(details.st_mode)
+            or current != expected
+            or (
+                opened is not None
+                and (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or _stat_identity(opened) != expected
+                )
+            )
+        ):
             recovery = cls._return_claim(quarantine, path)
             errors.append(
                 recovery
@@ -2584,28 +2798,54 @@ class ProjectMutationJournal:
         for record in reversed(list(self.support.values())):
             self._rollback_support_file(record, errors)
         for record in reversed(self.created_dirs):
-            self._remove_owned_directory(
-                record["path"], record["identity"], errors
-            )
+            identity_descriptor = record.get("identityDescriptor")
+            try:
+                self._remove_owned_directory(
+                    record["path"], record["identity"], errors,
+                    identity_descriptor=identity_descriptor,
+                )
+            finally:
+                if identity_descriptor is not None:
+                    os.close(identity_descriptor)
+                    record["identityDescriptor"] = None
         if errors:
             raise ControlCenterError(
                 "Installer rollback was incomplete: {}".format("; ".join(errors[:12])),
                 409,
             )
 
+    def close(self):
+        for record in self.created_dirs:
+            identity_descriptor = record.get("identityDescriptor")
+            if identity_descriptor is not None:
+                try:
+                    os.close(identity_descriptor)
+                except OSError:
+                    pass
+                record["identityDescriptor"] = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 def exclusive_copy_file(source, destination, journal=None):
     """Copy one new regular file without ever replacing an existing path."""
     source = Path(source)
     destination = Path(destination)
-    source_flags = os.O_RDONLY
-    destination_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    source_flags = os.O_RDONLY | _BINARY_OPEN_FLAG
+    destination_flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY_OPEN_FLAG
+    )
     if hasattr(os, "O_NOFOLLOW"):
         source_flags |= os.O_NOFOLLOW
         destination_flags |= os.O_NOFOLLOW
     source_descriptor = None
     destination_descriptor = None
     destination_identity = None
+    destination_path_identity = None
     destination_digest = hashlib.sha256()
     destination_size = 0
     destination_expected = None
@@ -2629,12 +2869,29 @@ def exclusive_copy_file(source, destination, journal=None):
                 409,
             ) from exc
         destination_details = os.fstat(destination_descriptor)
-        destination_identity = (
-            destination_details.st_dev, destination_details.st_ino
+        destination_identity, _destination_opened_size = _descriptor_file_details(
+            destination_descriptor
         )
+        destination_path_details = os.lstat(str(destination))
+        destination_path_identity = _stat_identity(destination_path_details)
+        if (
+            not stat.S_ISREG(destination_details.st_mode)
+            or not stat.S_ISREG(destination_path_details.st_mode)
+            or destination_path_details.st_nlink != 1
+            or not _opened_path_matches(
+                destination_path_details,
+                destination_details,
+                destination,
+                destination_descriptor,
+            )
+        ):
+            raise ControlCenterError(
+                "Installer destination changed while it was opened and was preserved.",
+                409,
+            )
         if journal is not None:
             journal_record = journal.begin_created_file(
-                destination, destination_details
+                destination, destination_path_details
             )
         while True:
             chunk = os.read(source_descriptor, 1024 * 1024)
@@ -2652,57 +2909,125 @@ def exclusive_copy_file(source, destination, journal=None):
             os.fchmod(destination_descriptor, stat.S_IMODE(source_details.st_mode))
         os.fsync(destination_descriptor)
         final_details = os.fstat(destination_descriptor)
+        final_identity, final_size = _descriptor_file_details(
+            destination_descriptor
+        )
         if (
             not stat.S_ISREG(final_details.st_mode)
-            or final_details.st_nlink != 1
-            or (final_details.st_dev, final_details.st_ino) != destination_identity
-            or final_details.st_size != destination_size
+            or (
+                not _WINDOWS_SPLIT_STAT_IDENTITIES
+                and final_details.st_nlink != 1
+            )
+            or final_identity != destination_identity
+            or final_size != destination_size
         ):
             raise ControlCenterError(
                 "Installer destination changed while it was copied and was preserved.",
                 409,
             )
-        destination_expected = (
-            final_details.st_dev, final_details.st_ino, final_details.st_size,
-            stat.S_IMODE(final_details.st_mode), final_details.st_nlink,
-            final_details.st_mtime_ns, destination_digest.hexdigest(),
-        )
-        os.close(destination_descriptor)
-        destination_descriptor = None
-        if ProjectMutationJournal._fingerprint(destination) != destination_expected:
+        current_expected = ProjectMutationJournal._snapshot(
+            destination,
+            require_single_link=True,
+            include_data=False,
+        )["fingerprint"]
+        current_path_details = os.lstat(str(destination))
+        if (
+            not _opened_path_matches(
+                current_path_details,
+                final_details,
+                destination,
+                destination_descriptor,
+            )
+            or (
+                not _WINDOWS_SPLIT_STAT_IDENTITIES
+                and _stat_identity(current_path_details)
+                != destination_path_identity
+            )
+            or current_expected[2] != destination_size
+            or current_expected[-1] != destination_digest.hexdigest()
+        ):
             raise ControlCenterError(
                 "Installer destination changed while it was copied and was preserved.",
                 409,
             )
+        os.close(destination_descriptor)
+        destination_descriptor = None
+        closed_expected = ProjectMutationJournal._snapshot(
+            destination,
+            require_single_link=True,
+            include_data=False,
+        )["fingerprint"]
+        if closed_expected != current_expected:
+            raise ControlCenterError(
+                "Installer destination changed while it was copied and was preserved.",
+                409,
+            )
+        destination_expected = closed_expected
         if journal is not None:
             journal.finish_created_file(journal_record, expected=destination_expected)
     except Exception as primary_error:
         if destination_descriptor is not None:
             try:
                 partial_details = os.fstat(destination_descriptor)
+                partial_identity, _partial_size = _descriptor_file_details(
+                    destination_descriptor
+                )
                 if (
                     stat.S_ISREG(partial_details.st_mode)
-                    and partial_details.st_nlink == 1
-                    and (partial_details.st_dev, partial_details.st_ino)
-                    == destination_identity
-                    and partial_details.st_size == destination_size
+                    and partial_identity == destination_identity
                 ):
-                    destination_expected = (
-                        partial_details.st_dev,
-                        partial_details.st_ino,
-                        partial_details.st_size,
-                        stat.S_IMODE(partial_details.st_mode),
-                        partial_details.st_nlink,
-                        partial_details.st_mtime_ns,
-                        destination_digest.hexdigest(),
-                    )
+                    descriptor_still_owned = True
+                else:
+                    descriptor_still_owned = False
             except OSError:
-                pass
+                descriptor_still_owned = False
+            if (
+                descriptor_still_owned
+                and destination_path_identity is not None
+            ):
+                try:
+                    current = ProjectMutationJournal._snapshot(
+                        destination,
+                        require_single_link=True,
+                        include_data=False,
+                    )["fingerprint"]
+                    current_path_details = os.lstat(str(destination))
+                except (FileNotFoundError, ControlCenterError, OSError):
+                    current = None
+                if (
+                    current is not None
+                    and _opened_path_matches(
+                        current_path_details,
+                        partial_details,
+                        destination,
+                        destination_descriptor,
+                    )
+                    and (
+                        _WINDOWS_SPLIT_STAT_IDENTITIES
+                        or _stat_identity(current_path_details)
+                        == destination_path_identity
+                    )
+                    and current[2] == destination_size
+                    and current[-1] == destination_digest.hexdigest()
+                ):
+                    destination_expected = current
             try:
                 os.close(destination_descriptor)
             except OSError:
                 pass
             destination_descriptor = None
+            if destination_expected is not None:
+                try:
+                    closed_expected = ProjectMutationJournal._snapshot(
+                        destination,
+                        require_single_link=True,
+                        include_data=False,
+                    )["fingerprint"]
+                except (FileNotFoundError, ControlCenterError, OSError):
+                    destination_expected = None
+                else:
+                    if closed_expected != destination_expected:
+                        destination_expected = None
         cleanup_error = None
         if destination_expected is not None:
             cleanup_errors = []
@@ -6425,12 +6750,23 @@ class SessionRuntime:
                     return invalid, None
                 with path.open("r", encoding="utf-8") as handle:
                     opened = os.fstat(handle.fileno())
-                    if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+                    if not _opened_path_matches(
+                        before, opened, path, handle.fileno()
+                    ):
                         return invalid, None
                     raw = handle.read(1024 * 1024 + 1)
+                    after_opened = os.fstat(handle.fileno())
                 after = path.lstat()
                 if (
-                    (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                    _stat_stable_signature(after)
+                    != _stat_stable_signature(before)
+                    or _stat_stable_signature(after_opened)
+                    != _stat_stable_signature(opened)
+                    or (
+                        not _WINDOWS_SPLIT_STAT_IDENTITIES
+                        and _stat_stable_signature(opened)
+                        != _stat_stable_signature(after)
+                    )
                     or len(raw.encode("utf-8")) > 1024 * 1024
                 ):
                     return invalid, None
@@ -7081,7 +7417,7 @@ to `{marker}`. If user input is required, write
         if notes:
             notes_path.parent.mkdir(parents=True, exist_ok=True)
             safe_project_target(worktree, notes_path)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY_OPEN_FLAG
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
             descriptor = os.open(str(notes_path), flags, 0o600)
@@ -7390,6 +7726,7 @@ to `{marker}`. If user input is required, write
         env["WK_MUTATION_TOKEN"] = runtime.mutation_token
         instance_token = uuid.uuid4().hex
         env["WK_PREVIEW_INSTANCE_TOKEN"] = instance_token
+        env["PYTHONIOENCODING"] = "utf-8"
         env["WK_COLOR_LOCKDIR"] = str(configured_lock_dir(config))
         env["WK_PORT_LOCKDIR"] = str(runtime_registry_path())
         if runtime.claimed_lock is not None:
@@ -7615,7 +7952,9 @@ to `{marker}`. If user input is required, write
                     folder.mkdir(parents=True, exist_ok=True)
                     safe_project_target(worktree, folder)
                 for target, data in prepared:
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    flags = (
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | _BINARY_OPEN_FLAG
+                    )
                     if hasattr(os, "O_NOFOLLOW"):
                         flags |= os.O_NOFOLLOW
                     fd = os.open(str(target), flags, 0o600)

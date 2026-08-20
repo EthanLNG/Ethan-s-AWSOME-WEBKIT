@@ -7478,7 +7478,7 @@ class SessionManager:
             return public_session(session)
 
     def start_issue_session(
-        self, project_id, issue_code, reasoning_effort="medium"
+        self, project_id, issue_code, reasoning_effort="high"
     ):
         if issue_code != GITHUB_TARGET_DIVERGED:
             raise ControlCenterError("That project issue cannot be handled by an agent.", 409)

@@ -29,6 +29,8 @@
   Center can launch a neutral issue agent in its own worktree, keep the alert
   visible across refreshes, and use the existing chat to ask for human
   decisions before safely integrating and retrying the push.
+- Styled the persistent issue action as a circular Control Center control and
+  made issue agents start with high reasoning by default.
 - Rejected risky reference uploads and high-confidence secrets before new-site
   commits or GitHub creation, with clearer privacy boundaries for references,
   browser dictation, voice notes, and the optional API proxy.

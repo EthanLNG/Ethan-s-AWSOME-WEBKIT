@@ -718,7 +718,7 @@ async function testIssueActionStartsAnUncoloredAgent() {
   const button = {};
   const ctx = context({
     state: { projects: [project], selectedProjectId: project.id },
-    $: (selector) => selector === "#newAgentReasoning" ? { value: "high" } : {},
+    $: () => ({}),
     api: async (path, options) => {
       requests.push({ path, options });
       return { session };
@@ -770,8 +770,11 @@ class ControlCenterFrontendTests(unittest.TestCase):
         styles = STYLES_CSS.read_text(encoding="utf-8")
         self.assertIn('id="projectIssue" role="alert"', markup)
         self.assertIn('id="handleProjectIssue"', markup)
+        self.assertIn('class="project-issue-action"', markup)
         self.assertIn("Handle with agent", markup)
         self.assertIn(".project-issue[hidden]", styles)
+        self.assertIn(".project-issue-action", styles)
+        self.assertIn("border-radius: 50%", styles)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for front-end regression tests")
     def test_async_state_and_drop_regressions(self):

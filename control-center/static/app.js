@@ -672,7 +672,7 @@ async function handleProjectIssue(event) {
       method: "POST",
       body: {
         issueCode: issue.code,
-        reasoningEffort: $("#newAgentReasoning").value,
+        reasoningEffort: "high",
       },
     });
     try { await refreshProjects(); } catch (_refreshError) {}

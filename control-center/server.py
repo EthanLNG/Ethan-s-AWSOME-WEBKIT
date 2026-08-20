@@ -182,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                 session = self.server.app.sessions.start_issue_session(
                     parts[2],
                     body.get("issueCode", ""),
-                    body.get("reasoningEffort", "medium"),
+                    body.get("reasoningEffort", "high"),
                 )
                 self._json({"session": session}, 201)
             elif path.startswith("/api/projects/") and path.endswith("/seeds-start"):

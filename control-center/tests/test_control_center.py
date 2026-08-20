@@ -3320,6 +3320,47 @@ class ControlCenterTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_issue_agent_http_route_defaults_to_high_reasoning(self):
+        token = "test-token-1234567890"
+        app = mock.Mock()
+        app.sessions.start_issue_session.return_value = {
+            "id": "support-session",
+            "kind": "support",
+        }
+        server = ControlCenterHTTPServer(
+            ("127.0.0.1", 0), ControlCenterHandler, app, token
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            body = json.dumps({
+                "issueCode": control_center_module.GITHUB_TARGET_DIVERGED,
+            })
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/projects/project-1/agent", body=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body.encode("utf-8"))),
+                    "X-WKCC-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            self.assertEqual(response.status, 201)
+            app.sessions.start_issue_session.assert_called_once_with(
+                "project-1",
+                control_center_module.GITHUB_TARGET_DIVERGED,
+                "high",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_control_center_close_waits_for_in_flight_mutation_handler(self):
         entered = threading.Event()
         release = threading.Event()

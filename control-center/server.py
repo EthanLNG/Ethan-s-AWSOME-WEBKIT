@@ -175,6 +175,16 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) != 4:
                     raise ControlCenterError("Project route not found.", 404)
                 self._json(self.server.app.projects.push_project(parts[2]))
+            elif path.startswith("/api/projects/") and path.endswith("/agent"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    raise ControlCenterError("Project route not found.", 404)
+                session = self.server.app.sessions.start_issue_session(
+                    parts[2],
+                    body.get("issueCode", ""),
+                    body.get("reasoningEffort", "medium"),
+                )
+                self._json({"session": session}, 201)
             elif path.startswith("/api/projects/") and path.endswith("/seeds-start"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 4:

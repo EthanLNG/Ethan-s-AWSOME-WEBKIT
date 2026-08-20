@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_JS = ROOT / "control-center" / "static" / "app.js"
+INDEX_HTML = ROOT / "control-center" / "static" / "index.html"
+STYLES_CSS = ROOT / "control-center" / "static" / "styles.css"
 
 
 NODE_HARNESS = r"""
@@ -657,6 +659,92 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   assert.equal(updatePrompt.hidden, true, "the update offer should clear while retrying");
 }
 
+async function testPushFailureBecomesPersistentAgentIssue() {
+  const issue = {
+    code: "github_target_diverged",
+    message: "The GitHub target is not an ancestor of the validated local commit.",
+    action: "handle_with_agent",
+  };
+  const project = { id: "project-1", sessions: [] };
+  const rendered = [];
+  const toasts = [];
+  const busy = [];
+  let refreshes = 0;
+  const ctx = context({
+    state: { projects: [project], selectedProjectId: project.id },
+    $: () => ({}),
+    api: async () => {
+      const failure = new Error(issue.message);
+      failure.details = { issue };
+      throw failure;
+    },
+    refreshProjects: async () => { refreshes += 1; },
+    renderProjectIssue: (value) => rendered.push(value.issue),
+    setBusy: (_button, value) => busy.push(value),
+    toast: (message) => toasts.push(message),
+  });
+  install(ctx, "selectedProject", "retainActionableIssue", "pushSelectedProject");
+
+  await ctx.pushSelectedProject();
+  assert.deepEqual(project.issue, issue);
+  assert.equal(rendered.length, 1, "the actionable error must render immediately");
+  assert.equal(refreshes, 1, "the persisted server issue must be refreshed");
+  assert.equal(toasts.length, 0, "the persistent issue must replace the transient toast");
+  assert.deepEqual(busy, [true, false]);
+  assert.match(
+    extractFunction("finishSession"),
+    /retainActionableIssue\(error, project\)/,
+    "automatic post-merge push failures must keep the same persistent issue",
+  );
+}
+
+async function testIssueActionStartsAnUncoloredAgent() {
+  const issue = {
+    code: "github_target_diverged",
+    message: "Sync before pushing.",
+    action: "handle_with_agent",
+  };
+  const project = { id: "project-1", sessions: [], issue };
+  const session = {
+    id: "support-1",
+    projectId: project.id,
+    kind: "support",
+    color: "agent",
+    emoji: "🛠️",
+  };
+  const requests = [];
+  const opened = [];
+  const busy = [];
+  const button = {};
+  const ctx = context({
+    state: { projects: [project], selectedProjectId: project.id },
+    $: (selector) => selector === "#newAgentReasoning" ? { value: "high" } : {},
+    api: async (path, options) => {
+      requests.push({ path, options });
+      return { session };
+    },
+    refreshProjects: async () => { project.sessions = [session]; },
+    openSession: (value) => opened.push(value),
+    setBusy: (_button, value) => busy.push(value),
+    toast: () => {},
+  });
+  install(ctx, "selectedProject", "projectForSessionId", "handleProjectIssue");
+
+  await ctx.handleProjectIssue({ currentTarget: button });
+  assert.equal(requests[0].path, "/api/projects/project-1/agent");
+  assert.equal(requests[0].options.body.issueCode, issue.code);
+  assert.equal(requests[0].options.body.reasoningEffort, "high");
+  assert.equal(opened[0].kind, "support");
+  assert.equal(opened[0].color, "agent");
+  assert.deepEqual(busy, [true, false]);
+
+  const renderSessionsSource = extractFunction("renderSessions");
+  assert.match(renderSessionsSource, /session\.kind !== "support"/);
+  const openSessionSource = extractFunction("openSession");
+  assert.match(openSessionSource, /session\.kind === "support"/);
+  assert.match(openSessionSource, /Apply fix to/);
+}
+
 (async () => {
   await testHomeSelectionPersists();
   await testApiPreservesStructuredErrorDetails();
@@ -667,6 +755,8 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   await testConcurrentProjectReadsCannotExceedLimits();
   await testProjectSaveWaitsForPendingReferences();
   await testExistingProjectOffersAndRequestsWebkitUpdate();
+  await testPushFailureBecomesPersistentAgentIssue();
+  await testIssueActionStartsAnUncoloredAgent();
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
@@ -675,6 +765,14 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
 
 
 class ControlCenterFrontendTests(unittest.TestCase):
+    def test_project_issue_has_persistent_actionable_markup(self):
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        self.assertIn('id="projectIssue" role="alert"', markup)
+        self.assertIn('id="handleProjectIssue"', markup)
+        self.assertIn("Handle with agent", markup)
+        self.assertIn(".project-issue[hidden]", styles)
+
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for front-end regression tests")
     def test_async_state_and_drop_regressions(self):
         result = subprocess.run(

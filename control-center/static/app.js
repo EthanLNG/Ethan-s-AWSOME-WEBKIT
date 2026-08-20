@@ -434,6 +434,34 @@ function targetBranchForSession(session) {
   return targetBranch(projectForSessionId(session?.id));
 }
 
+function renderProjectIssue(project = selectedProject()) {
+  const panel = $("#projectIssue");
+  const issue = project?.issue;
+  if (!issue || issue.action !== "handle_with_agent") {
+    panel.hidden = true;
+    $("#projectIssueMessage").textContent = "";
+    setBusy($("#handleProjectIssue"), false);
+    return;
+  }
+  const session = (project.sessions || []).find((item) => (
+    item.id === issue.supportSessionId
+    && item.kind === "support"
+    && ["active", "busy", "merging", "error"].includes(item.status)
+  ));
+  $("#projectIssueMessage").textContent = issue.message;
+  $("#handleProjectIssue").textContent = session ? "Open agent" : "Handle with agent";
+  $("#handleProjectIssue").dataset.sessionId = session?.id || "";
+  panel.hidden = false;
+}
+
+function retainActionableIssue(error, project) {
+  const issue = error?.details?.issue;
+  if (!project || issue?.action !== "handle_with_agent") return false;
+  project.issue = issue;
+  if (selectedProject()?.id === project.id) renderProjectIssue(project);
+  return true;
+}
+
 function selectProject(id) {
   state.homeSelected = false;
   state.selectedProjectId = id;
@@ -449,7 +477,11 @@ function openSessionPreview(session) {
 
 function renderProjectView() {
   const project = selectedProject();
-  if (!project) return;
+  if (!project) {
+    renderProjectIssue(null);
+    return;
+  }
+  renderProjectIssue(project);
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
   $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project${
@@ -539,7 +571,7 @@ function renderSessions(sessions) {
     emoji.textContent = session.emoji;
     const info = document.createElement("div");
     const title = document.createElement("strong");
-    title.textContent = `${capitalize(session.color)} · ${session.provider === "codex" ? "Codex" : "Claude Code"}`;
+    title.textContent = `${session.kind === "support" ? "Agent" : capitalize(session.color)} · ${session.provider === "codex" ? "Codex" : "Claude Code"}`;
     const branch = document.createElement("small");
     branch.textContent = session.branch;
     info.append(title, branch);
@@ -548,18 +580,21 @@ function renderSessions(sessions) {
     status.textContent = session.status;
     const actions = document.createElement("div");
     actions.className = "session-actions";
-    const preview = document.createElement("button");
-    preview.type = "button";
-    preview.className = "open-chat";
-    preview.textContent = "Preview";
-    preview.setAttribute("aria-label", `Open ${session.color} website preview`);
-    preview.addEventListener("click", () => openSessionPreview(session));
     const chat = document.createElement("button");
     chat.type = "button";
     chat.className = "open-chat";
     chat.textContent = "Chat";
     chat.addEventListener("click", (event) => openSession(session, event.currentTarget));
-    actions.append(preview, chat);
+    if (session.kind !== "support") {
+      const preview = document.createElement("button");
+      preview.type = "button";
+      preview.className = "open-chat";
+      preview.textContent = "Preview";
+      preview.setAttribute("aria-label", `Open ${session.color} website preview`);
+      preview.addEventListener("click", () => openSessionPreview(session));
+      actions.append(preview);
+    }
+    actions.append(chat);
     row.append(emoji, info, status, actions);
     list.appendChild(row);
   });
@@ -605,9 +640,47 @@ async function pushSelectedProject() {
       ? "GitHub is already up to date."
       : `${targetBranch(project)} is now updated on GitHub.`);
   } catch (error) {
-    toast(pushResult
-      ? `GitHub was updated, but the project list could not refresh yet: ${error.message}`
-      : error.message);
+    if (!pushResult && retainActionableIssue(error, project)) {
+      try { await refreshProjects(); } catch (_refreshError) {}
+    } else {
+      toast(pushResult
+        ? `GitHub was updated, but the project list could not refresh yet: ${error.message}`
+        : error.message);
+    }
+  } finally {
+    setBusy(button, false);
+  }
+}
+
+async function handleProjectIssue(event) {
+  const project = selectedProject();
+  const issue = project?.issue;
+  if (!project || !issue || issue.action !== "handle_with_agent") return;
+  const button = event.currentTarget;
+  const existing = (project.sessions || []).find((session) => (
+    session.id === issue.supportSessionId
+    && session.kind === "support"
+    && ["active", "busy", "merging", "error"].includes(session.status)
+  ));
+  if (existing) {
+    openSession(existing, button);
+    return;
+  }
+  setBusy(button, true, "Starting agent…");
+  try {
+    const { session } = await api(`/api/projects/${project.id}/agent`, {
+      method: "POST",
+      body: {
+        issueCode: issue.code,
+        reasoningEffort: $("#newAgentReasoning").value,
+      },
+    });
+    try { await refreshProjects(); } catch (_refreshError) {}
+    const refreshed = projectForSessionId(session.id);
+    const current = (refreshed?.sessions || []).find((item) => item.id === session.id) || session;
+    openSession(current, button);
+  } catch (error) {
+    toast(error.message);
   } finally {
     setBusy(button, false);
   }
@@ -625,11 +698,15 @@ function openSession(session, returnFocus = document.activeElement) {
   state.chatCursor = 0;
   state.chatReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : null;
   $("#chatDrawer").hidden = false;
-  $("#chatColor").textContent = `${session.emoji} ${session.color} worktree`;
+  $("#chatColor").textContent = session.kind === "support"
+    ? `${session.emoji} issue agent`
+    : `${session.emoji} ${session.color} worktree`;
   $("#chatTitle").textContent = session.provider === "codex" ? "Codex" : "Claude Code";
   setChatStatus(session);
   $("#chatReasoningLabel").textContent = session.provider === "codex" ? "Codex reasoning" : "Claude effort";
-  $("#mergeButton").textContent = `Merge to ${targetBranchForSession(session)}`;
+  $("#mergeButton").textContent = session.kind === "support"
+    ? `Apply fix to ${targetBranchForSession(session)}`
+    : `Merge to ${targetBranchForSession(session)}`;
   $("#mergeButton").hidden = session.kind === "seeds";
   $("#chatReasoning").disabled = false;
   fillReasoning($("#chatReasoning"), session.provider, session.reasoningEffort || "medium");
@@ -863,12 +940,17 @@ function askConfirm(kind) {
   const generation = state.confirmGeneration;
   const isMerge = kind === "merge";
   const branch = targetBranchForSession(session);
+  const support = session.kind === "support";
   $("#confirmEyebrow").textContent = isMerge ? "Keep the work" : "Permanent action";
-  $("#confirmTitle").textContent = isMerge ? `Merge this color into ${branch}?` : "Discard this color session?";
+  $("#confirmTitle").textContent = isMerge
+    ? `${support ? "Apply this fix" : "Merge this color"} to ${branch}?`
+    : `Discard this ${support ? "agent" : "color"} session?`;
   $("#confirmText").textContent = isMerge
     ? `The ${session.emoji} branch will be merged into ${branch}, then its worktree will close.`
     : `All unmerged work in ${session.branch} will be deleted. This cannot be undone.`;
-  $("#confirmAction").textContent = isMerge ? `Merge to ${branch}` : "Discard forever";
+  $("#confirmAction").textContent = isMerge
+    ? `${support ? "Apply fix to" : "Merge to"} ${branch}`
+    : "Discard forever";
   $("#confirmAction").className = isMerge ? "primary" : "danger";
   setBusy($("#confirmAction"), false);
   $("#confirmDialog button[value=\"cancel\"]").disabled = false;
@@ -908,7 +990,9 @@ async function finishSession(session, kind, confirmationGeneration) {
         else if (github.connected) toast(`Merged locally, but GitHub push failed: ${github.error || "try again when connected"}`);
         else toast(`Merged locally. Connect GitHub so future merges update ${branch} automatically.`);
       }
-    } else if (confirmationCurrent) toast("Color worktree discarded.");
+    } else if (confirmationCurrent) {
+      toast(session.kind === "support" ? "Agent worktree discarded." : "Color worktree discarded.");
+    }
     if (expectedChatSessionId === state.chatSessionId && chatGeneration === state.chatGeneration) {
       state.chatGeneration += 1;
       $("#chatDrawer").hidden = true;
@@ -916,7 +1000,14 @@ async function finishSession(session, kind, confirmationGeneration) {
     }
     await refreshProjects();
   } catch (error) {
-    if (confirmationGeneration === state.confirmGeneration) toast(error.message);
+    if (confirmationGeneration === state.confirmGeneration) {
+      const project = projectForSessionId(session.id);
+      if (retainActionableIssue(error, project)) {
+        try { await refreshProjects(); } catch (_refreshError) {}
+      } else {
+        toast(error.message);
+      }
+    }
   } finally {
     if (confirmationGeneration === state.confirmGeneration) {
       state.confirmBusy = false;
@@ -1558,12 +1649,14 @@ $("#homeButton").addEventListener("click", () => {
   state.homeSelected = true;
   state.selectedProjectId = null;
   renderProjects();
+  renderProjectIssue(null);
 });
 [$("#addProjectButton"), $("#emptyAddButton")].forEach((button) => button.addEventListener("click", openProjectDialog));
 $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
 $("#settingsButton").addEventListener("click", openSettings);
 $("#pushGithubButton").addEventListener("click", pushSelectedProject);
+$("#handleProjectIssue").addEventListener("click", handleProjectIssue);
 $("#seedOnboardingButton").addEventListener("click", continueSeedOnboarding);
 $("#shortcutGuide").addEventListener("click", openSettings);
 $("#settingsForm").addEventListener("submit", saveSettings);

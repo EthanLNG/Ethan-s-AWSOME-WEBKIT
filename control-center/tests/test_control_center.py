@@ -2200,6 +2200,206 @@ class ControlCenterTests(unittest.TestCase):
             self.assertTrue(result["pushed"])
             self.assertFalse(result["github"]["unpushed"])
 
+    def test_diverged_push_records_persistent_agent_action(self):
+        project = {
+            "id": "diverged-project",
+            "name": "Diverged Project",
+            "slug": "diverged-project",
+            "path": str(self.root),
+            "provider": "codex",
+            "baseBranch": "main",
+            "targetBranch": "main",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("projects", []).append(project)
+        )
+        failure = ControlCenterError(
+            "The GitHub target is not an ancestor of the validated local commit. Sync before pushing.",
+            409,
+            {"code": control_center_module.GITHUB_TARGET_DIVERGED},
+        )
+        with mock.patch.object(
+            self.app.projects, "integrate_managed_target"
+        ), mock.patch.object(
+            self.app.projects,
+            "github_sync_status",
+            return_value={"connected": True, "unpushed": True},
+        ), mock.patch.object(
+            self.app.projects, "_push_to_github", side_effect=failure
+        ):
+            with self.assertRaises(ControlCenterError) as raised:
+                self.app.projects.push_project(project["id"])
+
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(
+            raised.exception.details["code"],
+            control_center_module.GITHUB_TARGET_DIVERGED,
+        )
+        issue = raised.exception.details["issue"]
+        self.assertEqual(issue["action"], "handle_with_agent")
+        stored = self.app.projects.get_project(project["id"])["issue"]
+        self.assertEqual(stored, issue)
+
+    def test_successful_push_clears_divergence_issue(self):
+        project = {
+            "id": "resolved-project",
+            "name": "Resolved Project",
+            "slug": "resolved-project",
+            "path": str(self.root),
+            "provider": "codex",
+            "baseBranch": "main",
+            "targetBranch": "main",
+            "issue": {
+                "code": control_center_module.GITHUB_TARGET_DIVERGED,
+                "message": "Resolve me",
+                "action": "handle_with_agent",
+                "createdAt": "2026-08-20T00:00:00Z",
+            },
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("projects", []).append(project)
+        )
+        statuses = [
+            {"connected": True, "unpushed": True},
+            {"connected": True, "unpushed": False},
+        ]
+        with mock.patch.object(
+            self.app.projects, "integrate_managed_target"
+        ), mock.patch.object(
+            self.app.projects, "github_sync_status", side_effect=statuses
+        ), mock.patch.object(
+            self.app.projects, "push_to_github", return_value={"pushed": True}
+        ):
+            result = self.app.projects.push_project(project["id"])
+
+        self.assertTrue(result["pushed"])
+        self.assertNotIn("issue", self.app.projects.get_project(project["id"]))
+
+    def test_issue_agent_uses_an_uncolored_isolated_worktree(self):
+        parent = self.root / "issue-agent-projects"
+        parent.mkdir()
+        with mock.patch.object(
+            self.app.projects, "_find_port_block", return_value=6344
+        ), mock.patch.object(self.app.projects, "_ensure_github_repo"):
+            project = self.app.projects.create_project(
+                "Issue Agent Site", str(parent), "codex"
+            )
+        issue = self.app.projects.record_project_issue(
+            project["id"],
+            control_center_module.GITHUB_TARGET_DIVERGED,
+            "GitHub history diverged.",
+        )
+        tool_status = {
+            "codex": {"installed": True},
+            "claude": {"installed": True},
+        }
+        snapshot = {
+            "ref": "refs/awesome-webkit/support/123456789abc",
+            "sha": "1" * 40,
+            "target": "main",
+        }
+        with mock.patch.object(
+            self.app.projects, "system_status", return_value=tool_status
+        ), mock.patch.object(
+            self.app.projects,
+            "snapshot_github_target_for_agent",
+            return_value=snapshot,
+        ), mock.patch.object(SessionRuntime, "start"):
+            session = self.app.sessions.start_issue_session(
+                project["id"], issue["code"], "high"
+            )
+
+        self.assertEqual(session["kind"], "support")
+        self.assertEqual(session["color"], "agent")
+        self.assertNotIn("previewUrl", session)
+        self.assertTrue(session["branch"].startswith("webkit/agent/"))
+        self.assertEqual(session["supportRef"], snapshot["ref"])
+        self.assertTrue(Path(session["worktree"]).is_dir())
+        self.assertEqual(session["reasoningEffort"], "high")
+        runtime = self.app.sessions.runtimes[session["id"]]
+        queued = runtime.jobs.get_nowait()
+        self.assertEqual(queued["source"], "chat")
+        self.assertIn(
+            "without losing either side", queued["prompt"].replace("\n", " ")
+        )
+        stored = self.app.projects.get_project(project["id"])["issue"]
+        self.assertEqual(stored["supportSessionId"], session["id"])
+
+        with mock.patch.object(SessionRuntime, "start") as start_again:
+            reused = self.app.sessions.start_issue_session(
+                project["id"], issue["code"], "medium"
+            )
+        self.assertEqual(reused["id"], session["id"])
+        start_again.assert_not_called()
+
+    def test_issue_agent_gets_an_immutable_validated_remote_snapshot(self):
+        repo = self.root / "snapshot-project"
+        remote = self.root / "snapshot-remote.git"
+        repo.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", "main"], cwd=repo,
+            check=True, capture_output=True,
+        )
+        (repo / "index.html").write_text("<title>Snapshot</title>\n", encoding="utf-8")
+        subprocess.run(["git", "add", "index.html"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Initial"], cwd=repo,
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(remote)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "push", "origin", "main"], cwd=repo,
+            check=True, capture_output=True,
+        )
+        project = {
+            "path": str(repo),
+            "targetBranch": "main",
+        }
+        support_ref = "refs/awesome-webkit/support/123456789abc"
+        destination = {
+            "remote": "origin",
+            "url": str(remote),
+            "fetchUrl": str(remote),
+            "pushUrl": str(remote),
+            "repository": "example/snapshot",
+        }
+        connected = {"connected": True, "remote": "origin"}
+        with mock.patch.object(
+            self.app.projects, "github_status", return_value=connected
+        ), mock.patch.object(
+            self.app.projects, "_validated_github_remote", return_value=destination
+        ), mock.patch.object(
+            self.app.projects, "_require_remote_tree_private"
+        ), mock.patch(
+            "control_center.load_webkit_config", return_value={"feedback_dir": ".webkit/feedback"}
+        ), mock.patch(
+            "control_center.require_private_runtime_paths_safe"
+        ):
+            snapshot = self.app.projects.snapshot_github_target_for_agent(
+                project, support_ref
+            )
+
+        expected = subprocess.run(
+            ["git", "rev-parse", "main"], cwd=repo,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(snapshot["sha"], expected)
+        self.assertEqual(snapshot["ref"], support_ref)
+        self.assertTrue(
+            self.app.projects.delete_issue_agent_snapshot(
+                repo, support_ref, expected
+            )
+        )
+        missing = subprocess.run(
+            ["git", "show-ref", "--verify", support_ref], cwd=repo,
+            check=False, capture_output=True,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+
     def test_push_project_rejects_add_delete_history_for_historical_feedback_root(self):
         parent = self.root / "private-push-projects"
         parent.mkdir()
@@ -2597,6 +2797,19 @@ class ControlCenterTests(unittest.TestCase):
         restart.assert_called_once_with(runtime, expected_config)
         self.assertIs(self.app.sessions.runtimes[session["id"]], runtime)
         self.assertEqual(result, {"restarted": 1, "deferred": 0, "failed": []})
+
+    def test_settings_do_not_start_a_preview_for_issue_agents(self):
+        runtime = mock.Mock()
+        runtime.session = {
+            "id": "support-session",
+            "kind": "support",
+            "worktree": str(self.root),
+        }
+        self.app.sessions.runtimes[runtime.session["id"]] = runtime
+        with mock.patch.object(self.app.sessions, "_restart_preview") as restart:
+            result = self.app.sessions.refresh_previews_for_settings()
+        restart.assert_not_called()
+        self.assertEqual(result, {"restarted": 0, "deferred": 0, "failed": []})
 
     def test_feedback_phase_probe_tolerates_atomic_file_removal(self):
         inbox = self.root / "feedback"
@@ -3058,6 +3271,49 @@ class ControlCenterTests(unittest.TestCase):
             self.assertEqual(payload["project"]["id"], "updated-project")
             app.projects.add_existing.assert_called_once_with(
                 "/projects/old-site", "codex", update_webkit=True
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_issue_agent_http_route_forwards_the_persistent_issue(self):
+        token = "test-token-1234567890"
+        app = mock.Mock()
+        app.sessions.start_issue_session.return_value = {
+            "id": "support-session",
+            "kind": "support",
+        }
+        server = ControlCenterHTTPServer(
+            ("127.0.0.1", 0), ControlCenterHandler, app, token
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            body = json.dumps({
+                "issueCode": control_center_module.GITHUB_TARGET_DIVERGED,
+                "reasoningEffort": "high",
+            })
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/projects/project-1/agent", body=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body.encode("utf-8"))),
+                    "X-WKCC-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            self.assertEqual(response.status, 201)
+            self.assertEqual(payload["session"]["kind"], "support")
+            app.sessions.start_issue_session.assert_called_once_with(
+                "project-1",
+                control_center_module.GITHUB_TARGET_DIVERGED,
+                "high",
             )
         finally:
             server.shutdown()

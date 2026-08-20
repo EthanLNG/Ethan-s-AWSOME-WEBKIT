@@ -133,6 +133,7 @@ MAX_PROJECT_ASSETS = 500
 MAX_PROJECT_ASSET_BYTES = 15 * 1024 * 1024
 MAX_PROJECT_ASSETS_TOTAL_BYTES = 20 * 1024 * 1024
 MAX_SECRET_SCAN_BYTES = 2 * 1024 * 1024
+GITHUB_TARGET_DIVERGED = "github_target_diverged"
 MAX_STAGED_PATH_LIST_BYTES = 16 * 1024 * 1024
 MAX_STAGED_SECRET_SCAN_FILES = 20000
 MAX_HISTORY_SECRET_SCAN_COMMITS = 10000
@@ -3552,6 +3553,58 @@ class ProjectManager:
                 return dict(project)
         raise ControlCenterError("Unknown project.", 404)
 
+    def record_project_issue(self, project_id, code, message):
+        if code != GITHUB_TARGET_DIVERGED:
+            raise ControlCenterError("That project issue is not supported.", 409)
+        saved = {}
+
+        def mutate(state):
+            for project in state.get("projects", []):
+                if project.get("id") != project_id:
+                    continue
+                previous = project.get("issue") or {}
+                issue = {
+                    "code": code,
+                    "message": limited_text(message, 2000, "Project issue"),
+                    "action": "handle_with_agent",
+                    "createdAt": previous.get("createdAt") or utc_now(),
+                }
+                if previous.get("code") == code and previous.get("supportSessionId"):
+                    issue["supportSessionId"] = previous["supportSessionId"]
+                project["issue"] = issue
+                saved.update(issue)
+                return
+            raise ControlCenterError("Unknown project.", 404)
+
+        self.store.update(mutate)
+        return dict(saved)
+
+    def unlink_project_issue_session(self, project_id, session_id):
+        def mutate(state):
+            for project in state.get("projects", []):
+                issue = project.get("issue") or {}
+                if (
+                    project.get("id") == project_id
+                    and issue.get("supportSessionId") == session_id
+                ):
+                    issue.pop("supportSessionId", None)
+                    project["issue"] = issue
+                    return
+
+        self.store.update(mutate)
+
+    def clear_project_issue(self, project_id, code=None):
+        def mutate(state):
+            for project in state.get("projects", []):
+                if project.get("id") != project_id:
+                    continue
+                issue = project.get("issue") or {}
+                if code is None or issue.get("code") == code:
+                    project.pop("issue", None)
+                return
+
+        self.store.update(mutate)
+
     def create_project(self, name, parent, provider, onboarding=None):
         with self._project_lock:
             return self._create_project(name, parent, provider, onboarding)
@@ -4398,6 +4451,106 @@ class ProjectManager:
             status["unpushed"] = status["ahead"] > 0
         return status
 
+    def snapshot_github_target_for_agent(self, project, support_ref):
+        project_path = Path(project["path"])
+        if re.fullmatch(r"refs/awesome-webkit/support/[0-9a-f]{12}", support_ref) is None:
+            raise ControlCenterError("The issue-agent support reference is unsafe.", 409)
+        status = self.github_status(project_path)
+        if not status.get("connected"):
+            raise ControlCenterError(
+                status.get("error") or "Connect this project to GitHub first.", 409
+            )
+        destination = self._validated_github_remote(project_path, status["remote"])
+        target = project.get("targetBranch", "main")
+        remote_ref = "refs/heads/{}".format(target)
+        advertised = run_command(
+            [
+                "git", "ls-remote", "--exit-code", "--",
+                destination["fetchUrl"], remote_ref,
+            ],
+            cwd=project_path,
+            check=False,
+            timeout=120,
+        )
+        fields = advertised.stdout.split() if advertised.returncode == 0 else []
+        if (
+            len(fields) < 2
+            or fields[1] != remote_ref
+            or re.fullmatch(r"[0-9a-fA-F]{40,64}", fields[0]) is None
+        ):
+            raise ControlCenterError(
+                sanitize_git_error(
+                    advertised.stderr or advertised.stdout,
+                    "The GitHub target branch could not be resolved safely.",
+                ),
+                409,
+            )
+        advertised_sha = fields[0].lower()
+        fetched = run_command(
+            [
+                "git", "fetch", "--no-tags", "--no-write-fetch-head", "--",
+                destination["fetchUrl"], "+{}:{}".format(remote_ref, support_ref),
+            ],
+            cwd=project_path,
+            check=False,
+            timeout=120,
+        )
+        if fetched.returncode != 0:
+            raise ControlCenterError(
+                sanitize_git_error(
+                    fetched.stderr or fetched.stdout,
+                    "The GitHub target branch could not be prepared for the issue agent.",
+                ),
+                409,
+            )
+        resolved_sha = self._resolved_commit(
+            project_path, support_ref, "The issue-agent GitHub snapshot"
+        )
+        if resolved_sha != advertised_sha:
+            run_command(
+                ["git", "update-ref", "-d", support_ref],
+                cwd=project_path,
+                check=False,
+            )
+            raise ControlCenterError(
+                "The GitHub target changed while the issue agent was starting. Retry.",
+                409,
+            )
+        try:
+            config = load_webkit_config(
+                project_path / "webkit" / "webkit.config.json",
+                project_path,
+                require_default_page=True,
+            )
+            require_private_runtime_paths_safe(project_path, config)
+            self._require_remote_tree_private(project_path, resolved_sha, config)
+        except Exception:
+            run_command(
+                ["git", "update-ref", "-d", support_ref, resolved_sha],
+                cwd=project_path,
+                check=False,
+            )
+            raise
+        return {
+            "ref": support_ref,
+            "sha": resolved_sha,
+            "target": target,
+        }
+
+    @classmethod
+    def delete_issue_agent_snapshot(cls, project_path, support_ref, expected_sha):
+        if (
+            re.fullmatch(r"refs/awesome-webkit/support/[0-9a-f]{12}", str(support_ref or "")) is None
+            or re.fullmatch(r"[0-9a-f]{40,64}", str(expected_sha or "")) is None
+        ):
+            return False
+        removed = run_command(
+            ["git", "update-ref", "-d", support_ref, expected_sha],
+            cwd=project_path,
+            check=False,
+        )
+        return removed.returncode == 0
+
     @classmethod
     def _verified_push(
         cls, project_path, remote, branch, target_branch, set_upstream=False,
@@ -5042,6 +5195,7 @@ class ProjectManager:
                     raise ControlCenterError(
                         "The GitHub target is not an ancestor of the validated local commit. Sync before pushing.",
                         409,
+                        {"code": GITHUB_TARGET_DIVERGED},
                     )
             cls._reject_history_secrets(
                 project_path,
@@ -5138,7 +5292,20 @@ class ProjectManager:
 
     def push_to_github(self, project, validated_sha=None):
         with self._project_lock:
-            return self._push_to_github(project, validated_sha=validated_sha)
+            try:
+                return self._push_to_github(project, validated_sha=validated_sha)
+            except ControlCenterError as exc:
+                if (
+                    exc.details.get("code") != GITHUB_TARGET_DIVERGED
+                    or not project.get("id")
+                ):
+                    raise
+                issue = self.record_project_issue(
+                    project["id"], GITHUB_TARGET_DIVERGED, str(exc)
+                )
+                details = dict(exc.details)
+                details["issue"] = issue
+                raise ControlCenterError(str(exc), exc.status, details) from exc
 
     def _push_to_github(self, project, validated_sha=None):
         project_path = Path(project["path"])
@@ -5169,12 +5336,14 @@ class ProjectManager:
                 "Connect this project to GitHub before pushing.", 409
             )
         if not before["unpushed"]:
+            self.clear_project_issue(project_id, GITHUB_TARGET_DIVERGED)
             return {"pushed": False, "alreadyCurrent": True, "github": before}
         result = self.push_to_github(project)
         if not result["pushed"]:
             raise ControlCenterError(
                 result.get("error") or "GitHub push failed. Check your GitHub authentication.", 409
             )
+        self.clear_project_issue(project_id, GITHUB_TARGET_DIVERGED)
         after = self.github_sync_status(project)
         return {"pushed": True, "alreadyCurrent": False, "github": after}
 
@@ -6879,7 +7048,8 @@ class SessionRuntime:
 
     def start(self):
         self.worker.start()
-        self.watcher.start()
+        if self.session.get("kind") != "support":
+            self.watcher.start()
 
     def enqueue(self, prompt, source, display=None):
         with self.enqueue_lock:
@@ -7305,6 +7475,198 @@ class SessionManager:
             self.runtimes[session_id] = runtime
             runtime.log.append("system", "{} {} session started in an isolated worktree.".format(entry["emoji"], provider), "status")
             runtime.start()
+            return public_session(session)
+
+    def start_issue_session(
+        self, project_id, issue_code, reasoning_effort="medium"
+    ):
+        if issue_code != GITHUB_TARGET_DIVERGED:
+            raise ControlCenterError("That project issue cannot be handled by an agent.", 409)
+        project = self.projects.get_project(project_id)
+        issue = project.get("issue") or {}
+        if issue.get("code") != issue_code:
+            raise ControlCenterError("That project issue is no longer active.", 409)
+        with self.lock:
+            if self.shutdown_event.is_set():
+                raise ControlCenterError("The Control Center is shutting down.", 409)
+            support_session_id = issue.get("supportSessionId")
+            for existing in self.store.read().get("sessions", []):
+                if (
+                    existing.get("id") == support_session_id
+                    and existing.get("projectId") == project_id
+                    and existing.get("kind") == "support"
+                    and existing.get("status") in ("active", "busy", "merging", "error")
+                ):
+                    return public_session(existing)
+
+            project_path = Path(project["path"])
+            if not project_path.is_dir():
+                raise ControlCenterError("Project folder is missing.", 404)
+            config = load_webkit_config(
+                project_path / "webkit" / "webkit.config.json",
+                project_path,
+                require_default_page=True,
+            )
+            require_private_runtime_paths_safe(project_path, config)
+            if private_safe_git_status(project_path, config).stdout.strip():
+                raise ControlCenterError(
+                    "The Control Center checkout has uncommitted changes.", 409
+                )
+            base_branch = project.get("baseBranch", "main")
+            current_branch = run_command(
+                ["git", "branch", "--show-current"], cwd=project_path
+            ).stdout.strip()
+            if current_branch != base_branch:
+                raise ControlCenterError(
+                    "The Control Center checkout is not on its managed base branch.", 409
+                )
+            provider = project["provider"]
+            allowed_efforts = (
+                ("low", "medium", "high", "xhigh")
+                if provider == "codex"
+                else ("low", "medium", "high", "xhigh", "max")
+            )
+            if reasoning_effort not in allowed_efforts:
+                raise ControlCenterError(
+                    "Choose a supported {} reasoning level.".format(provider), 409
+                )
+            if not self.projects.system_status()[provider]["installed"]:
+                raise ControlCenterError("{} CLI is not installed.".format(provider), 409)
+
+            session_id = uuid.uuid4().hex[:12]
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            branch = "webkit/agent/{}-{}".format(stamp, session_id[:6])
+            support_ref = "refs/awesome-webkit/support/{}".format(session_id)
+            snapshot = self.projects.snapshot_github_target_for_agent(
+                project, support_ref
+            )
+            worktree = (
+                self.store.state_dir / "worktrees" / project["slug"]
+                / ("agent-" + session_id[:6])
+            )
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            base_sha = self.projects._resolved_commit(
+                project_path,
+                "refs/heads/{}".format(base_branch),
+                "The managed support-session base branch",
+            )
+            current_head = self.projects._resolved_commit(
+                project_path, "HEAD", "The managed support-session checkout HEAD"
+            )
+            if (
+                current_head != base_sha
+                or private_safe_git_status(project_path, config).stdout.strip()
+            ):
+                self.projects.delete_issue_agent_snapshot(
+                    project_path, snapshot["ref"], snapshot["sha"]
+                )
+                raise ControlCenterError(
+                    "The Control Center checkout changed while the issue agent was starting.",
+                    409,
+                )
+            try:
+                ownership = self.projects._create_owned_worktree(
+                    project_path, worktree, branch, base_sha
+                )
+            except Exception:
+                self.projects.delete_issue_agent_snapshot(
+                    project_path, snapshot["ref"], snapshot["sha"]
+                )
+                raise
+            session = {
+                "id": session_id,
+                "projectId": project_id,
+                "projectName": project["name"],
+                "provider": provider,
+                "kind": "support",
+                "issueCode": issue_code,
+                "supportRef": snapshot["ref"],
+                "supportRemoteSha": snapshot["sha"],
+                "color": "agent",
+                "emoji": "🛠️",
+                "branch": branch,
+                "worktree": str(worktree),
+                "baseSha": base_sha,
+                "worktreeDev": ownership["dev"],
+                "worktreeIno": ownership["ino"],
+                "feedbackDir": config.get("feedback_dir", ".webkit/feedback"),
+                "status": "active",
+                "threadId": None,
+                "hasRun": False,
+                "reasoningEffort": reasoning_effort,
+                "createdAt": utc_now(),
+            }
+            runtime = SessionRuntime(self, session)
+
+            def save_support_session(state):
+                active_issue = None
+                for item in state.get("projects", []):
+                    if item.get("id") == project_id:
+                        active_issue = item.get("issue") or {}
+                        if active_issue.get("code") != issue_code:
+                            raise ControlCenterError(
+                                "That project issue is no longer active.", 409
+                            )
+                        active_issue["supportSessionId"] = session_id
+                        item["issue"] = active_issue
+                        break
+                if active_issue is None:
+                    raise ControlCenterError("Unknown project.", 404)
+                state.setdefault("sessions", []).append(dict(session))
+
+            try:
+                self.store.update(save_support_session)
+            except Exception:
+                self.projects._discard_owned_worktree(
+                    project_path,
+                    worktree,
+                    branch,
+                    (ownership["dev"], ownership["ino"]),
+                )
+                self.projects.delete_issue_agent_snapshot(
+                    project_path, snapshot["ref"], snapshot["sha"]
+                )
+                raise
+            self.runtimes[session_id] = runtime
+            runtime.log.append(
+                "system",
+                "{} {} issue agent started in an isolated worktree.".format(
+                    session["emoji"], provider
+                ),
+                "status",
+            )
+            runtime.start()
+            target = snapshot["target"]
+            prompt = """Resolve the active GitHub synchronization problem for this project.
+
+The GitHub target branch `{target}` is not an ancestor of the validated local
+commit, so the safe push boundary refused to publish it. Work only in this
+isolated support worktree. Inspect the local history and configured GitHub
+remote, then reconcile the remote snapshot and local histories without losing
+either side. Validate the resulting repository and website before reporting
+that the fix is ready.
+
+The trusted Control Center already fetched the exact GitHub target commit
+`{remote_sha}` into the immutable local reference `{support_ref}`. Use that
+snapshot for the reconciliation, so this task does not depend on agent network
+access. Verify its relationship to the current branch before changing files.
+
+Do not force-push, rewrite shared history, delete work, or choose between
+conflicting human changes without explicit approval from the user in chat. If
+a decision is needed, explain the options and wait for the user. Continue from
+the same chat after they answer. When the branch is clean and ready, tell the
+user to use the Control Center's Apply fix button. The trusted Control Center
+will integrate and push it after its own validation.
+""".format(
+                target=target,
+                remote_sha=snapshot["sha"],
+                support_ref=snapshot["ref"],
+            )
+            runtime.enqueue(
+                bounded_provider_prompt(prompt, "Issue-agent prompt"),
+                "chat",
+                display="Investigate and safely resolve the GitHub sync problem.",
+            )
             return public_session(session)
 
     def start_seed_session(self, project_id, seed_count=10, brief=""):
@@ -8359,7 +8721,7 @@ to `{marker}`. If user input is required, write
         if session.get("status") in ("busy", "merging"):
             raise ControlCenterError("Wait for the agent to finish before merging.", 409)
         if not runtime:
-            raise ControlCenterError("The coding agent is not running for this color.", 409)
+            raise ControlCenterError("The coding agent is not running for this session.", 409)
         self._prepare_worktree_merge(session, project)
         marker = Path(session["worktree"]) / ".webkit" / "control-center-merge.json"
         unlink_if_exists(marker)
@@ -8567,7 +8929,7 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         if private_safe_git_status(
             worktree, config, session.get("feedbackDir")
         ).stdout.strip():
-            raise ControlCenterError("The resolved color worktree is not clean.", 409)
+            raise ControlCenterError("The resolved agent worktree is not clean.", 409)
         if self.projects._resolved_commit(
             worktree, "refs/heads/{}".format(session["branch"]),
             "The validated session branch",
@@ -8633,6 +8995,10 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             )
         self.projects.integrate_managed_target(project, validated_sha=session_sha)
         github = self.projects.push_to_github(project, validated_sha=session_sha)
+        if session.get("kind") == "support" and github.get("pushed"):
+            self.projects.clear_project_issue(
+                project["id"], session.get("issueCode")
+            )
         if (
             self.projects._resolved_commit(
                 project_path, "HEAD", "The post-push controller checkout HEAD"
@@ -8664,12 +9030,19 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             raise ControlCenterError(
                 "The merged session was preserved because {}.".format(reason), 409
             )
+        if session.get("kind") == "support":
+            self.projects.delete_issue_agent_snapshot(
+                project_path,
+                session.get("supportRef"),
+                session.get("supportRemoteSha"),
+            )
         self._set_session_status(session_id, "merged")
         EventLog(self.store.state_dir, session_id).append(
             "system",
-            "Merged to {}{} and released the color.".format(
+            "Merged to {}{} and released the {}.".format(
                 project.get("targetBranch", "main"),
                 "; GitHub updated" if github.get("pushed") else "",
+                "agent worktree" if session.get("kind") == "support" else "color",
             ),
             "status",
         )
@@ -8716,6 +9089,12 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
                     .format(reason),
                     409,
                 )
+            if session.get("kind") == "support":
+                self.projects.delete_issue_agent_snapshot(
+                    project_path,
+                    session.get("supportRef"),
+                    session.get("supportRemoteSha"),
+                )
             self._set_session_status(session_id, "discarded")
         except Exception as exc:
             self._set_session_status(session_id, "error", str(exc))
@@ -8726,6 +9105,8 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
                 "seedCount": session.get("seedCount", 10),
                 "message": "Seed onboarding was discarded. Start it again when ready.",
             })
+        elif session.get("kind") == "support":
+            self.projects.unlink_project_issue_session(project["id"], session_id)
         return {"discarded": True}
 
     def _release(self, runtime):
@@ -8804,7 +9185,8 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
                     config = load_webkit_config(
                         config_path, worktree, require_default_page=True
                     )
-                    self._claim_and_preview(runtime, config, cancel_event=cancel_event)
+                    if session.get("kind") != "support":
+                        self._claim_and_preview(runtime, config, cancel_event=cancel_event)
                     if cancelled():
                         raise _RecoveryCancelled("Control Center startup was interrupted.")
                     runtime.start()
@@ -8888,6 +9270,8 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         restarted = 0
         failed = []
         for session_id, runtime in list(self.runtimes.items()):
+            if runtime.session.get("kind") == "support":
+                continue
             try:
                 self._restart_preview(runtime)
                 restarted += 1

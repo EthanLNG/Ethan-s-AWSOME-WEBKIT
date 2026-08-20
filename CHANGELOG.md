@@ -21,6 +21,10 @@
 - Let existing repositories open in an isolated managed checkout even when the
   local target has tracked or untracked changes. The source stays untouched and
   integration waits until its checkout is clean.
+- Made old Webkit versions actionable in the Add Project dialog. The Control
+  Center can now replace the vendored payload in its isolated checkout,
+  preserve `webkit.config.json`, validate and commit the update, and then add
+  the project without disturbing dirty source-checkout changes.
 - Rejected risky reference uploads and high-confidence secrets before new-site
   commits or GitHub creation, with clearer privacy boundaries for references,
   browser dictation, voice notes, and the optional API proxy.

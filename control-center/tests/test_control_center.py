@@ -3025,6 +3025,45 @@ class ControlCenterTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_existing_project_http_route_forwards_webkit_update_choice(self):
+        token = "test-token-1234567890"
+        app = mock.Mock()
+        app.projects.add_existing.return_value = {"id": "updated-project"}
+        server = ControlCenterHTTPServer(
+            ("127.0.0.1", 0), ControlCenterHandler, app, token
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            body = json.dumps({
+                "path": "/projects/old-site",
+                "provider": "codex",
+                "updateWebkit": True,
+            })
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/projects/existing", body=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body.encode("utf-8"))),
+                    "X-WKCC-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            self.assertEqual(response.status, 201)
+            self.assertEqual(payload["project"]["id"], "updated-project")
+            app.projects.add_existing.assert_called_once_with(
+                "/projects/old-site", "codex", update_webkit=True
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_control_center_close_waits_for_in_flight_mutation_handler(self):
         entered = threading.Event()
         release = threading.Event()
@@ -3334,13 +3373,163 @@ class ControlCenterTests(unittest.TestCase):
         subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-m", "Old kit"], cwd=repo, check=True, capture_output=True)
 
-        with self.assertRaisesRegex(ControlCenterError, "UPDATE-KIT.md"):
+        with self.assertRaises(ControlCenterError) as raised:
             self.app.projects.add_existing(str(repo), "codex")
+
+        self.assertEqual(raised.exception.status, 409)
+        self.assertEqual(raised.exception.details, {
+            "code": "webkit_update_required",
+            "installedVersion": "0.0.1",
+            "requiredVersion": "0.8.1",
+        })
 
         status = subprocess.run(
             ["git", "status", "--porcelain"], cwd=repo, text=True, capture_output=True, check=True
         )
         self.assertEqual(status.stdout, "")
+
+    def test_existing_kit_update_choice_must_be_boolean(self):
+        with self.assertRaisesRegex(ControlCenterError, "true or false"):
+            self.app.projects.add_existing(
+                str(self.root), "codex", update_webkit="yes"
+            )
+
+    def test_existing_kit_update_replaces_payload_and_preserves_config(self):
+        repo = self.root / "update-old-version"
+        (repo / "webkit").mkdir(parents=True)
+        (repo / "index.html").write_text("<title>Old</title>\n", encoding="utf-8")
+        (repo / "webkit" / "VERSION").write_text("0.4.1\n", encoding="utf-8")
+        (repo / "webkit" / "legacy-only.txt").write_text(
+            "remove me\n", encoding="utf-8"
+        )
+        with mock.patch.object(
+            self.app.projects, "_find_port_block", return_value=6521
+        ):
+            config = self.app.projects._make_config(repo)
+        config_path = repo / "webkit" / "webkit.config.json"
+        config_path.write_text(
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        self.app.projects._allocated_ports.clear()
+        config_before = config_path.read_bytes()
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Old kit"], cwd=repo,
+            check=True, capture_output=True,
+        )
+
+        project = self.app.projects.add_existing(
+            str(repo), "codex", update_webkit=True
+        )
+
+        self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.1")
+        self.assertFalse(project["sourceIntegrationPending"])
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.1")
+        self.assertEqual(config_path.read_bytes(), config_before)
+        self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
+        self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
+        subject = subprocess.run(
+            ["git", "log", "-1", "--pretty=%s"], cwd=repo,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.1")
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=repo, text=True, capture_output=True, check=True,
+            ).stdout,
+            "",
+        )
+
+    def test_existing_kit_update_keeps_dirty_source_checkout_untouched(self):
+        repo = self.root / "update-dirty-version"
+        (repo / "webkit").mkdir(parents=True)
+        index = repo / "index.html"
+        index.write_text("<title>Committed</title>\n", encoding="utf-8")
+        (repo / "webkit" / "VERSION").write_text("0.4.1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Old kit"], cwd=repo,
+            check=True, capture_output=True,
+        )
+        index.write_text("<title>Uncommitted</title>\n", encoding="utf-8")
+        before_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo,
+            text=True, capture_output=True, check=True,
+        ).stdout
+        before_status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=repo, text=True, capture_output=True, check=True,
+        ).stdout
+
+        with mock.patch.object(
+            self.app.projects, "_find_port_block", return_value=6526
+        ):
+            project = self.app.projects.add_existing(
+                str(repo), "codex", update_webkit=True
+            )
+
+        self.assertTrue(project["sourceIntegrationPending"])
+        self.assertEqual(index.read_text(encoding="utf-8"), "<title>Uncommitted</title>\n")
+        self.assertEqual(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo,
+                text=True, capture_output=True, check=True,
+            ).stdout,
+            before_head,
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=repo, text=True, capture_output=True, check=True,
+            ).stdout,
+            before_status,
+        )
+        managed_path = Path(project["path"])
+        self.assertEqual(
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.1"
+        )
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=managed_path, text=True, capture_output=True, check=True,
+            ).stdout,
+            "",
+        )
+
+    def test_kit_update_payload_excludes_untracked_source_files(self):
+        kit = self.root / "tracked-kit"
+        (kit / "webkit").mkdir(parents=True)
+        (kit / "webkit" / "VERSION").write_text("7.2.3\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main"], cwd=kit, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=kit, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=kit, check=True)
+        subprocess.run(["git", "add", "webkit/VERSION"], cwd=kit, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Tracked kit"], cwd=kit,
+            check=True, capture_output=True,
+        )
+        (kit / "webkit" / "untracked-private.txt").write_text(
+            "do not copy\n", encoding="utf-8"
+        )
+        destination = self.root / "prepared-kit"
+        destination.mkdir()
+        manager = control_center_module.ProjectManager(kit, self.app.store)
+
+        manager._copy_current_kit_payload(destination)
+
+        self.assertEqual(
+            (destination / "VERSION").read_text(encoding="utf-8"), "7.2.3\n"
+        )
+        self.assertFalse((destination / "untracked-private.txt").exists())
 
     def test_unignored_secret_is_never_added_to_unborn_repository_history(self):
         repo = self.root / "secret-site"

@@ -176,6 +176,10 @@
       <label id="projectProviderField">Agent provider<select id="projectProviderSelect"></select></label>
       <p class="capability-note" id="projectGithubNote">New websites are created as private GitHub repositories when GitHub CLI is connected. Existing projects stay local unless they already have a GitHub remote.</p>
       <div class="modal-error" id="projectError" role="alert" aria-live="assertive"></div>
+      <div class="project-update-prompt" id="projectUpdatePrompt" hidden>
+        <p>Update Webkit <strong id="projectUpdateVersions"></strong> in an isolated checkout, preserve <code>webkit.config.json</code>, and then add the project. Customized files inside <code>webkit/</code> will be replaced.</p>
+        <button class="secondary" id="updateProjectWebkit" type="submit">Update Webkit and add</button>
+      </div>
       <div class="project-wizard-actions">
         <button class="secondary" id="projectBack" type="button" hidden>Back</button>
         <button class="primary" id="saveProject" type="submit">Continue</button>

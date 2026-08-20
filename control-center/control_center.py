@@ -3793,12 +3793,14 @@ class ProjectManager:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
 
-    def add_existing(self, path, provider):
+    def add_existing(self, path, provider, update_webkit=False):
         with self._project_lock:
-            return self._add_existing(path, provider)
+            return self._add_existing(path, provider, update_webkit=update_webkit)
 
-    def _add_existing(self, path, provider):
+    def _add_existing(self, path, provider, update_webkit=False):
         self._validate_provider(provider)
+        if not isinstance(update_webkit, bool):
+            raise ControlCenterError("The Webkit update choice must be true or false.")
         self._require_git()
         if not (path or "").strip():
             raise ControlCenterError("Choose an existing project folder.")
@@ -3852,12 +3854,18 @@ class ProjectManager:
             (
                 project_path, base_branch, target_branch, checkout_ownership,
             ) = self._create_controller_checkout(git_root, project_id)
-            self._validate_existing_kit_version(project_path)
-            self._ensure_git_identity(project_path)
             had_config = (project_path / "webkit" / "webkit.config.json").is_file()
-            changed = self._install_kit(project_path, provider)
             if had_config:
-                self._reserve_config_ports(project_path / "webkit" / "webkit.config.json")
+                self._reserve_config_ports(
+                    project_path / "webkit" / "webkit.config.json"
+                )
+            version_update = self._existing_kit_update(project_path)
+            if version_update is not None:
+                if not update_webkit:
+                    self._raise_existing_kit_update_required(version_update)
+                self._upgrade_existing_kit(project_path, version_update)
+            self._ensure_git_identity(project_path)
+            changed = self._install_kit(project_path, provider)
             config = load_webkit_config(
                 project_path / "webkit" / "webkit.config.json",
                 project_path,
@@ -3869,7 +3877,10 @@ class ProjectManager:
                 staged = run_command(["git", "diff", "--cached", "--quiet"], cwd=project_path, check=False)
                 if staged.returncode == 1:
                     self._commit_validated_index(
-                        project_path, "Install AWESOME WEBKIT"
+                        project_path,
+                        "Update AWESOME WEBKIT to v{}".format(
+                            version_update["requiredVersion"]
+                        ) if version_update else "Install AWESOME WEBKIT",
                     )
                 elif staged.returncode != 0:
                     raise ControlCenterError(
@@ -3898,6 +3909,8 @@ class ProjectManager:
                 project_id=project_id,
                 source_integration_pending=integration.get("pending", False),
             )
+            if version_update:
+                registered["webkitUpdated"] = dict(version_update)
             return registered
         except Exception as primary_error:
             with self._port_lock:
@@ -3916,6 +3929,7 @@ class ProjectManager:
                             primary_error, reason
                         ),
                         getattr(primary_error, "status", 409),
+                        getattr(primary_error, "details", None),
                     ) from primary_error
             raise
 
@@ -5408,11 +5422,11 @@ class ProjectManager:
             changed = ignore_changed or changed
         return changed
 
-    def _validate_existing_kit_version(self, project_path):
+    def _existing_kit_update(self, project_path):
         project_path = Path(project_path).resolve()
         target = project_path / "webkit"
         if not target.exists():
-            return
+            return None
         if target.is_symlink() or not target.is_dir():
             raise ControlCenterError("The existing webkit path must be a folder.", 409)
         expected_path = self.kit_root / "webkit" / "VERSION"
@@ -5423,13 +5437,158 @@ class ProjectManager:
         except OSError:
             actual = ""
             expected = expected_path.read_text(encoding="utf-8").strip()
-        if not actual or actual != expected:
-            raise ControlCenterError(
-                "This project has Webkit version {} but the Control Center requires {}. Update it through webkit/UPDATE-KIT.md before adding it.".format(
-                    actual or "unknown", expected
-                ),
-                409,
+        if actual and actual == expected:
+            return None
+        return {
+            "code": "webkit_update_required",
+            "installedVersion": actual or "unknown",
+            "requiredVersion": expected,
+        }
+
+    @staticmethod
+    def _raise_existing_kit_update_required(version_update):
+        raise ControlCenterError(
+            "This project has Webkit version {} but the Control Center requires {}. Update it before adding it.".format(
+                version_update["installedVersion"],
+                version_update["requiredVersion"],
+            ),
+            409,
+            dict(version_update),
+        )
+
+    def _validate_existing_kit_version(self, project_path):
+        version_update = self._existing_kit_update(project_path)
+        if version_update is not None:
+            self._raise_existing_kit_update_required(version_update)
+
+    def _upgrade_existing_kit(self, project_path, version_update):
+        """Atomically replace an old vendored payload while preserving its config."""
+        project_path = Path(project_path).resolve()
+        target = safe_project_target(project_path, project_path / "webkit")
+        if target.is_symlink() or not target.is_dir():
+            raise ControlCenterError("The existing webkit path must be a folder.", 409)
+
+        config_path = safe_project_target(
+            project_path, target / "webkit.config.json"
+        )
+        config_snapshot = None
+        if config_path.exists() or config_path.is_symlink():
+            config_snapshot = ProjectMutationJournal._snapshot(
+                config_path,
+                limit=MAX_WEBKIT_CONFIG_BYTES,
+                require_single_link=True,
             )
+            load_webkit_config(config_path, project_path, require_default_page=True)
+
+        start_head = self._resolved_commit(
+            project_path, "HEAD", "The managed update checkout"
+        )
+        prepared = project_path.parent / (
+            ".{}-webkit-update-{}".format(project_path.name, uuid.uuid4().hex)
+        )
+        backup = project_path.parent / (
+            ".{}-webkit-backup-{}".format(project_path.name, uuid.uuid4().hex)
+        )
+        swapped = False
+        backup_complete = False
+        try:
+            prepared.mkdir(mode=0o700)
+            self._copy_current_kit_payload(prepared)
+            if config_snapshot is not None:
+                prepared_config = prepared / "webkit.config.json"
+                writer = ProjectMutationJournal(prepared)
+                writer.watch_support_file(prepared_config)
+                writer.write_new_support_file(
+                    prepared_config,
+                    config_snapshot["data"],
+                    mode=config_snapshot["mode"],
+                )
+                writer.close()
+
+            current_head = self._resolved_commit(
+                project_path, "HEAD", "The managed update checkout"
+            )
+            status = run_command(
+                [
+                    "git", "--no-optional-locks", "status", "--porcelain=v1",
+                    "--untracked-files=all", "--ignore-submodules=none",
+                ],
+                cwd=project_path,
+                check=False,
+            )
+            if (
+                current_head != start_head
+                or status.returncode != 0
+                or status.stdout
+            ):
+                raise ControlCenterError(
+                    "The managed checkout changed during Webkit update preparation and was preserved.",
+                    409,
+                )
+
+            rename_directory_noreplace(target, backup)
+            backup_complete = True
+            try:
+                rename_directory_noreplace(prepared, target)
+                swapped = True
+            except Exception:
+                rename_directory_noreplace(backup, target)
+                raise
+
+            current_update = self._existing_kit_update(project_path)
+            installed_version = (target / "VERSION").read_text(
+                encoding="utf-8"
+            ).strip()
+            if (
+                current_update is not None
+                or installed_version != version_update["requiredVersion"]
+            ):
+                raise ControlCenterError(
+                    "The prepared Webkit update did not install the required version.",
+                    409,
+                )
+            if config_snapshot is not None:
+                updated_config = ProjectMutationJournal._snapshot(
+                    config_path,
+                    limit=MAX_WEBKIT_CONFIG_BYTES,
+                    require_single_link=True,
+                )
+                if (
+                    updated_config["data"] != config_snapshot["data"]
+                    or updated_config["mode"] != config_snapshot["mode"]
+                ):
+                    raise ControlCenterError(
+                        "webkit.config.json changed during the Webkit update.", 409
+                    )
+            backup_complete = False
+            shutil.rmtree(str(backup))
+        except Exception as primary_error:
+            recovery_error = None
+            if (
+                swapped and backup_complete
+                and backup.exists() and not backup.is_symlink()
+            ):
+                failed_payload = None
+                try:
+                    failed_payload = ProjectMutationJournal._claim_path(target)
+                    rename_directory_noreplace(backup, target)
+                    shutil.rmtree(str(failed_payload))
+                    swapped = False
+                except Exception as error:
+                    recovery_error = str(error)
+            if recovery_error:
+                raise ControlCenterError(
+                    "{}. Update rollback was incomplete: {}.".format(
+                        primary_error, recovery_error
+                    ),
+                    getattr(primary_error, "status", 409),
+                ) from primary_error
+            raise
+        finally:
+            if prepared.exists() and not prepared.is_symlink():
+                shutil.rmtree(str(prepared), ignore_errors=True)
+            if not swapped and backup.exists() and not backup.is_symlink():
+                shutil.rmtree(str(backup), ignore_errors=True)
 
     @classmethod
     def _ensure_standard_ignores(cls, project_path, journal=None):
@@ -5950,6 +6109,104 @@ class ProjectManager:
                 exclusive_copy_file(source, destination, journal=journal)
                 changed = True
         return changed
+
+    def _copy_current_kit_payload(self, target_root):
+        """Copy the committed kit tree when available, excluding local clone data."""
+        target_root = Path(target_root).resolve()
+        repository_root = self._git_root(self.kit_root)
+        if repository_root != self.kit_root:
+            return self._copy_missing_tree(
+                self.kit_root / "webkit", target_root
+            )
+
+        source_commit = self._resolved_commit(
+            self.kit_root, "HEAD", "The Control Center kit source"
+        )
+        tree = self._bounded_git_stdout(
+            [
+                "git", "ls-tree", "-r", "-z", "--full-tree",
+                source_commit, "--", "webkit",
+            ],
+            self.kit_root,
+            MAX_STAGED_PATH_LIST_BYTES,
+            "The committed Webkit payload manifest",
+        )
+        entries = [entry for entry in tree.split(b"\0") if entry]
+        if not entries:
+            raise ControlCenterError(
+                "The committed Control Center kit has no Webkit payload.", 409
+            )
+
+        writer = ProjectMutationJournal(target_root)
+        ignored = {"__pycache__", ".DS_Store", "webkit.config.json"}
+        copied = False
+        try:
+            for entry in entries:
+                metadata, separator, raw_path = entry.partition(b"\t")
+                fields = metadata.split()
+                if separator != b"\t" or len(fields) != 3:
+                    raise ControlCenterError(
+                        "The committed Webkit payload manifest is invalid.", 409
+                    )
+                raw_mode, object_type, raw_sha = fields
+                if object_type != b"blob" or raw_mode not in (b"100644", b"100755"):
+                    raise ControlCenterError(
+                        "The committed Webkit payload contains an unsupported entry.",
+                        409,
+                    )
+                path_text = os.fsdecode(raw_path).replace("\\", "/")
+                if not path_text.startswith("webkit/"):
+                    raise ControlCenterError(
+                        "The committed Webkit payload escaped its source folder.", 409
+                    )
+                relative = Path(path_text[len("webkit/"):])
+                if (
+                    not relative.parts
+                    or any(
+                        part in ("", ".", "..") or part.lower() == ".git"
+                        for part in relative.parts
+                    )
+                ):
+                    raise ControlCenterError(
+                        "The committed Webkit payload contains an unsafe path.", 409
+                    )
+                if any(part in ignored for part in relative.parts):
+                    if relative.name == "webkit.config.json":
+                        raise ControlCenterError(
+                            "The committed Webkit payload must not contain project configuration.",
+                            409,
+                        )
+                    continue
+                sha = raw_sha.decode("ascii", "strict")
+                if re.fullmatch(r"[0-9a-f]{40,64}", sha) is None:
+                    raise ControlCenterError(
+                        "The committed Webkit payload contains an invalid object.", 409
+                    )
+                data = self._bounded_git_stdout(
+                    ["git", "cat-file", "blob", sha],
+                    self.kit_root,
+                    ProjectMutationJournal.MAX_SUPPORT_BYTES,
+                    "A committed Webkit payload file",
+                )
+                destination = safe_project_target(
+                    target_root, target_root / relative
+                )
+                writer.ensure_directory(destination.parent)
+                writer.watch_support_file(destination)
+                writer.write_new_support_file(
+                    destination,
+                    data,
+                    mode=0o755 if raw_mode == b"100755" else 0o644,
+                )
+                copied = True
+        finally:
+            writer.close()
+        if not copied:
+            raise ControlCenterError(
+                "The committed Control Center kit has no installable Webkit files.",
+                409,
+            )
+        return True
 
     def _copy_claude_skills(self, project_path, journal=None):
         changed = False

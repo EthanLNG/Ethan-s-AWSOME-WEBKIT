@@ -92,6 +92,36 @@ async function testHomeSelectionPersists() {
   assert.match(handler, /state\.selectedProjectId\s*=\s*null/);
 }
 
+async function testApiPreservesStructuredErrorDetails() {
+  const ctx = context({
+    CONTROL_CENTER_TOKEN: "test-token-1234567890",
+    fetch: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: "Update required.",
+        details: {
+          code: "webkit_update_required",
+          installedVersion: "0.4.1",
+          requiredVersion: "0.8.1",
+        },
+      }),
+    }),
+  });
+  install(ctx, "api");
+  let failure = null;
+  try {
+    await ctx.api("/api/projects/existing", { method: "POST", body: {} });
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure);
+  assert.equal(failure.status, 409);
+  assert.equal(failure.details.code, "webkit_update_required");
+  assert.equal(failure.details.installedVersion, "0.4.1");
+  assert.equal(failure.details.requiredVersion, "0.8.1");
+}
+
 async function testChatAsyncWorkStaysWithItsSession() {
   const openSessionSource = extractFunction("openSession");
   assert.match(openSessionSource, /state\.chatAttachmentReadsPending\s*=\s*0/);
@@ -293,6 +323,7 @@ async function testSharedModalCompletionsAreGenerationScoped() {
   const folderButton = { dataset: { folderTarget: "newParent", folderPurpose: "parent" } };
   const folderField = { value: "/new-attempt", title: "/new-attempt" };
   const folderError = { textContent: "" };
+  const folderUpdatePrompt = { hidden: true };
   const projectDialog = { open: true };
   const folderBusy = [];
   const projectState = { projectGeneration: 2 };
@@ -301,6 +332,7 @@ async function testSharedModalCompletionsAreGenerationScoped() {
     $: (selector) => ({
       "#newParent": folderField,
       "#projectError": folderError,
+      "#projectUpdatePrompt": folderUpdatePrompt,
       "#projectDialog": projectDialog,
     })[selector],
     api: () => folderRequest.promise,
@@ -549,6 +581,7 @@ async function testProjectSaveWaitsForPendingReferences() {
   const fields = {
     "#saveProject": {},
     "#projectError": error,
+    "#projectUpdatePrompt": { hidden: true },
     "#newBrandBrief": { value: "" },
   };
   const ctx = context({
@@ -569,14 +602,71 @@ async function testProjectSaveWaitsForPendingReferences() {
   assert.match(error.textContent, /finish loading/);
 }
 
+async function testExistingProjectOffersAndRequestsWebkitUpdate() {
+  const requests = [];
+  const errorNode = { textContent: "" };
+  const updatePrompt = { hidden: true };
+  const versions = { textContent: "" };
+  const dialog = { open: true };
+  const saveButton = { id: "saveProject" };
+  const updateButton = { id: "updateProjectWebkit" };
+  const fields = {
+    "#saveProject": saveButton,
+    "#projectError": errorNode,
+    "#projectUpdatePrompt": updatePrompt,
+    "#projectUpdateVersions": versions,
+    "#projectDialog": dialog,
+    "#projectProviderSelect": { value: "codex" },
+    "#existingPath": { value: "/projects/old-site" },
+    "#newBrandBrief": { value: "" },
+  };
+  const state = {
+    projectGeneration: 4,
+    projectMode: "existing",
+    createStep: 1,
+    projectAssetOperationsPending: 0,
+    projectSaveInFlight: false,
+    onboardingAssets: [],
+  };
+  const ctx = context({
+    state,
+    MAX_PROJECT_BRIEF_CHARS: 20000,
+    $: (selector) => fields[selector],
+    setBusy: () => {},
+    api: async (path, options) => {
+      requests.push({ path, options });
+      const failure = new Error("This project needs a Webkit update.");
+      failure.details = requests.length === 1 ? {
+        code: "webkit_update_required",
+        installedVersion: "0.4.1",
+        requiredVersion: "0.8.1",
+      } : {};
+      throw failure;
+    },
+  });
+  install(ctx, "saveProject");
+
+  await ctx.saveProject({ preventDefault() {}, submitter: saveButton });
+  assert.equal(requests[0].path, "/api/projects/existing");
+  assert.equal(requests[0].options.body.updateWebkit, false);
+  assert.equal(updatePrompt.hidden, false, "old kits should reveal the inline update action");
+  assert.equal(versions.textContent, "0.4.1 to 0.8.1");
+
+  await ctx.saveProject({ preventDefault() {}, submitter: updateButton });
+  assert.equal(requests[1].options.body.updateWebkit, true);
+  assert.equal(updatePrompt.hidden, true, "the update offer should clear while retrying");
+}
+
 (async () => {
   await testHomeSelectionPersists();
+  await testApiPreservesStructuredErrorDetails();
   await testChatAsyncWorkStaysWithItsSession();
   await testSharedModalCompletionsAreGenerationScoped();
   await testSettingsCompletionIsGenerationScoped();
   await testProjectDropsAreBoundedAndRejected();
   await testConcurrentProjectReadsCannotExceedLimits();
   await testProjectSaveWaitsForPendingReferences();
+  await testExistingProjectOffersAndRequestsWebkitUpdate();
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;

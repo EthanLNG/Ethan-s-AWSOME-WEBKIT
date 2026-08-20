@@ -114,7 +114,12 @@ async function api(path, options = {}) {
   if (request.body && typeof request.body !== "string") request.body = JSON.stringify(request.body);
   const response = await fetch(path, request);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    error.details = data.details && typeof data.details === "object" ? data.details : {};
+    throw error;
+  }
   return data;
 }
 
@@ -924,6 +929,7 @@ async function finishSession(session, kind, confirmationGeneration) {
 function openProjectDialog() {
   state.projectGeneration += 1;
   $("#projectError").textContent = "";
+  $("#projectUpdatePrompt").hidden = true;
   state.createStep = 1;
   state.onboardingAssets = [];
   $("#newBrandBrief").value = "";
@@ -974,6 +980,7 @@ function setProjectMode(mode) {
   });
   $("#createFields").hidden = mode !== "create";
   $("#existingFields").hidden = mode !== "existing";
+  $("#projectUpdatePrompt").hidden = true;
   renderProjectWizard();
 }
 
@@ -1131,6 +1138,7 @@ async function chooseProjectFolder(event) {
   const field = $(`#${button.dataset.folderTarget}`);
   const errorNode = $("#projectError");
   errorNode.textContent = "";
+  $("#projectUpdatePrompt").hidden = true;
   setBusy(button, true, "Choosing…");
   try {
     const result = await api("/api/system/choose-folder", {
@@ -1154,8 +1162,11 @@ async function saveProject(event) {
   const generation = state.projectGeneration;
   const button = $("#saveProject");
   const errorNode = $("#projectError");
+  const updatePrompt = $("#projectUpdatePrompt");
+  const updateWebkit = event.submitter?.id === "updateProjectWebkit";
   let createdResult = null;
   errorNode.textContent = "";
+  updatePrompt.hidden = true;
   if (state.projectMode === "create" && state.createStep < 3) {
     if (state.createStep === 1 && (!$("#newName").value.trim() || !$("#newParent").value.trim())) {
       errorNode.textContent = "Enter a website name and choose its parent folder.";
@@ -1200,12 +1211,15 @@ async function saveProject(event) {
           })),
         },
       }
-      : { path: $("#existingPath").value, provider };
+      : { path: $("#existingPath").value, provider, updateWebkit };
     const result = await api(path, { method: "POST", body });
     createdResult = result;
     const project = result.project;
+    const updateNotice = !isCreate && project.webkitUpdated
+      ? `Webkit updated from ${project.webkitUpdated.installedVersion} to ${project.webkitUpdated.requiredVersion}. `
+      : "";
     const isolatedNotice = !isCreate && project.sourceIntegrationPending
-      ? "Project added in an isolated checkout. Your local changes were left untouched. Commit or stash them before merging or pushing back."
+      ? `${updateNotice}Project added in an isolated checkout. Your local changes were left untouched. Commit or stash them before merging or pushing back.`
       : "";
     await refreshProjects();
     if (generation !== state.projectGeneration || !$("#projectDialog").open) {
@@ -1232,6 +1246,10 @@ async function saveProject(event) {
       toast(isolatedNotice);
       return;
     }
+    if (updateNotice) {
+      toast(`${updateNotice}Project ready locally.`);
+      return;
+    }
     const verifiedCurrent = githubSetup?.verified === true || (
       registeredProject.github?.connected && !registeredProject.github?.unpushed
     );
@@ -1245,6 +1263,11 @@ async function saveProject(event) {
       setTimeout(() => refreshProjects().catch(() => {}), 500);
     } else if (generation === state.projectGeneration && $("#projectDialog").open) {
       errorNode.textContent = error.message;
+      const details = error.details || {};
+      if (!updateWebkit && details.code === "webkit_update_required") {
+        $("#projectUpdateVersions").textContent = `${details.installedVersion} to ${details.requiredVersion}`;
+        updatePrompt.hidden = false;
+      }
     }
   } finally {
     state.projectSaveInFlight = false;

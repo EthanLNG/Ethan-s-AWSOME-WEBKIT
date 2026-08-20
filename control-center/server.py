@@ -166,7 +166,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(result, 201)
             elif path == "/api/projects/existing":
                 project = self.server.app.projects.add_existing(
-                    body.get("path", ""), body.get("provider", "")
+                    body.get("path", ""), body.get("provider", ""),
+                    update_webkit=body.get("updateWebkit", False),
                 )
                 self._json({"project": project}, 201)
             elif path.startswith("/api/projects/") and path.endswith("/push"):

@@ -808,6 +808,40 @@ class RuntimeRegistryTests(unittest.TestCase):
         )
         release_color(lock_dir, "blue", port, "owner-a")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits required")
+    def test_owned_legacy_color_registry_is_migrated_to_private_modes(self):
+        lock_dir = self.root / "legacy-colors"
+        lock_dir.mkdir(mode=0o700)
+        lock = lock_dir / "blue.lock"
+        lock.mkdir(mode=0o700)
+        owner_path = lock / "owner"
+        owner_path.write_text("owner-a\n", encoding="utf-8")
+        lock_dir.chmod(0o1777)
+        lock.chmod(0o755)
+        owner_path.chmod(0o644)
+
+        validated = runtime_registry._validate_color_registry(
+            lock_dir, create=False
+        )
+
+        self.assertEqual(validated, lock_dir)
+        self.assertEqual(read_color_lock(lock)[0], "owner-a")
+        self.assertEqual(stat.S_IMODE(lock_dir.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(owner_path.stat().st_mode), 0o600)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits required")
+    def test_legacy_color_migration_never_follows_a_registry_symlink(self):
+        target = self.root / "legacy-color-target"
+        target.mkdir(mode=0o755)
+        link = self.root / "legacy-color-link"
+        link.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(RegistryError, "symbolic link"):
+            runtime_registry._validate_color_registry(link, create=False)
+
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
     def test_symlink_or_unexpected_registry_content_fails_closed(self):
         target = self.root / "target"
         target.mkdir(mode=0o700)

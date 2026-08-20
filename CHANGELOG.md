@@ -31,6 +31,8 @@
   decisions before safely integrating and retrying the push.
 - Styled the persistent issue action as a circular Control Center control and
   made issue agents start with high reasoning by default.
+- Safely migrate current-user-owned color registries and lock records from the
+  older shared permission model to private `0700` and `0600` modes.
 - Rejected risky reference uploads and high-confidence secrets before new-site
   commits or GitHub creation, with clearer privacy boundaries for references,
   browser dictation, voice notes, and the optional API proxy.

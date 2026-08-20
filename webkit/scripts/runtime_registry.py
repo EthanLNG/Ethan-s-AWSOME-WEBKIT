@@ -100,6 +100,55 @@ def _path_exists(path):
     return os.path.lexists(str(path))
 
 
+def _tighten_owned_posix_mode(path, expected, mode, label):
+    """Safely migrate one current-user-owned legacy path to a private mode."""
+    if os.name != "posix":
+        return expected
+    if expected.st_uid != os.getuid():
+        raise RegistryError("{} must be owned by the current user".format(label))
+    descriptor = None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    if stat.S_ISDIR(expected.st_mode):
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+        os.set_inheritable(descriptor, False)
+        opened = os.fstat(descriptor)
+        if (
+            (opened.st_dev, opened.st_ino)
+            != (expected.st_dev, expected.st_ino)
+            or stat.S_IFMT(opened.st_mode) != stat.S_IFMT(expected.st_mode)
+            or opened.st_uid != os.getuid()
+        ):
+            raise RegistryError("{} changed while it was secured".format(label))
+        os.fchmod(descriptor, mode)
+        secured = os.fstat(descriptor)
+        current = os.lstat(str(path))
+    except RegistryError:
+        raise
+    except OSError as exc:
+        raise RegistryError(
+            "{} could not be made private: {}".format(label, exc)
+        )
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if (
+        (secured.st_dev, secured.st_ino)
+        != (current.st_dev, current.st_ino)
+        or stat.S_IFMT(secured.st_mode) != stat.S_IFMT(expected.st_mode)
+        or secured.st_uid != os.getuid()
+        or stat.S_IMODE(secured.st_mode) != mode
+    ):
+        raise RegistryError("{} changed while it was secured".format(label))
+    return secured
+
+
 def _normalized_binding_path(path):
     path = os.path.abspath(str(path))
     if os.name == "nt":
@@ -1096,11 +1145,13 @@ def read_color_lock(lock):
         raise RegistryError("refusing symbolic-link lock target")
     if not stat.S_ISDIR(lock_stat.st_mode):
         raise RegistryError("refusing non-directory lock target")
-    if os.name == "posix" and (
-        lock_stat.st_uid != os.getuid()
-        or stat.S_IMODE(lock_stat.st_mode) & 0o077
-    ):
-        raise RegistryError("color lock must be private and user-owned")
+    if os.name == "posix":
+        if lock_stat.st_uid != os.getuid():
+            raise RegistryError("color lock must be private and user-owned")
+        if stat.S_IMODE(lock_stat.st_mode) & 0o077:
+            lock_stat = _tighten_owned_posix_mode(
+                lock, lock_stat, 0o700, "legacy color lock"
+            )
     try:
         names = sorted(os.listdir(str(lock)))
     except OSError as exc:
@@ -1118,13 +1169,15 @@ def read_color_lock(lock):
             raise RegistryError("color lock {} is unreadable: {}".format(name, exc))
         if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
             raise RegistryError("color lock {} must be a small regular file".format(name))
-        if os.name == "posix" and (
-            before.st_uid != os.getuid()
-            or stat.S_IMODE(before.st_mode) & 0o077
-        ):
-            raise RegistryError(
-                "color lock {} must be private and user-owned".format(name)
-            )
+        if os.name == "posix":
+            if before.st_uid != os.getuid():
+                raise RegistryError(
+                    "color lock {} must be private and user-owned".format(name)
+                )
+            if stat.S_IMODE(before.st_mode) & 0o077:
+                before = _tighten_owned_posix_mode(
+                    path, before, 0o600, "legacy color lock {}".format(name)
+                )
         flags = (
             os.O_RDONLY
             | getattr(os, "O_BINARY", 0)
@@ -1344,7 +1397,9 @@ def _validate_color_registry(lock_dir, create=False):
         if value.st_uid != os.getuid():
             raise RegistryError("color lock registry must be owned by the current user")
         if stat.S_IMODE(value.st_mode) & 0o077:
-            raise RegistryError("color lock registry must be private with mode 0700")
+            value = _tighten_owned_posix_mode(
+                lock_dir, value, 0o700, "legacy color lock registry"
+            )
     try:
         names = os.listdir(str(lock_dir))
     except OSError as exc:

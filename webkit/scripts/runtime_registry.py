@@ -977,7 +977,9 @@ def _reserve_port_locked(registry, port, owner, color_lock, color, grace_seconds
             if exc.errno == errno.EEXIST:
                 continue
             raise RegistryError("could not create port reservation: {}".format(exc))
-        token = secrets.token_urlsafe(32)
+        # Keep generated values safe when passed as a separate argparse value.
+        # token_urlsafe may begin with "-", which argparse treats as an option.
+        token = "wk_" + secrets.token_urlsafe(32)
         value = {
             "version": VERSION,
             "port": port,

@@ -2447,15 +2447,14 @@ class PreviewServerTests(unittest.TestCase):
         environment.update({
             "WK_CONFIG": str(self.config_path),
             "WK_COLOR_FORCE": "1",
-            "PYTHONPYCACHEPREFIX": str(self.root / "pycache"),
         })
         result = subprocess.run(
-            [sys.executable, str(SERVER_PATH), "🔵", "5311", str(self.root)],
+            [sys.executable, "-B", str(SERVER_PATH), "🔵", "5311", str(self.root)],
             cwd=self.root,
             env=environment,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=15,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(

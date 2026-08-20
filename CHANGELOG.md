@@ -18,6 +18,9 @@
   local target branch or worktree from its managed checkout. Dirty, diverged,
   in-progress, or concurrently changed targets stop safely while managed and
   session work remain available for recovery.
+- Let existing repositories open in an isolated managed checkout even when the
+  local target has tracked or untracked changes. The source stays untouched and
+  integration waits until its checkout is clean.
 - Rejected risky reference uploads and high-confidence secrets before new-site
   commits or GitHub creation, with clearer privacy boundaries for references,
   browser dictation, voice notes, and the optional API proxy.

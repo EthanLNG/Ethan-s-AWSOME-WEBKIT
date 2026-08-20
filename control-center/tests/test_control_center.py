@@ -1675,7 +1675,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertFalse((repo / "webkit").exists())
         self.assertFalse((repo / ".gitignore").exists())
 
-    def test_add_existing_rejects_dirty_tracked_repository_without_changes(self):
+    def test_add_existing_isolates_dirty_tracked_repository_without_changes(self):
         repo = self.root / "dirty-tracked"
         repo.mkdir()
         index = repo / "index.html"
@@ -1697,8 +1697,10 @@ class ControlCenterTests(unittest.TestCase):
             text=True, capture_output=True, check=True,
         ).stdout
 
-        with self.assertRaisesRegex(ControlCenterError, "Commit.*stash"):
-            self.app.projects.add_existing(str(repo), "codex")
+        with mock.patch.object(
+            self.app.projects, "_find_port_block", return_value=6430
+        ):
+            project = self.app.projects.add_existing(str(repo), "codex")
 
         after_status = subprocess.run(
             ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -1713,8 +1715,29 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(index.read_text(encoding="utf-8"), "<title>Uncommitted</title>\n")
         self.assertFalse((repo / "webkit").exists())
         self.assertFalse((repo / "AGENTS.md").exists())
+        managed_path = Path(project["path"])
+        self.assertNotEqual(managed_path, repo)
+        self.assertTrue(project["managedCheckout"])
+        self.assertTrue(project["sourceIntegrationPending"])
+        self.assertTrue((managed_path / "webkit" / "webkit.config.json").is_file())
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=managed_path, text=True, capture_output=True, check=True,
+            ).stdout,
+            "",
+        )
 
-    def test_add_existing_rejects_untracked_repository_file_without_changes(self):
+        subprocess.run(["git", "restore", "index.html"], cwd=repo, check=True)
+        integrated = self.app.projects.integrate_managed_target(project)
+        self.assertTrue(integrated["integrated"])
+        self.assertFalse(integrated["pending"])
+        self.assertFalse(
+            self.app.projects.get_project(project["id"])["sourceIntegrationPending"]
+        )
+        self.assertTrue((repo / "webkit" / "webkit.config.json").is_file())
+
+    def test_add_existing_isolates_untracked_repository_file_without_changes(self):
         repo = self.root / "dirty-untracked"
         repo.mkdir()
         (repo / "index.html").write_text("<title>Committed</title>\n", encoding="utf-8")
@@ -1732,8 +1755,10 @@ class ControlCenterTests(unittest.TestCase):
             cwd=repo, text=True, capture_output=True, check=True,
         ).stdout
 
-        with self.assertRaisesRegex(ControlCenterError, "Commit.*stash"):
-            self.app.projects.add_existing(str(repo), "codex")
+        with mock.patch.object(
+            self.app.projects, "_find_port_block", return_value=6431
+        ):
+            project = self.app.projects.add_existing(str(repo), "codex")
 
         after_status = subprocess.run(
             ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -1743,6 +1768,18 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(notes.read_bytes(), b"untracked user data\n")
         self.assertFalse((repo / "webkit").exists())
         self.assertFalse((repo / "AGENTS.md").exists())
+        managed_path = Path(project["path"])
+        self.assertNotEqual(managed_path, repo)
+        self.assertTrue(project["managedCheckout"])
+        self.assertTrue(project["sourceIntegrationPending"])
+        self.assertTrue((managed_path / "webkit" / "webkit.config.json").is_file())
+        self.assertEqual(
+            subprocess.run(
+                ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                cwd=managed_path, text=True, capture_output=True, check=True,
+            ).stdout,
+            "",
+        )
 
     def test_add_existing_non_git_no_entry_failure_is_read_only(self):
         project_path = self.root / "not-a-website"
@@ -4716,6 +4753,8 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("window.sessionStorage", script)
         self.assertNotIn("document.cookie", script)
         self.assertIn("busy-preserved-content", script)
+        self.assertIn("Project added in an isolated checkout", script)
+        self.assertIn("Local checkout sync pending", script)
         self.assertNotIn("button.textContent = label", script)
         self.assertNotIn(".project-rail { display: none; }", styles)
         self.assertIn("@media (prefers-reduced-motion: reduce)", styles)

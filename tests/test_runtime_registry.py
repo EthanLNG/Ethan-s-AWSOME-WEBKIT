@@ -125,6 +125,29 @@ class RuntimeRegistryTests(unittest.TestCase):
             )
         )
 
+    def test_generated_reservation_tokens_are_cli_option_safe(self):
+        port = self.free_port()
+        color_lock = self.root / "colors" / "blue.lock"
+        with mock.patch.object(
+            runtime_registry.secrets,
+            "token_urlsafe",
+            return_value="-" + ("a" * 42),
+        ):
+            reservation = runtime_registry.reserve_port(
+                port, "owner", str(color_lock.absolute()), "blue", 180
+            )
+        try:
+            self.assertTrue(reservation["token"].startswith("wk_"))
+            self.assertFalse(reservation["token"].startswith("-"))
+        finally:
+            runtime_registry.release_port(
+                port,
+                "owner",
+                str(color_lock.absolute()),
+                "blue",
+                reservation["token"],
+            )
+
     def test_atomic_port_claim_rolls_back_losing_project_color(self):
         port = self.free_port()
         barrier = threading.Barrier(2)

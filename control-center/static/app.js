@@ -447,7 +447,9 @@ function renderProjectView() {
   if (!project) return;
   $("#projectName").textContent = project.name;
   $("#projectPath").textContent = project.path;
-  $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project`;
+  $("#projectProvider").textContent = `${project.provider === "codex" ? "Codex" : "Claude Code"} project${
+    project.sourceIntegrationPending ? " · Local checkout sync pending" : ""
+  }`;
   const chatSession = currentSession();
   $("#mergeButton").textContent = `Merge to ${
     chatSession ? targetBranchForSession(chatSession) : targetBranch(project)
@@ -456,9 +458,12 @@ function renderProjectView() {
   const pushButton = $("#pushGithubButton");
   pushButton.hidden = !(github.connected && github.unpushed);
   const commits = Number(github.ahead) || 0;
-  $("#pushGithubLabel").textContent = commits === 1
+  const pushLabel = commits === 1
     ? "Push 1 commit to GitHub"
     : `Push ${commits} commits to GitHub`;
+  $("#pushGithubLabel").textContent = project.sourceIntegrationPending
+    ? `Sync local checkout and ${pushLabel.toLowerCase()}`
+    : pushLabel;
   const onboarding = project.onboarding || {};
   const seedButton = $("#seedOnboardingButton");
   seedButton.hidden = !onboarding.status || onboarding.status === "complete";
@@ -1199,9 +1204,12 @@ async function saveProject(event) {
     const result = await api(path, { method: "POST", body });
     createdResult = result;
     const project = result.project;
+    const isolatedNotice = !isCreate && project.sourceIntegrationPending
+      ? "Project added in an isolated checkout. Your local changes were left untouched. Commit or stash them before merging or pushing back."
+      : "";
     await refreshProjects();
     if (generation !== state.projectGeneration || !$("#projectDialog").open) {
-      toast(`${project.name || "Project"} was added.`);
+      toast(isolatedNotice || `${project.name || "Project"} was added.`);
       return;
     }
     $("#projectDialog").close();
@@ -1220,6 +1228,10 @@ async function saveProject(event) {
       return;
     }
     const registeredProject = state.projects.find((item) => item.id === project.id) || project;
+    if (isolatedNotice) {
+      toast(isolatedNotice);
+      return;
+    }
     const verifiedCurrent = githubSetup?.verified === true || (
       registeredProject.github?.connected && !registeredProject.github?.unpushed
     );

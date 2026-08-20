@@ -3833,8 +3833,6 @@ class ProjectManager:
                 "This Git repository has no commits. Commit its current files first, then add it again.",
                 409,
             )
-        self._require_clean_git_worktree(git_root)
-        self._validate_existing_kit_version(selected_path)
         existing = self._registered_source(git_root)
         if existing:
             def update_provider(state):
@@ -3854,6 +3852,7 @@ class ProjectManager:
             (
                 project_path, base_branch, target_branch, checkout_ownership,
             ) = self._create_controller_checkout(git_root, project_id)
+            self._validate_existing_kit_version(project_path)
             self._ensure_git_identity(project_path)
             had_config = (project_path / "webkit" / "webkit.config.json").is_file()
             changed = self._install_kit(project_path, provider)
@@ -3881,13 +3880,13 @@ class ProjectManager:
                 "refs/heads/{}".format(base_branch),
                 "The installed managed branch",
             )
-            self.integrate_managed_target({
+            integration = self.integrate_managed_target({
                 "path": str(project_path),
                 "sourcePath": str(git_root),
                 "baseBranch": base_branch,
                 "targetBranch": target_branch,
                 "managedCheckout": True,
-            }, validated_sha=installed_sha)
+            }, validated_sha=installed_sha, defer_if_target_busy=True)
             registered = self._register(
                 project_path,
                 git_root.name,
@@ -3897,6 +3896,7 @@ class ProjectManager:
                 target_branch=target_branch,
                 managed=True,
                 project_id=project_id,
+                source_integration_pending=integration.get("pending", False),
             )
             return registered
         except Exception as primary_error:
@@ -3922,6 +3922,7 @@ class ProjectManager:
     def _register(
         self, project_path, name, provider, source_path=None, base_branch="main",
         target_branch="main", managed=False, project_id=None,
+        source_integration_pending=False,
     ):
         project_path = str(Path(project_path).resolve())
         source_path = str(Path(source_path or project_path).resolve())
@@ -3941,6 +3942,7 @@ class ProjectManager:
                 "baseBranch": base_branch,
                 "targetBranch": target_branch,
                 "managedCheckout": bool(managed),
+                "sourceIntegrationPending": bool(source_integration_pending),
                 "provider": provider,
                 "createdAt": utc_now(),
             }
@@ -4018,7 +4020,22 @@ class ProjectManager:
                 return Path(values["worktree"]).resolve()
         return None
 
-    def integrate_managed_target(self, project, validated_sha=None):
+    def _set_source_integration_pending(self, project, pending):
+        project_id = project.get("id")
+        if not project_id:
+            return
+
+        def mutate(state):
+            for registered in state.get("projects", []):
+                if registered.get("id") == project_id:
+                    registered["sourceIntegrationPending"] = bool(pending)
+                    break
+
+        self.store.update(mutate)
+
+    def integrate_managed_target(
+        self, project, validated_sha=None, defer_if_target_busy=False
+    ):
         """Fast-forward the real local target for a managed existing project."""
         if not project.get("managedCheckout"):
             return {"integrated": False, "managed": False}
@@ -4070,7 +4087,11 @@ class ProjectManager:
                     "The local target branch did not retain the validated commit.",
                     409,
                 )
-            return {"integrated": True, "target": target_branch, "sha": base_sha}
+            self._set_source_integration_pending(project, False)
+            return {
+                "integrated": True, "pending": False,
+                "target": target_branch, "sha": base_sha,
+            }
         ancestor = run_command(
             ["git", "merge-base", "--is-ancestor", target_sha, base_sha],
             cwd=managed_path, check=False,
@@ -4083,7 +4104,11 @@ class ProjectManager:
                 409,
             )
         if target_sha == base_sha:
-            return {"integrated": False, "target": target_branch, "sha": base_sha}
+            self._set_source_integration_pending(project, False)
+            return {
+                "integrated": False, "pending": False,
+                "target": target_branch, "sha": base_sha,
+            }
         if target_worktree is None:
             advanced = run_command(
                 ["git", "update-ref", target_ref, base_sha, target_sha],
@@ -4103,6 +4128,13 @@ class ProjectManager:
                 )
         else:
             if self._git_operation_in_progress(target_worktree):
+                if defer_if_target_busy:
+                    self._set_source_integration_pending(project, True)
+                    return {
+                        "integrated": False, "pending": True,
+                        "reason": "operation", "target": target_branch,
+                        "sha": base_sha,
+                    }
                 raise ControlCenterError(
                     "The local target worktree already has a Git operation in progress.",
                     409,
@@ -4114,7 +4146,19 @@ class ProjectManager:
                 ],
                 cwd=target_worktree, check=False,
             )
-            if status.returncode != 0 or status.stdout:
+            if status.returncode != 0:
+                raise ControlCenterError(
+                    "The local target worktree could not be inspected before integration.",
+                    409,
+                )
+            if status.stdout:
+                if defer_if_target_busy:
+                    self._set_source_integration_pending(project, True)
+                    return {
+                        "integrated": False, "pending": True,
+                        "reason": "dirty", "target": target_branch,
+                        "sha": base_sha,
+                    }
                 raise ControlCenterError(
                     "Commit or stash changes in the local target worktree before integration.",
                     409,
@@ -4174,7 +4218,11 @@ class ProjectManager:
                 "The managed Control Center branch changed during target integration.",
                 409,
             )
-        return {"integrated": True, "target": target_branch, "sha": base_sha}
+        self._set_source_integration_pending(project, False)
+        return {
+            "integrated": True, "pending": False,
+            "target": target_branch, "sha": base_sha,
+        }
 
     @classmethod
     def _default_branch_ref(cls, path):
@@ -5100,6 +5148,7 @@ class ProjectManager:
 
     def push_project(self, project_id):
         project = self.get_project(project_id)
+        self.integrate_managed_target(project)
         before = self.github_sync_status(project)
         if not before["connected"]:
             raise ControlCenterError(
@@ -5130,21 +5179,6 @@ class ProjectManager:
         if result.returncode != 0 or parsed is None or parsed < MINIMUM_GIT_VERSION:
             raise ControlCenterError(
                 "Git 2.30 or newer is required. Update Git and try again.", 409
-            )
-
-    @staticmethod
-    def _require_clean_git_worktree(path):
-        status = run_command(
-            [
-                "git", "--no-optional-locks", "status", "--porcelain=v1",
-                "--untracked-files=all", "--ignore-submodules=none",
-            ],
-            cwd=path,
-        )
-        if status.stdout:
-            raise ControlCenterError(
-                "Commit the repository changes or run git stash push --include-untracked before adding this project.",
-                409,
             )
 
     @staticmethod

@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.2")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.3")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -3567,6 +3567,7 @@ class ControlCenterTests(unittest.TestCase):
         marker.write_text('{"status":"ready","message":"ready"}', encoding="utf-8")
         with mock.patch.object(self.app.sessions, "_release"):
             self.app.sessions._complete_agent_merge("merge-session")
+        runtime.close_preview_tab.assert_called_once_with()
         self.assertEqual((project_path / "index.html").read_text(), "<title>Merged</title>\n")
         self.assertFalse(worktree.exists())
         branches = subprocess.run(
@@ -3575,6 +3576,50 @@ class ControlCenterTests(unittest.TestCase):
         ).stdout.strip()
         self.assertEqual(branches, "")
         self.assertEqual(self.app.sessions._get_session("merge-session")["status"], "merged")
+
+    def test_terminal_preview_cleanup_uses_the_owned_url_and_project_config(self):
+        parent = self.root / "preview-close-projects"
+        parent.mkdir()
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6346):
+            project = self.app.projects.create_project("Close Preview", str(parent), "codex")
+        worktree = Path(project["path"])
+        session = {
+            "id": "close-preview-session",
+            "projectId": project["id"],
+            "projectName": project["name"],
+            "provider": "codex",
+            "color": "blue",
+            "emoji": "🔵",
+            "port": 6346,
+            "branch": "webkit/blue/close-preview",
+            "worktree": str(worktree),
+            "previewUrl": "http://127.0.0.1:6346/index.html",
+            "feedbackDir": ".webkit/feedback",
+            "status": "active",
+        }
+        runtime = SessionRuntime(self.app.sessions, session)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch("control_center.platform.system", return_value="Darwin"), mock.patch(
+            "control_center.shutil.which", return_value="/usr/bin/osascript"
+        ), mock.patch("control_center.subprocess.run", return_value=completed) as run:
+            self.assertTrue(runtime.close_preview_tab())
+
+        command = run.call_args[0][0]
+        options = run.call_args[1]
+        self.assertEqual(
+            command,
+            [
+                str(KIT_ROOT / "webkit" / "scripts" / "open-preview.sh"),
+                "--close",
+                "http://127.0.0.1:6346/index.html",
+            ],
+        )
+        self.assertEqual(options["cwd"], str(worktree))
+        self.assertEqual(
+            options["env"]["WK_CONFIG"],
+            str(worktree / "webkit" / "webkit.config.json"),
+        )
 
     def test_codex_jsonl_captures_thread_and_message(self):
         session = {
@@ -3775,7 +3820,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.2",
+            "requiredVersion": "0.8.3",
         })
 
         status = subprocess.run(
@@ -3822,9 +3867,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.2")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.3")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.2")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.3")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3832,7 +3877,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.2")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.3")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -3890,7 +3935,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.2"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.3"
         )
         self.assertEqual(
             subprocess.run(

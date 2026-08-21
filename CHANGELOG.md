@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.8.3 (2026-08-21): Automatic preview cleanup
+
+- Closed the Webkit-owned preview tab automatically after a successful merge,
+  seed finalization, or discard on supported macOS Chromium browsers.
+- Added an explicit close mode to the external preview launcher while keeping
+  manual cleanup instructions visible on platforms without tab automation.
+
+**Migration:** restart the Control Center and update existing projects when
+prompted. No configuration changes are required.
+
 ## v0.8.2 (2026-08-21): Reliable agent completion
 
 - Routed background-agent round transitions through an atomic request file so

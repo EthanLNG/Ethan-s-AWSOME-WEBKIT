@@ -513,6 +513,16 @@ class ShellScriptTests(unittest.TestCase):
             "Open in your browser: http://localhost:6123/path?view=review#point",
         )
 
+    def test_print_close_preview_requests_manual_cleanup(self):
+        close_result = self.run_script(
+            OPEN_PREVIEW, "--close", "LOCALHOST:6123/path?view=review#point"
+        )
+        self.assertEqual(close_result.returncode, 0, close_result.stderr)
+        self.assertEqual(
+            close_result.stdout.strip(),
+            "Close preview in your browser: http://localhost:6123/path?view=review#point",
+        )
+
     def test_print_preview_removes_default_http_and_https_ports(self):
         cases = (
             ("HTTP://LOCALHOST:80/path", "http://localhost/path"),
@@ -569,6 +579,39 @@ class ShellScriptTests(unittest.TestCase):
         self.assertIn("tabURL is matchOrigin", captured)
         self.assertNotIn("contains matchKey", captured)
         self.assertIn('tell application "Brave \\"Beta\\" \\\\ Browser"', captured)
+
+    def test_applescript_close_preview_closes_without_reopening(self):
+        self.config["browser"]["mode"] = "applescript"
+        self.write_config()
+        tools_dir = self.base / "close-tools"
+        tools_dir.mkdir()
+        capture = self.base / "close-osascript-capture.txt"
+        fake_osascript = tools_dir / "osascript"
+        fake_osascript.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$@\" > \"$WK_TEST_CAPTURE\"\n"
+            "printf '%s\\n' '__SCRIPT__' >> \"$WK_TEST_CAPTURE\"\n"
+            "/bin/cat >> \"$WK_TEST_CAPTURE\"\n",
+            encoding="utf-8",
+        )
+        fake_osascript.chmod(0o755)
+        env = {
+            "PATH": str(tools_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "WK_TEST_CAPTURE": str(capture),
+        }
+
+        result = self.run_script(
+            OPEN_PREVIEW, "--close", "HTTP://LOCALHOST:5311/review", env=env
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        captured = capture.read_text(encoding="utf-8")
+        self.assertTrue(
+            captured.startswith(
+                "-\nhttp://localhost:5311/review\nhttp://localhost:5311\nclose\n"
+            )
+        )
+        self.assertIn('if requestedAction is not "close" then', captured)
 
     def test_applescript_preview_rejects_control_characters_in_app_name(self):
         self.config["browser"] = {

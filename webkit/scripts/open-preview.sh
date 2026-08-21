@@ -21,15 +21,25 @@
 #                   unconditionally after every change.
 #   "auto"        - applescript on macOS with osascript available, else print.
 #
-# Usage: webkit/scripts/open-preview.sh <url>
+# Usage: webkit/scripts/open-preview.sh [--close] <url>
 #   e.g. webkit/scripts/open-preview.sh "http://localhost:5311/index.html?jump=hero"
+#   e.g. webkit/scripts/open-preview.sh --close "http://localhost:5311/"
 #
 # Env overrides:
 #   WK_CONFIG   alternate config file (resolved by config-get.sh)
 
 set -euo pipefail
 
-url="${1:?usage: open-preview.sh <url>}"
+action=open
+if [ "${1:-}" = "--close" ]; then
+  action=close
+  shift
+fi
+if [ "$#" -ne 1 ]; then
+  printf '%s\n' "usage: open-preview.sh [--close] <url>" >&2
+  exit 64
+fi
+url="$1"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -86,7 +96,11 @@ case "$mode" in
 esac
 
 if [ "$mode" = "print" ]; then
-  echo "Open in your browser: $url"
+  if [ "$action" = "close" ]; then
+    echo "Close preview in your browser: $url"
+  else
+    echo "Open in your browser: $url"
+  fi
   exit 0
 fi
 
@@ -103,10 +117,11 @@ if not name or any(unicodedata.category(ch) == "Cc" or ch in "\u2028\u2029" for 
 print(name.replace("\\", "\\\\").replace("\"", "\\\""))
 ' "$app_name")"
 
-osascript - "$url" "$match_origin" <<APPLESCRIPT
+osascript - "$url" "$match_origin" "$action" <<APPLESCRIPT
 on run argv
   set theURL to item 1 of argv
   set matchOrigin to item 2 of argv
+  set requestedAction to item 3 of argv
   tell application "$app_esc"
     -- Close any existing tab pointing at the same origin (back-to-front,
     -- across all windows, so indices stay valid as tabs close).
@@ -123,14 +138,16 @@ on run argv
         end repeat
       end repeat
     end try
-    -- Open a fresh tab (new window if none) and bring the browser forward.
-    if (count of windows) is 0 then
-      make new window
-      set URL of active tab of front window to theURL
-    else
-      tell front window to make new tab with properties {URL:theURL}
+    if requestedAction is not "close" then
+      -- Open a fresh tab (new window if none) and bring the browser forward.
+      if (count of windows) is 0 then
+        make new window
+        set URL of active tab of front window to theURL
+      else
+        tell front window to make new tab with properties {URL:theURL}
+      end if
+      activate
     end if
-    activate
   end tell
 end run
 APPLESCRIPT

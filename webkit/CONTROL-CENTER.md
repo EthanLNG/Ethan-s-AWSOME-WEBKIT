@@ -13,7 +13,9 @@ The Control Center already owns:
 - watching `feedback.json` and `verdicts.json`;
 - invoking or resuming this CLI conversation when work arrives;
 - integrating the branch into the managed checkout or discarding it when the user clicks the
-  corresponding button.
+  corresponding button;
+- closing the owned preview tab after a successful merge, seed finalization,
+  or discard when the configured desktop browser supports tab automation.
 
 The Control Center UI itself binds only to `127.0.0.1`. Preview LAN mode, when
 explicitly configured, follows the `bind_host` and `allowed_hosts` contract in

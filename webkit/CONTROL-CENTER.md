@@ -40,6 +40,10 @@ When the controller invokes you because browser feedback changed, read
 - `verdicts.json`: process the verdicts and the round transition through LOOP
   step 9, including any `redoVoiceNote`, then **exit**. If a redo produces
   another review, publish it and exit.
+- In this mode, `transition-round.py` publishes an atomic transition request
+  for the trusted controller. The controller owns the localhost call to the
+  preview server. When the helper reports `queued: true`, exit normally. Do
+  not retry the localhost endpoint yourself or move protocol files by hand.
 - Do **not** run `wait-for-file.sh`. The controller watches and will resume you
   for the next state transition.
 - Do **not** claim/release a color or port, start/stop a preview server, create/remove a

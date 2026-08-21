@@ -9,6 +9,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -18,6 +19,8 @@ _BATCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _MAX_RESPONSE = 2 * 1024 * 1024
 _MAX_NEXT_REVIEW = 2 * 1024 * 1024
 _MAX_CONFIG = 1024 * 1024
+_MAX_TRANSITION_REQUEST = 2 * 1024 * 1024
+_TRANSITION_REQUEST_NAME = "transition-request.json"
 
 
 def fail(message):
@@ -282,6 +285,56 @@ def load_review(path):
     return value
 
 
+def queue_control_center_transition(inbox, body):
+    """Publish a transition request for the trusted Control Center watcher."""
+    inbox = Path(inbox)
+    try:
+        details = os.lstat(str(inbox))
+    except OSError as exc:
+        raise ValueError("feedback inbox is unavailable: {}".format(exc))
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+        raise ValueError("feedback inbox must be a real directory")
+    encoded = (json.dumps(body, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(encoded) > _MAX_TRANSITION_REQUEST:
+        raise ValueError("transition request exceeds 2 MB")
+    descriptor = None
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(
+            dir=str(inbox), prefix=".transition-request.", suffix=".tmp"
+        )
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, str(inbox / _TRANSITION_REQUEST_NAME))
+        temporary = None
+        directory_descriptor = None
+        try:
+            directory_descriptor = os.open(
+                str(inbox), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            os.fsync(directory_descriptor)
+        except OSError:
+            pass
+        finally:
+            if directory_descriptor is not None:
+                os.close(directory_descriptor)
+    except OSError as exc:
+        raise ValueError("transition request could not be queued: {}".format(exc))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
 def request_transition(port, token, encoded):
     connection = None
     try:
@@ -346,7 +399,6 @@ def main(argv=None):
         entry = palette_entry(config, args.slug)
         root = git_root()
         inbox = feedback_inbox(config, root, args.slug)
-        token = read_private_token(inbox / "transition-token")
         next_review = load_review(args.next_review) if args.next_review else None
     except ValueError as exc:
         return fail(str(exc))
@@ -359,6 +411,24 @@ def main(argv=None):
     }
     if next_review is not None:
         body["nextReview"] = next_review
+    if os.environ.get("WK_CONTROL_CENTER") == "1":
+        try:
+            queue_control_center_transition(inbox, body)
+        except ValueError as exc:
+            return fail(str(exc))
+        print(json.dumps({
+            "ok": True,
+            "queued": True,
+            "mode": args.mode,
+            "batchId": args.batch_id,
+            "round": args.round,
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    try:
+        token = read_private_token(inbox / "transition-token")
+    except ValueError as exc:
+        return fail(str(exc))
     encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
     try:
         status, result = request_transition(entry["port"], token, encoded)

@@ -429,6 +429,12 @@ is durable, the server removes only recordings no longer referenced by live
 protocol files. An idempotent transition retry also retries interrupted
 recording cleanup.
 
+When `WK_CONTROL_CENTER=1`, the same helper atomically queues the validated
+request instead. The trusted Control Center forwards it to the preview server
+after the background agent exits. A `queued: true` result is success for that
+finite agent invocation. The controller continues to own the archive call and
+reports any server rejection in the session.
+
 Prepare a continuing review as a separate JSON file, not as live
 `review.json`. It must use the same `batchId` and original `beforeRef`, with
 `round` set to the current round + 1.

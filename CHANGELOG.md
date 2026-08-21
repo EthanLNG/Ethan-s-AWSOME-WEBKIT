@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.8.2 (2026-08-21): Reliable agent completion
+
+- Routed background-agent round transitions through an atomic request file so
+  the trusted Control Center performs the localhost preview call. Sandboxed
+  agents can now finish feedback, redo, and completion transitions without
+  broad network access or a permanently stuck processing overlay.
+- Preserved rejected transition requests for diagnosis, bounded and validated
+  request and response data, retained private transition capabilities, and
+  kept preview-server archive validation and idempotent receipts authoritative.
+
+**Migration:** finish or discard active Control Center sessions, update the
+vendored Webkit through the Control Center when prompted, and restart the
+Control Center. No configuration changes are required.
+
 ## v0.8.1 (2026-08-19): Publish hardening
 
 - Protected preview mutations with per-session credentials, strict JSON media

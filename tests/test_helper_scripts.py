@@ -1,5 +1,6 @@
 import http.client
 import importlib.util
+import json
 import os
 import stat
 import subprocess
@@ -29,6 +30,82 @@ TRANSCRIBE = load_script(
 
 
 class TransitionRoundTests(unittest.TestCase):
+    def test_control_center_mode_queues_transition_without_local_network_or_token(self):
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "repo"
+            repo.mkdir()
+            subprocess.run(
+                ["git", "init", "-b", "main"], cwd=repo,
+                check=True, capture_output=True,
+            )
+            inbox = repo / ".webkit" / "feedback" / "blue"
+            inbox.mkdir(parents=True)
+            config = repo / "webkit.config.json"
+            config.write_text(json.dumps({
+                "feedback_dir": ".webkit/feedback",
+                "palette": [{"slug": "blue", "port": 5311}],
+            }), encoding="utf-8")
+            next_review = repo / "next-review.json"
+            next_review.write_text(json.dumps({
+                "version": 1,
+                "kind": "review",
+                "batchId": "batch-1",
+                "round": 2,
+                "beforeRef": "a" * 40,
+                "points": [],
+            }), encoding="utf-8")
+            with mock.patch.dict(os.environ, {
+                "WK_CONTROL_CENTER": "1",
+                "WK_CONFIG": str(config),
+            }, clear=False), mock.patch.object(
+                TRANSITION.os, "getcwd", return_value=str(repo)
+            ), mock.patch.object(
+                TRANSITION, "request_transition"
+            ) as request, mock.patch("builtins.print"):
+                code = TRANSITION.main([
+                    "blue", "redo", "batch-1", "1",
+                    "--next-review", str(next_review),
+                ])
+
+            self.assertEqual(code, 0)
+            request.assert_not_called()
+            queued = json.loads(
+                (inbox / "transition-request.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(queued["mode"], "redo")
+            self.assertEqual(queued["nextReview"]["round"], 2)
+            self.assertFalse((inbox / "transition-token").exists())
+            if os.name == "posix":
+                self.assertEqual(
+                    stat.S_IMODE((inbox / "transition-request.json").stat().st_mode),
+                    0o600,
+                )
+
+    def test_control_center_queue_replaces_a_symlink_without_touching_its_target(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inbox = Path(raw) / "feedback"
+            inbox.mkdir()
+            sentinel = Path(raw) / "sentinel.json"
+            sentinel.write_text('{"safe": true}\n', encoding="utf-8")
+            request = inbox / "transition-request.json"
+            try:
+                request.symlink_to(sentinel)
+            except (OSError, NotImplementedError) as error:
+                self.skipTest("symbolic links unavailable: {}".format(error))
+
+            TRANSITION.queue_control_center_transition(inbox, {
+                "version": 1,
+                "mode": "complete",
+                "batchId": "batch-1",
+                "round": 1,
+            })
+
+            self.assertEqual(
+                sentinel.read_text(encoding="utf-8"), '{"safe": true}\n'
+            )
+            self.assertFalse(request.is_symlink())
+            self.assertEqual(json.loads(request.read_text(encoding="utf-8"))["mode"], "complete")
+
     def test_config_requires_a_bounded_stable_regular_file(self):
         with tempfile.TemporaryDirectory() as raw:
             base = Path(raw)

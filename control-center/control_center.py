@@ -103,6 +103,8 @@ MODIFIER_HOTKEYS = {
 COLOR_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 GIT_REMOTE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PROVIDER_THREAD_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+TRANSITION_BATCH_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+TRANSITION_TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 BIDI_CONTROL_CLASSES = {"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
 MAX_PROVIDER_PROMPT_BYTES = 16 * 1024
 MAX_PROVIDER_STREAM_LINE_CHARS = 64 * 1024
@@ -119,6 +121,8 @@ EVENT_CURSOR = re.compile(r"^([0-9a-f]{32}):(\d+)$")
 MAX_AGENT_RESULT_BYTES = 16 * 1024
 MAX_SEED_MANIFEST_BYTES = 256 * 1024
 MAX_WEBKIT_CONFIG_BYTES = 256 * 1024
+MAX_TRANSITION_REQUEST_BYTES = 2 * 1024 * 1024
+MAX_TRANSITION_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_OUTGOING_CONFIG_CHANGES = 512
 MAX_OUTGOING_CONFIG_TOTAL_BYTES = 16 * 1024 * 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
@@ -7193,10 +7197,219 @@ class SessionRuntime:
             if self.session.get("status") != "active":
                 continue
             try:
+                if self._forward_transition_request(inbox):
+                    continue
                 key = self._feedback_phase_key(inbox)
+            except ControlCenterError as exc:
+                self.log.append("system", str(exc), "error")
+                self.manager._set_session_status(self.session["id"], "error", str(exc))
+                continue
             except OSError:
                 continue
             self._observe_feedback_phase(inbox, key)
+
+    @staticmethod
+    def _validated_transition_request(path):
+        try:
+            value = strict_json_loads(
+                read_stable_regular_text(
+                    path, MAX_TRANSITION_REQUEST_BYTES, "Webkit transition request"
+                )
+            )
+        except (ValueError, RecursionError) as exc:
+            raise ControlCenterError(
+                "The Webkit transition request is invalid JSON: {}".format(exc), 409
+            )
+        if not isinstance(value, dict) or set(value) - {
+            "version", "mode", "batchId", "round", "nextReview",
+        }:
+            raise ControlCenterError(
+                "The Webkit transition request has an invalid shape.", 409
+            )
+        mode = value.get("mode")
+        batch_id = value.get("batchId")
+        round_number = value.get("round")
+        next_review = value.get("nextReview")
+        if value.get("version") != 1 or mode not in (
+            "feedback-update", "redo", "complete"
+        ):
+            raise ControlCenterError(
+                "The Webkit transition request has an invalid mode or version.", 409
+            )
+        if not isinstance(batch_id, str) or TRANSITION_BATCH_ID.fullmatch(batch_id) is None:
+            raise ControlCenterError(
+                "The Webkit transition request has an invalid batch id.", 409
+            )
+        if (
+            not isinstance(round_number, int)
+            or isinstance(round_number, bool)
+            or round_number < 1
+        ):
+            raise ControlCenterError(
+                "The Webkit transition request has an invalid round.", 409
+            )
+        if mode == "redo" and not isinstance(next_review, dict):
+            raise ControlCenterError(
+                "A redo transition request requires a next review.", 409
+            )
+        if mode == "complete" and "nextReview" in value:
+            raise ControlCenterError(
+                "A complete transition request cannot include a next review.", 409
+            )
+        if mode == "feedback-update" and next_review is not None and not isinstance(
+            next_review, dict
+        ):
+            raise ControlCenterError(
+                "A feedback update transition has an invalid next review.", 409
+            )
+        encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_TRANSITION_REQUEST_BYTES:
+            raise ControlCenterError(
+                "The Webkit transition request is larger than 2 MB.", 413
+            )
+        return value, encoded
+
+    @staticmethod
+    def _transition_token(inbox):
+        path = Path(inbox) / "transition-token"
+        try:
+            before = os.lstat(str(path))
+        except OSError as exc:
+            raise ControlCenterError(
+                "The Webkit transition token is unavailable: {}".format(exc), 409
+            )
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+            raise ControlCenterError(
+                "The Webkit transition token must be a regular file.", 409
+            )
+        if os.name == "posix" and stat.S_IMODE(before.st_mode) & 0o077:
+            raise ControlCenterError(
+                "The Webkit transition token permissions are not private.", 409
+            )
+        token = read_stable_regular_text(path, 256, "Webkit transition token").strip()
+        try:
+            after = os.lstat(str(path))
+        except OSError as exc:
+            raise ControlCenterError(
+                "The Webkit transition token changed while it was read: {}".format(exc),
+                409,
+            )
+        if _stat_stable_signature(before) != _stat_stable_signature(after):
+            raise ControlCenterError(
+                "The Webkit transition token changed while it was read.", 409
+            )
+        if TRANSITION_TOKEN.fullmatch(token) is None:
+            raise ControlCenterError("The Webkit transition token is malformed.", 409)
+        return token
+
+    @staticmethod
+    def _preserve_failed_transition(processing):
+        processing = Path(processing)
+        if not processing.exists() and not processing.is_symlink():
+            return
+        failed = processing.parent / "transition-request-error.json"
+        try:
+            os.replace(str(processing), str(failed))
+        except OSError:
+            pass
+
+    def _forward_transition_request(self, inbox):
+        inbox = Path(inbox)
+        request = inbox / "transition-request.json"
+        processing = inbox / ".transition-request.processing"
+        if not processing.exists() and not processing.is_symlink():
+            try:
+                details = os.lstat(str(request))
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise ControlCenterError(
+                    "The Webkit transition request is unavailable: {}".format(exc), 409
+                )
+            if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+                raise ControlCenterError(
+                    "The Webkit transition request must be a regular file.", 409
+                )
+            try:
+                os.replace(str(request), str(processing))
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise ControlCenterError(
+                    "The Webkit transition request could not be claimed: {}".format(exc),
+                    409,
+                )
+
+        connection = None
+        try:
+            value, encoded = self._validated_transition_request(processing)
+            token = self._transition_token(inbox)
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", int(self.session["port"]), timeout=10
+            )
+            connection.request(
+                "POST",
+                "/__wk/transition",
+                body=encoded,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-WK-Transition-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            payload = response.read(MAX_TRANSITION_RESPONSE_BYTES + 1)
+            status = response.status
+            if len(payload) > MAX_TRANSITION_RESPONSE_BYTES:
+                raise ControlCenterError(
+                    "The Webkit transition response is larger than 2 MB.", 502
+                )
+            try:
+                result = strict_json_loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+                raise ControlCenterError(
+                    "The Webkit transition response is invalid JSON: {}".format(exc),
+                    502,
+                )
+            if not isinstance(result, dict):
+                raise ControlCenterError(
+                    "The Webkit transition response has an invalid shape.", 502
+                )
+            durable = status == 503 and result.get("transitionDurable") is True
+            if status != 200 and not durable:
+                reason = result.get("reason") or result.get("error") or "HTTP {}".format(status)
+                raise ControlCenterError(
+                    "The Webkit round transition failed: {}".format(reason), 409
+                )
+            unlink_if_exists(processing)
+            self.log.append(
+                "system",
+                "Webkit archived round {} for batch {} through the Control Center.".format(
+                    value["round"], value["batchId"]
+                ),
+                "feedback",
+            )
+            if durable:
+                self.log.append(
+                    "system",
+                    "The Webkit transition is durable, but voice-note cleanup is still pending.",
+                    "error",
+                )
+            return True
+        except ControlCenterError:
+            self._preserve_failed_transition(processing)
+            raise
+        except (OSError, http.client.HTTPException, TypeError, ValueError) as exc:
+            self._preserve_failed_transition(processing)
+            raise ControlCenterError(
+                "The Control Center could not finish the Webkit round transition: {}".format(exc),
+                502,
+            )
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except (OSError, http.client.HTTPException):
+                    pass
 
     @staticmethod
     def _feedback_phase_key(inbox):

@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.1")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.2")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2829,6 +2829,104 @@ class ControlCenterTests(unittest.TestCase):
         key = SessionRuntime._feedback_phase_key(inbox)
         self.assertEqual(key[0], "feedback")
 
+    def test_control_center_forwards_a_queued_transition_and_removes_the_request(self):
+        worktree = self.root / "transition-worktree"
+        inbox = worktree / ".webkit" / "feedback" / "blue"
+        inbox.mkdir(parents=True)
+        request = {
+            "version": 1,
+            "mode": "complete",
+            "batchId": "batch-1",
+            "round": 1,
+        }
+        (inbox / "transition-request.json").write_text(
+            json.dumps(request), encoding="utf-8"
+        )
+        token = inbox / "transition-token"
+        token.write_text("safe-token-1234567890\n", encoding="utf-8")
+        if os.name == "posix":
+            token.chmod(0o600)
+        session = {
+            "id": "transition-session",
+            "worktree": str(worktree),
+            "feedbackDir": ".webkit/feedback",
+            "color": "blue",
+            "emoji": "🔵",
+            "port": 5311,
+        }
+        runtime = SessionRuntime(self.app.sessions, session)
+        response = mock.Mock(status=200)
+        response.read.return_value = json.dumps({
+            "ok": True,
+            "mode": "complete",
+            "batchId": "batch-1",
+            "round": 1,
+        }).encode("utf-8")
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch(
+            "control_center.http.client.HTTPConnection", return_value=connection
+        ) as factory:
+            self.assertTrue(runtime._forward_transition_request(inbox))
+
+        factory.assert_called_once_with("127.0.0.1", 5311, timeout=10)
+        sent = connection.request.call_args
+        self.assertEqual(sent[0][:2], ("POST", "/__wk/transition"))
+        self.assertEqual(json.loads(sent[1]["body"].decode("utf-8")), request)
+        self.assertEqual(
+            sent[1]["headers"]["X-WK-Transition-Token"],
+            "safe-token-1234567890",
+        )
+        connection.close.assert_called_once_with()
+        self.assertFalse((inbox / "transition-request.json").exists())
+        self.assertFalse((inbox / ".transition-request.processing").exists())
+        events = runtime.log.read_after(0)["events"]
+        self.assertIn("archived round 1", events[-1]["text"])
+
+    def test_control_center_preserves_a_rejected_transition_for_diagnosis(self):
+        worktree = self.root / "rejected-transition-worktree"
+        inbox = worktree / ".webkit" / "feedback" / "blue"
+        inbox.mkdir(parents=True)
+        request = {
+            "version": 1,
+            "mode": "complete",
+            "batchId": "batch-1",
+            "round": 1,
+        }
+        (inbox / "transition-request.json").write_text(
+            json.dumps(request), encoding="utf-8"
+        )
+        token = inbox / "transition-token"
+        token.write_text("safe-token-1234567890\n", encoding="utf-8")
+        if os.name == "posix":
+            token.chmod(0o600)
+        runtime = SessionRuntime(self.app.sessions, {
+            "id": "rejected-transition-session",
+            "worktree": str(worktree),
+            "feedbackDir": ".webkit/feedback",
+            "color": "blue",
+            "emoji": "🔵",
+            "port": 5311,
+        })
+        response = mock.Mock(status=409)
+        response.read.return_value = json.dumps({
+            "error": "transition_conflict",
+            "reason": "live round does not match",
+        }).encode("utf-8")
+        connection = mock.Mock()
+        connection.getresponse.return_value = response
+
+        with mock.patch(
+            "control_center.http.client.HTTPConnection", return_value=connection
+        ), self.assertRaisesRegex(ControlCenterError, "live round does not match"):
+            runtime._forward_transition_request(inbox)
+
+        self.assertFalse((inbox / "transition-request.json").exists())
+        self.assertFalse((inbox / ".transition-request.processing").exists())
+        preserved = inbox / "transition-request-error.json"
+        self.assertEqual(json.loads(preserved.read_text(encoding="utf-8")), request)
+
     def test_feedback_phase_rejects_verdicts_without_live_feedback(self):
         inbox = self.root / "verdicts-only-feedback"
         inbox.mkdir()
@@ -3677,7 +3775,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.1",
+            "requiredVersion": "0.8.2",
         })
 
         status = subprocess.run(
@@ -3724,9 +3822,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.1")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.2")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.1")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.2")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3734,7 +3832,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.1")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.2")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -3792,7 +3890,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.1"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.2"
         )
         self.assertEqual(
             subprocess.run(

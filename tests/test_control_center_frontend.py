@@ -105,7 +105,7 @@ async function testApiPreservesStructuredErrorDetails() {
         details: {
           code: "webkit_update_required",
           installedVersion: "0.4.1",
-          requiredVersion: "0.8.1",
+          requiredVersion: "0.8.2",
         },
       }),
     }),
@@ -121,7 +121,7 @@ async function testApiPreservesStructuredErrorDetails() {
   assert.equal(failure.status, 409);
   assert.equal(failure.details.code, "webkit_update_required");
   assert.equal(failure.details.installedVersion, "0.4.1");
-  assert.equal(failure.details.requiredVersion, "0.8.1");
+  assert.equal(failure.details.requiredVersion, "0.8.2");
 }
 
 async function testChatAsyncWorkStaysWithItsSession() {
@@ -641,7 +641,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
       failure.details = requests.length === 1 ? {
         code: "webkit_update_required",
         installedVersion: "0.4.1",
-        requiredVersion: "0.8.1",
+        requiredVersion: "0.8.2",
       } : {};
       throw failure;
     },
@@ -652,7 +652,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   assert.equal(requests[0].path, "/api/projects/existing");
   assert.equal(requests[0].options.body.updateWebkit, false);
   assert.equal(updatePrompt.hidden, false, "old kits should reveal the inline update action");
-  assert.equal(versions.textContent, "0.4.1 to 0.8.1");
+  assert.equal(versions.textContent, "0.4.1 to 0.8.2");
 
   await ctx.saveProject({ preventDefault() {}, submitter: updateButton });
   assert.equal(requests[1].options.body.updateWebkit, true);

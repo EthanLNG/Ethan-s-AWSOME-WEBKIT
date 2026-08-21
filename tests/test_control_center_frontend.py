@@ -75,6 +75,7 @@ async function testHomeSelectionPersists() {
     renderProjectView: () => { projectRenders += 1; },
     currentSession: () => null,
     setChatStatus: () => {},
+    closeFinishedPreviewWindows: () => {},
   });
   install(ctx, "refreshProjects", "selectProject");
 
@@ -92,6 +93,35 @@ async function testHomeSelectionPersists() {
   const handler = source.slice(handlerStart, source.indexOf("\n});", handlerStart) + 4);
   assert.match(handler, /state\.homeSelected\s*=\s*true/);
   assert.match(handler, /state\.selectedProjectId\s*=\s*null/);
+}
+
+async function testFinishedSessionsCloseTheirOwnedPreviewWindows() {
+  let closes = 0;
+  const tab = {
+    closed: false,
+    close() {
+      this.closed = true;
+      closes += 1;
+    },
+  };
+  const previewTabs = new Map();
+  const ctx = context({ previewTabs });
+  install(ctx, "rememberPreviewWindow", "closeFinishedPreviewWindows");
+  const session = { id: "session-a", kind: "color" };
+
+  ctx.rememberPreviewWindow(session, tab);
+  ctx.closeFinishedPreviewWindows([{ sessions: [session] }]);
+  assert.equal(closes, 0, "a live session must keep its preview tab");
+  assert.equal(previewTabs.has(session.id), true);
+
+  ctx.closeFinishedPreviewWindows([{ sessions: [] }]);
+  assert.equal(closes, 1, "a completed session must close its preview tab");
+  assert.equal(previewTabs.has(session.id), false);
+
+  ctx.rememberPreviewWindow({ id: "support-a", kind: "support" }, tab);
+  assert.equal(previewTabs.has("support-a"), false, "uncolored support agents have no preview tab");
+  assert.match(extractFunction("startColor"), /rememberPreviewWindow\(session, previewTab\)/);
+  assert.match(extractFunction("openSessionPreview"), /rememberPreviewWindow\(session, tab\)/);
 }
 
 async function testApiPreservesStructuredErrorDetails() {
@@ -747,6 +777,7 @@ async function testIssueActionStartsAnUncoloredAgent() {
 
 (async () => {
   await testHomeSelectionPersists();
+  await testFinishedSessionsCloseTheirOwnedPreviewWindows();
   await testApiPreservesStructuredErrorDetails();
   await testChatAsyncWorkStaysWithItsSession();
   await testSharedModalCompletionsAreGenerationScoped();

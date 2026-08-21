@@ -7541,77 +7541,6 @@ class SessionRuntime:
                 pass
             self.preview_log = None
 
-    def close_preview_tab(self):
-        if self.session.get("kind") == "support":
-            return True
-        preview_url = self.session.get("previewUrl")
-        worktree = Path(self.session.get("worktree", ""))
-        config_path = worktree / "webkit" / "webkit.config.json"
-        if not isinstance(preview_url, str) or not preview_url:
-            self.log.append(
-                "system",
-                "The preview stopped, but its browser URL was unavailable for automatic tab cleanup.",
-                "error",
-            )
-            return False
-        try:
-            config = load_webkit_config(config_path, worktree, require_default_page=True)
-        except (ControlCenterError, OSError, ValueError) as exc:
-            self.log.append(
-                "system",
-                "The preview stopped, but its browser tab could not be closed: {}".format(exc),
-                "error",
-            )
-            return False
-        browser = config.get("browser") or {}
-        mode = browser.get("mode", "auto")
-        if (
-            mode == "print"
-            or platform.system() != "Darwin"
-            or shutil.which("osascript") is None
-        ):
-            self.log.append(
-                "system",
-                "The preview stopped. Close its browser tab if it is still open: {}".format(
-                    preview_url
-                ),
-                "status",
-            )
-            return False
-        env = scrubbed_child_environment()
-        env["WK_CONFIG"] = str(config_path)
-        try:
-            completed = subprocess.run(
-                [str(_RUNTIME_SCRIPTS / "open-preview.sh"), "--close", preview_url],
-                cwd=str(worktree),
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                capture_output=True,
-                timeout=15,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            self.log.append(
-                "system",
-                "The preview stopped, but its browser tab could not be closed: {}".format(exc),
-                "error",
-            )
-            return False
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "browser automation failed").strip()
-            self.log.append(
-                "system",
-                "The preview stopped, but its browser tab could not be closed: {}".format(
-                    detail[:1000]
-                ),
-                "error",
-            )
-            return False
-        self.log.append("system", "Preview browser tab closed.", "status")
-        return True
-
     def stop(self):
         self.stop_event.set()
         self.jobs.put(None)
@@ -8611,7 +8540,6 @@ to `{marker}`. If user input is required, write
             )
         runtime = self.runtimes.get(session_id)
         if runtime:
-            runtime.close_preview_tab()
             self._release(runtime)
         removed, reason = self.projects._remove_owned_worktree(
             project_path,
@@ -9303,7 +9231,6 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             )
         runtime = self.runtimes.get(session_id)
         if runtime:
-            runtime.close_preview_tab()
             self._release(runtime)
         removed, reason = self.projects._remove_owned_worktree(
             project_path,
@@ -9360,7 +9287,6 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         runtime = self.runtimes.get(session_id)
         try:
             if runtime:
-                runtime.close_preview_tab()
                 self._release(runtime)
             project_path = Path(project["path"])
             worktree = Path(session["worktree"])

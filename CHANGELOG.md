@@ -2,8 +2,8 @@
 
 ## v0.8.3 (2026-08-21): Automatic preview cleanup
 
-- Closed the Webkit-owned preview tab automatically after a successful merge,
-  seed finalization, or discard on supported macOS Chromium browsers.
+- Closed each Control Center-owned preview tab automatically after its session
+  reaches a successful merge, seed finalization, or discard.
 - Added an explicit close mode to the external preview launcher while keeping
   manual cleanup instructions visible on platforms without tab automation.
 

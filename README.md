@@ -97,8 +97,8 @@ free of an in-progress Git operation, and an ancestor of the managed branch.
 If it is dirty, diverged, or changes during validation, finalization stops and
 preserves both the managed result and session worktree for recovery. **Discard
 work** permanently removes the unmerged color branch and worktree. Successful
-merge, seed finalization, and discard operations also close the session's
-preview tab automatically on supported macOS Chromium browsers.
+merge, seed finalization, and discard operations also close the session preview
+window that the Control Center opened.
 
 Existing GitHub remotes are detected automatically, and successful merges are
 pushed when GitHub is connected. The verified local target fast-forward

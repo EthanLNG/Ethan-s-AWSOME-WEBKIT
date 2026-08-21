@@ -98,6 +98,7 @@ let eventsPollPromise = null;
 let eventsPollQueued = false;
 let seedPollPromise = null;
 let seedPollQueued = false;
+const previewTabs = new Map();
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -142,6 +143,26 @@ function navigatePreviewWindow(tab, url) {
   tab.location.replace(url);
   tab.focus();
   return true;
+}
+
+function rememberPreviewWindow(session, tab) {
+  if (session?.id && session.kind !== "support" && tab) {
+    previewTabs.set(session.id, tab);
+  }
+}
+
+function closeFinishedPreviewWindows(projects) {
+  const liveSessionIds = new Set();
+  (projects || []).forEach((project) => {
+    (project.sessions || []).forEach((session) => liveSessionIds.add(session.id));
+  });
+  previewTabs.forEach((tab, sessionId) => {
+    if (liveSessionIds.has(sessionId)) return;
+    previewTabs.delete(sessionId);
+    try {
+      if (tab && !tab.closed) tab.close();
+    } catch (_error) {}
+  });
 }
 
 function setBusy(button, busy, label) {
@@ -471,7 +492,10 @@ function selectProject(id) {
 
 function openSessionPreview(session) {
   const tab = reservePreviewWindow(`webkit-${session.projectId}-${session.color}`);
-  if (navigatePreviewWindow(tab, session.previewUrl)) return;
+  if (navigatePreviewWindow(tab, session.previewUrl)) {
+    rememberPreviewWindow(session, tab);
+    return;
+  }
   else toast(`Preview ready at ${session.previewUrl}. Allow popups to focus it automatically.`);
 }
 
@@ -612,6 +636,7 @@ async function startColor(color, button) {
       method: "POST", body: { projectId: project.id, color, reasoningEffort: $("#newAgentReasoning").value },
     });
     startedSession = session;
+    rememberPreviewWindow(session, previewTab);
     if (previewTab) navigatePreviewWindow(previewTab, session.previewUrl);
     else toast(`Preview ready at ${session.previewUrl}. Allow popups to open it automatically.`);
     await refreshProjects();
@@ -1605,6 +1630,7 @@ async function refreshProjects() {
     do {
       projectsRefreshQueued = false;
       const data = await api("/api/projects");
+      closeFinishedPreviewWindows(data.projects);
       const signature = JSON.stringify(data.projects);
       const changed = signature !== state.projectsSignature;
       state.projects = data.projects;
@@ -1779,6 +1805,7 @@ $("#openSeedPreview").addEventListener("click", () => {
   const url = $("#openSeedPreview").dataset.url;
   if (url) {
     const tab = reservePreviewWindow(`webkit-seed-${state.seedCurrentId || "preview"}`);
+    rememberPreviewWindow(sessionById(state.seedSessionId), tab);
     if (!navigatePreviewWindow(tab, url)) toast(`Preview ready at ${url}. Allow popups to open it automatically.`);
   }
 });

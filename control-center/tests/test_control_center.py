@@ -4634,7 +4634,9 @@ class ControlCenterTests(unittest.TestCase):
         }
         runtime = SessionRuntime(self.app.sessions, session)
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with mock.patch("control_center.run_command", return_value=completed) as run:
+        with mock.patch("control_center.platform.system", return_value="Darwin"), mock.patch(
+            "control_center.run_command", return_value=completed
+        ) as run:
             self.app.sessions._close_preview_tab(runtime)
         run.assert_called_once_with(
             [str(script), "--close", session["previewUrl"]],

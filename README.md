@@ -21,10 +21,14 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-proprietary-b00020" alt="Proprietary license"></a>
 </p>
 
-**Turn a thought into a reviewed website change in one tight loop.** Open the
-real local site, point at exactly what is wrong, type or dictate the fix, and let
-Codex or Claude Code build it. Compare before and after on the live page, then
-accept, redo, delete, or generate alternatives without breaking your flow.
+**Generate an irresponsible number of designs, stupidly fast. Never get lost.**
+Run multiple agents in parallel, generate an irresponsible number of
+variations, and explore entire design universes at the same time without
+getting lost in the chaos. The interface remains so braindead simple that the
+only thing you can lose is respect for slower workflows. AWESOME WEBKIT
+automatically organizes every agent, branch, preview, feedback point, version,
+and Git commit. It is stupidly optimized for mental clarity, so getting
+overwhelmed would require genuine effort.
 
 - **Stupidly fast iteration:** visual feedback, agent work, and live review stay
   in the same loop, so you can move from idea to verified change in moments.
@@ -35,10 +39,6 @@ accept, redo, delete, or generate alternatives without breaking your flow.
   recoverable.
 - **Braindead simple:** point, describe, and review. The Webkit handles branches,
   preview ports, agent sessions, version control, and cleanup behind the scenes.
-
-Need choices instead of one answer? Request A/B/C variants from any feedback
-point. The agent builds section-scoped alternatives and you switch between them
-live before selecting a winner.
 
 ## What is included
 

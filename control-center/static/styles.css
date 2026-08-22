@@ -147,6 +147,13 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .event.activity { padding: 7px 10px; color: var(--muted); background: transparent; border: 1px dashed var(--line); font-family: ui-monospace, monospace; font-size: 11px; }
 .event.error { color: #8f2522; background: #fff0ee; }
 .event.feedback { color: #765112; background: #fff2db; }
+.thinking-group { max-width: 89%; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 13px; background: #f8f4ec; overflow: hidden; }
+.thinking-group summary { padding: 10px 12px; color: var(--muted); font-size: 12px; font-weight: 800; cursor: pointer; list-style: none; }
+.thinking-group summary::-webkit-details-marker { display: none; }
+.thinking-group summary span::before { content: "＋"; display: inline-block; width: 18px; color: var(--ink); }
+.thinking-group[open] summary span::before { content: "−"; }
+.thinking-events { display: grid; gap: 8px; padding: 0 10px 10px; }
+.thinking-events .event { max-width: none; margin: 0; }
 .composer { display: grid; grid-template-columns: auto 1fr auto; gap: 9px; padding: 12px; border-top: 1px solid var(--line); }
 .composer.dragging { background: #edf7ff; box-shadow: inset 0 0 0 2px var(--blue); }
 .attachment-list { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }

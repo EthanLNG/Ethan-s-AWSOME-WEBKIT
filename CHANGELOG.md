@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.8.4 (2026-08-22): Reliable live feedback
+
+- Made sandboxed round-transition queue signals tolerate the known macOS
+  `fsync` permission boundary while preserving fatal handling for real I/O
+  failures. The Control Center now consumes queued transitions immediately
+  after the agent exits and refuses to report a false active state when the
+  feedback protocol did not advance.
+- Added a per-project Webkit update action for already registered sites and
+  blocked new color sessions from starting on an outdated vendored kit.
+- Collapsed completed agent activity into a View thinking control with elapsed
+  time while keeping the final response visible.
+- Refreshed the Control Center-owned preview tab after every successful website
+  chat turn so project changes cannot remain hidden behind a stale page.
+- Restored submitted feedback points and rectangles from the active server
+  batch after reload, alongside the existing durable unsent-draft storage.
+- Stopped keyboard, composition, pointer, and input events from leaking out of
+  Webkit controls into host-page interaction handlers.
+- Installed the macOS desktop launcher as a native app bundle with an AWESOME
+  WEBKIT icon matching the Control Center brand mark.
+
+**Migration:** restart the Control Center and update existing projects when
+prompted. No configuration changes are required.
+
 ## v0.8.3 (2026-08-21): Automatic preview cleanup
 
 - Closed each Control Center-owned preview tab automatically after its session

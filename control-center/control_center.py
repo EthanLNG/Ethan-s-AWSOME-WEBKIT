@@ -3531,6 +3531,13 @@ class ProjectManager:
             item["exists"] = Path(project["path"]).is_dir()
             item["github"] = self.github_sync_status(project)
             try:
+                item["webkitUpdate"] = self._existing_kit_update(project["path"])
+            except ControlCenterError as exc:
+                item["webkitUpdate"] = {
+                    "code": "webkit_update_unavailable",
+                    "message": str(exc),
+                }
+            try:
                 config = load_webkit_config(
                     Path(project["path"]) / "webkit" / "webkit.config.json",
                     project["path"],
@@ -3900,6 +3907,11 @@ class ProjectManager:
                         project["provider"] = provider
                         break
             self.store.update(update_provider)
+            version_update = self._existing_kit_update(existing["path"])
+            if version_update is not None:
+                if not update_webkit:
+                    self._raise_existing_kit_update_required(version_update)
+                return self._update_registered_kit(existing, version_update)
             return self.get_project(existing["id"])
         project_path = None
         base_branch = None
@@ -3989,6 +4001,79 @@ class ProjectManager:
                         getattr(primary_error, "details", None),
                     ) from primary_error
             raise
+
+    def _update_registered_kit(self, project, version_update):
+        """Update one registered checkout and commit the trusted kit payload."""
+        live_statuses = {"active", "busy", "merging", "discarding", "error"}
+        live = [
+            session for session in self.store.read().get("sessions", [])
+            if session.get("projectId") == project["id"]
+            and session.get("status") in live_statuses
+        ]
+        if live:
+            raise ControlCenterError(
+                "Finish or discard this project's active agents before updating Webkit.",
+                409,
+            )
+
+        project_path = Path(project["path"]).resolve()
+        if not project_path.is_dir():
+            raise ControlCenterError("Project folder is missing.", 404)
+        config = load_webkit_config(
+            project_path / "webkit" / "webkit.config.json",
+            project_path,
+            require_default_page=True,
+        )
+        require_private_runtime_paths_safe(project_path, config)
+        if private_safe_git_status(project_path, config).stdout.strip():
+            raise ControlCenterError(
+                "The Control Center checkout has uncommitted changes.", 409
+            )
+        base_branch = project.get("baseBranch", "main")
+        current_branch = run_command(
+            ["git", "branch", "--show-current"], cwd=project_path
+        ).stdout.strip()
+        if current_branch != base_branch:
+            raise ControlCenterError(
+                "The Control Center checkout is not on its managed base branch.", 409
+            )
+
+        self.integrate_managed_target(project, defer_if_target_busy=True)
+        self._upgrade_existing_kit(project_path, version_update)
+        updated_config = load_webkit_config(
+            project_path / "webkit" / "webkit.config.json",
+            project_path,
+            require_default_page=True,
+        )
+        require_private_runtime_paths_safe(project_path, updated_config)
+        stage_without_private_runtime(project_path, updated_config)
+        staged = run_command(
+            ["git", "diff", "--cached", "--quiet"],
+            cwd=project_path,
+            check=False,
+        )
+        if staged.returncode == 1:
+            updated_sha = self._commit_validated_index(
+                project_path,
+                "Update AWESOME WEBKIT to v{}".format(
+                    version_update["requiredVersion"]
+                ),
+            )
+        elif staged.returncode == 0:
+            raise ControlCenterError(
+                "The Webkit update prepared no committable changes.", 409
+            )
+        else:
+            raise ControlCenterError(
+                "The staged Webkit update could not be inspected.", 409
+            )
+        integration = self.integrate_managed_target(
+            project, validated_sha=updated_sha, defer_if_target_busy=True
+        )
+        updated = self.get_project(project["id"])
+        updated["sourceIntegrationPending"] = bool(integration.get("pending", False))
+        updated["webkitUpdated"] = dict(version_update)
+        return updated
 
     def _register(
         self, project_path, name, provider, source_path=None, base_branch="main",
@@ -7145,6 +7230,10 @@ class SessionRuntime:
                 )
                 shown = job["display"] if job.get("display") is not None else job["prompt"]
                 self.log.append("user" if job["source"] == "chat" else "system", shown, job["source"])
+                turn_started = time.monotonic()
+                self.log.append(
+                    "system", "", "turn_start", {"source": job["source"]}
+                )
                 runner = ProviderRunner(
                     self.session,
                     self.log,
@@ -7152,8 +7241,25 @@ class SessionRuntime:
                     self._set_process,
                     allow_git=job["source"] in ("chat", "feedback"),
                 )
+                turn_outcome = "completed"
                 try:
                     runner.run(job["prompt"])
+                    if filesystem_feedback:
+                        inbox = Path(job["feedback_inbox"])
+                        self._forward_transition_request(inbox)
+                        current_key = self._feedback_phase_key(inbox)
+                        if current_key == job["feedback_key"]:
+                            raise ControlCenterError(
+                                "The agent exited without advancing the Webkit feedback state. "
+                                "Its work is preserved, and the session was stopped instead of "
+                                "being left in a false waiting state.",
+                                409,
+                            )
+                    if (
+                        job["source"] == "chat"
+                        and self.session.get("kind") != "support"
+                    ):
+                        self.manager._bump_preview_revision(self.session["id"])
                     if job["source"] == "merge":
                         self.manager._complete_agent_merge(self.session["id"])
                     elif job["source"] == "seed-generation":
@@ -7176,6 +7282,7 @@ class SessionRuntime:
                         self.manager._set_session_status(self.session["id"], "active")
                     self.manager._clear_pending_operation(self.session["id"])
                 except Exception as exc:
+                    turn_outcome = "failed"
                     self.log.append("system", str(exc), "error")
                     self.manager._set_session_status(self.session["id"], "error", str(exc))
                     self.manager._clear_pending_operation(self.session["id"])
@@ -7186,6 +7293,16 @@ class SessionRuntime:
                             "seedCount": self.session.get("seedCount", 10),
                             "message": str(exc),
                         })
+                finally:
+                    self.log.append(
+                        "system", "", "turn_complete", {
+                            "source": job["source"],
+                            "outcome": turn_outcome,
+                            "durationMs": max(
+                                0, int(round((time.monotonic() - turn_started) * 1000))
+                            ),
+                        }
+                    )
             finally:
                 if filesystem_feedback:
                     self._finish_feedback_job()
@@ -7582,6 +7699,7 @@ class SessionManager:
             for session in self.list_sessions(project_id):
                 if session.get("color") == color and session.get("status") in ("active", "busy", "merging", "error"):
                     return public_session(session)
+            self.projects._validate_existing_kit_version(project_path)
             config = load_webkit_config(
                 project_path / "webkit" / "webkit.config.json",
                 project_path,
@@ -7653,6 +7771,7 @@ class SessionManager:
                 "worktreeDev": ownership["dev"],
                 "worktreeIno": ownership["ino"],
                 "previewUrl": preview_url,
+                "previewRevision": 0,
                 "feedbackDir": config.get("feedback_dir", ".webkit/feedback"),
                 "status": "active",
                 "threadId": None,
@@ -9558,6 +9677,26 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         if runtime:
             runtime.session.pop("pendingOperation", None)
             runtime.session.pop("pendingPrompt", None)
+
+    def _bump_preview_revision(self, session_id):
+        revision = []
+
+        def mutate(state):
+            for session in state.get("sessions", []):
+                if session["id"] == session_id:
+                    value = session.get("previewRevision", 0)
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        value = 0
+                    value += 1
+                    session["previewRevision"] = value
+                    session["updatedAt"] = utc_now()
+                    revision.append(value)
+                    break
+
+        self.store.update(mutate)
+        if revision and session_id in self.runtimes:
+            self.runtimes[session_id].session["previewRevision"] = revision[0]
+        return revision[0] if revision else None
 
     def _set_session_status(self, session_id, status, error=None):
         changed = []

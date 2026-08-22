@@ -89,6 +89,7 @@ const state = {
   confirmBusy: false,
   settingsGeneration: 0,
   settingsSaveInFlight: false,
+  chatTurn: null,
 };
 let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
 let hotkeyCapture = null;
@@ -147,8 +148,30 @@ function navigatePreviewWindow(tab, url) {
 
 function rememberPreviewWindow(session, tab) {
   if (session?.id && session.kind !== "support" && tab) {
-    previewTabs.set(session.id, tab);
+    previewTabs.set(session.id, {
+      tab,
+      revision: Number.isInteger(session.previewRevision) ? session.previewRevision : 0,
+    });
   }
+}
+
+function refreshChangedPreviewWindows(projects) {
+  const sessions = new Map();
+  (projects || []).forEach((project) => {
+    (project.sessions || []).forEach((session) => sessions.set(session.id, session));
+  });
+  previewTabs.forEach((entry, sessionId) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    const holder = entry?.tab ? entry : { tab: entry, revision: 0 };
+    const revision = Number.isInteger(session.previewRevision) ? session.previewRevision : 0;
+    if (revision <= holder.revision) return;
+    try {
+      if (holder.tab && !holder.tab.closed) holder.tab.location.replace(session.previewUrl);
+    } catch (_error) {}
+    holder.revision = revision;
+    previewTabs.set(sessionId, holder);
+  });
 }
 
 function closeFinishedPreviewWindows(projects) {
@@ -156,9 +179,10 @@ function closeFinishedPreviewWindows(projects) {
   (projects || []).forEach((project) => {
     (project.sessions || []).forEach((session) => liveSessionIds.add(session.id));
   });
-  previewTabs.forEach((tab, sessionId) => {
+  previewTabs.forEach((entry, sessionId) => {
     if (liveSessionIds.has(sessionId)) return;
     previewTabs.delete(sessionId);
+    const tab = entry?.tab || entry;
     try {
       if (tab && !tab.closed) tab.close();
     } catch (_error) {}
@@ -516,6 +540,12 @@ function renderProjectView() {
     chatSession ? targetBranchForSession(chatSession) : targetBranch(project)
   }`;
   const github = project.github || {};
+  const updateButton = $("#updateProjectWebkitButton");
+  const webkitUpdate = project.webkitUpdate;
+  updateButton.hidden = !webkitUpdate || webkitUpdate.code !== "webkit_update_required";
+  updateButton.textContent = webkitUpdate?.requiredVersion
+    ? `Update Webkit to ${webkitUpdate.requiredVersion}`
+    : "Update Webkit";
   const pushButton = $("#pushGithubButton");
   pushButton.hidden = !(github.connected && github.unpushed);
   const commits = Number(github.ahead) || 0;
@@ -555,6 +585,7 @@ function renderProjectView() {
     const card = document.createElement("button");
     card.type = "button";
     card.className = `color-card ${session ? "active" : ""}`;
+    card.disabled = !session && webkitUpdate?.code === "webkit_update_required";
     card.dataset.color = COLOR_ACCENT_NAMES.has(color.slug) ? color.slug : "neutral";
     const emoji = document.createElement("span");
     emoji.className = "emoji";
@@ -564,7 +595,9 @@ function renderProjectView() {
     const hint = document.createElement("small");
     hint.textContent = session
       ? (session.status === "active" ? "Currently active" : session.status)
-      : "Start isolated agent";
+      : (webkitUpdate?.code === "webkit_update_required"
+        ? "Update Webkit first"
+        : "Start isolated agent");
     hint.dataset.working = String(!!session && ["busy", "merging"].includes(session.status));
     card.append(emoji, title, hint);
     if (session) {
@@ -677,6 +710,32 @@ async function pushSelectedProject() {
   }
 }
 
+async function updateSelectedProjectWebkit() {
+  const project = selectedProject();
+  if (!project?.webkitUpdate || project.webkitUpdate.code !== "webkit_update_required") return;
+  const button = $("#updateProjectWebkitButton");
+  setBusy(button, true, "Updating…");
+  try {
+    const result = await api("/api/projects/existing", {
+      method: "POST",
+      body: {
+        path: project.sourcePath || project.path,
+        provider: project.provider,
+        updateWebkit: true,
+      },
+    });
+    await refreshProjects();
+    const updated = result.project?.webkitUpdated;
+    toast(updated
+      ? `Webkit updated from ${updated.installedVersion} to ${updated.requiredVersion}.`
+      : "Webkit is already current.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(button, false);
+  }
+}
+
 async function handleProjectIssue(event) {
   const project = selectedProject();
   const issue = project?.issue;
@@ -721,6 +780,7 @@ function openSession(session, returnFocus = document.activeElement) {
   state.chatReasoningRequest += 1;
   state.chatSessionId = session.id;
   state.chatCursor = 0;
+  state.chatTurn = null;
   state.chatReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : null;
   $("#chatDrawer").hidden = false;
   $("#chatColor").textContent = session.kind === "support"
@@ -753,6 +813,66 @@ function currentSession() {
     if (session) return session;
   }
   return null;
+}
+
+function formatThinkingDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round((Number(milliseconds) || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function chatEventNode(event) {
+  const node = document.createElement("div");
+  node.className = `event ${event.role} ${event.kind}`;
+  node.textContent = event.text;
+  return node;
+}
+
+function renderChatEvent(event, target) {
+  if (event.kind === "turn_start") {
+    const details = document.createElement("details");
+    details.className = "thinking-group";
+    details.open = true;
+    const summary = document.createElement("summary");
+    const label = document.createElement("span");
+    label.textContent = "Agent is thinking…";
+    summary.appendChild(label);
+    const body = document.createElement("div");
+    body.className = "thinking-events";
+    details.append(summary, body);
+    target.appendChild(details);
+    state.chatTurn = { details, label, body, candidates: [], duration: "" };
+    return;
+  }
+
+  if (event.kind === "turn_complete") {
+    const turn = state.chatTurn;
+    if (!turn) return;
+    const finalNode = turn.candidates.at(-1) || null;
+    if (finalNode) target.appendChild(finalNode);
+    turn.duration = formatThinkingDuration(event.meta?.durationMs);
+    const updateLabel = () => {
+      turn.label.textContent = `${turn.details.open ? "Hide" : "View"} thinking · ${turn.duration}`;
+    };
+    turn.details.open = false;
+    updateLabel();
+    turn.details.addEventListener("toggle", updateLabel);
+    state.chatTurn = null;
+    return;
+  }
+
+  const node = chatEventNode(event);
+  const turn = state.chatTurn;
+  if (turn && event.role !== "user") {
+    turn.body.appendChild(node);
+    if ((event.role === "agent" && event.kind === "message") || event.kind === "error") {
+      turn.candidates.push(node);
+    }
+  } else {
+    target.appendChild(node);
+  }
 }
 
 function renderAttachments() {
@@ -890,12 +1010,12 @@ async function pollEvents() {
         const data = await api(`/api/sessions/${expected}/events?after=${cursor}`);
         if (expected !== state.chatSessionId || generation !== state.chatGeneration) continue;
         const target = $("#chatEvents");
-        if (data.reset) target.replaceChildren();
+        if (data.reset) {
+          target.replaceChildren();
+          state.chatTurn = null;
+        }
         data.events.forEach((event) => {
-          const node = document.createElement("div");
-          node.className = `event ${event.role} ${event.kind}`;
-          node.textContent = event.text;
-          target.appendChild(node);
+          renderChatEvent(event, target);
         });
         if (data.events.length) target.scrollTop = target.scrollHeight;
         state.chatCursor = data.next;
@@ -1630,6 +1750,7 @@ async function refreshProjects() {
     do {
       projectsRefreshQueued = false;
       const data = await api("/api/projects");
+      refreshChangedPreviewWindows(data.projects);
       closeFinishedPreviewWindows(data.projects);
       const signature = JSON.stringify(data.projects);
       const changed = signature !== state.projectsSignature;
@@ -1682,6 +1803,7 @@ $("#saveProviders").addEventListener("click", saveProviders);
 $("#installShortcutButton").addEventListener("click", installShortcut);
 $("#settingsButton").addEventListener("click", openSettings);
 $("#pushGithubButton").addEventListener("click", pushSelectedProject);
+$("#updateProjectWebkitButton").addEventListener("click", updateSelectedProjectWebkit);
 $("#handleProjectIssue").addEventListener("click", handleProjectIssue);
 $("#seedOnboardingButton").addEventListener("click", continueSeedOnboarding);
 $("#shortcutGuide").addEventListener("click", openSettings);
@@ -1828,6 +1950,7 @@ $("#closeChat").addEventListener("click", () => {
   state.chatGeneration += 1;
   state.chatAttachmentReadsPending = 0;
   state.chatSendInFlight = false;
+  state.chatTurn = null;
   $("#chatDrawer").hidden = true;
   state.chatSessionId = null;
   state.chatReturnFocus = null;

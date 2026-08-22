@@ -2,6 +2,7 @@
 """Ask the local preview server to perform one feedback-round transition."""
 
 import argparse
+import errno
 import http.client
 import json
 import os
@@ -21,6 +22,19 @@ _MAX_NEXT_REVIEW = 2 * 1024 * 1024
 _MAX_CONFIG = 1024 * 1024
 _MAX_TRANSITION_REQUEST = 2 * 1024 * 1024
 _TRANSITION_REQUEST_NAME = "transition-request.json"
+
+
+def fsync_control_center_signal(descriptor):
+    """Flush a queue signal when the agent sandbox permits durable sync."""
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        # Some agent sandboxes allow the atomic write and rename but reject
+        # fsync with EPERM. The queue file is only a signal to the trusted
+        # Control Center, which rereads and validates it before mutation. Keep
+        # hard I/O failures fatal while allowing that known sandbox boundary.
+        if exc.errno != errno.EPERM:
+            raise
 
 
 def fail(message):
@@ -309,7 +323,7 @@ def queue_control_center_transition(inbox, body):
             descriptor = None
             handle.write(encoded)
             handle.flush()
-            os.fsync(handle.fileno())
+            fsync_control_center_signal(handle.fileno())
         os.replace(temporary, str(inbox / _TRANSITION_REQUEST_NAME))
         temporary = None
         directory_descriptor = None

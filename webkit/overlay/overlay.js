@@ -720,6 +720,20 @@
   const root = host.attachShadow({ mode: 'open' });
   document.documentElement.appendChild(host);
 
+  // Overlay controls must never leak interaction events into the website.
+  // Target handlers inside the shadow tree still run first, and stopping at
+  // the shadow root keeps ordinary typing and button use away from host-page
+  // keyboard, pointer, and delegated input listeners.
+  for (const type of [
+    'keydown', 'keyup', 'keypress', 'beforeinput', 'input',
+    'compositionstart', 'compositionupdate', 'compositionend',
+    'pointerdown', 'pointerup', 'pointermove', 'pointercancel',
+    'mousedown', 'mouseup', 'mousemove', 'click', 'dblclick', 'contextmenu',
+    'touchstart', 'touchmove', 'touchend', 'touchcancel',
+  ]) {
+    root.addEventListener(type, (event) => event.stopPropagation());
+  }
+
   // Native dialogs and popovers live in the browser's "top layer", above
   // every z-index in the document. Keep WebKit in that same layer and raise it
   // again whenever the page opens another top-layer surface. This lets users
@@ -1356,6 +1370,18 @@
           if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
         });
       });
+    }
+    if (!S.reviewing && S.batch && S.phase !== null && S.phase !== 'collecting') {
+      const queuedIds = new Set(S.points.map((point) => point.id));
+      for (const p of (Array.isArray(S.batch.points) ? S.batch.points : [])) {
+        if (!p || queuedIds.has(p.id) || p.page !== page || !pointSurfaceVisible(p)) continue;
+        const va = pinBox(p);
+        const primary = va ? va.box : correctedRect(p);
+        const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
+        (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
+          x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
+        }, 'submitted', () => {}, 'submitted point ' + p.number + ' is saved and waiting', !!va));
+      }
     }
     for (const p of S.points) {
       if (p.page !== page) continue;
@@ -2662,6 +2688,7 @@
       }
     }
 
+    if (!S.card) renderPins();
     updateStatusChip();
     updateSendBtn();
     if (S.reviewing) updateBar();

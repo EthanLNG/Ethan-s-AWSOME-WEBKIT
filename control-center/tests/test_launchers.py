@@ -5,9 +5,11 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import shutil
 import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -270,9 +272,26 @@ class LauncherTests(unittest.TestCase):
             self.assertIn(str(numbered), output)
 
     def test_macos_installer_preserves_differing_existing_shortcut(self):
-        self._assert_conflicting_shortcut_is_preserved(
-            "Darwin", "AWESOME WEBKIT.command"
-        )
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            preferred = desktop / "AWESOME WEBKIT.app"
+            preferred.write_bytes(b"user-owned shortcut\n")
+
+            output = self._run_shortcut_installer("Darwin", desktop)
+
+            numbered = desktop / "AWESOME WEBKIT (2).app"
+            self.assertEqual(preferred.read_bytes(), b"user-owned shortcut\n")
+            self.assertTrue(numbered.is_dir())
+            self.assertTrue((numbered / "Contents/Resources/AppIcon.icns").is_file())
+            self.assertIn(str(numbered), output)
+
+            repeated_output = self._run_shortcut_installer("Darwin", desktop)
+            self.assertIn("Shortcut already installed:", repeated_output)
+            self.assertEqual(
+                sorted(path.name for path in desktop.iterdir()),
+                ["AWESOME WEBKIT (2).app", "AWESOME WEBKIT.app"],
+            )
 
     def test_windows_installer_preserves_differing_existing_shortcut(self):
         self._assert_conflicting_shortcut_is_preserved(
@@ -286,7 +305,7 @@ class LauncherTests(unittest.TestCase):
 
     def test_shortcut_installer_reuses_identical_content_on_every_platform(self):
         cases = (
-            ("Darwin", "AWESOME WEBKIT.command"),
+            ("Darwin", "AWESOME WEBKIT.app"),
             ("Windows", "AWESOME WEBKIT.cmd"),
             ("Linux", "awesome-webkit.desktop"),
         )
@@ -294,11 +313,13 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(system=system), tempfile.TemporaryDirectory() as raw:
                 desktop = Path(raw) / "Desktop"
                 desktop.mkdir()
-                writer = install_shortcut.write_shortcut_exclusive
+                writer_name = (
+                    "write_macos_app_exclusive"
+                    if system == "Darwin" else "write_shortcut_exclusive"
+                )
+                writer = getattr(install_shortcut, writer_name)
                 with mock.patch.object(
-                    install_shortcut,
-                    "write_shortcut_exclusive",
-                    wraps=writer,
+                    install_shortcut, writer_name, wraps=writer,
                 ) as write:
                     self._run_shortcut_installer(system, desktop)
                     output = self._run_shortcut_installer(system, desktop)
@@ -309,10 +330,7 @@ class LauncherTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "Executable shortcut modes are POSIX-only")
     def test_shortcut_installer_does_not_reuse_non_executable_content(self):
-        for system, filename in (
-            ("Darwin", "AWESOME WEBKIT.command"),
-            ("Linux", "awesome-webkit.desktop"),
-        ):
+        for system, filename in (("Linux", "awesome-webkit.desktop"),):
             with self.subTest(system=system), tempfile.TemporaryDirectory() as raw:
                 desktop = Path(raw) / "Desktop"
                 desktop.mkdir()
@@ -328,6 +346,44 @@ class LauncherTests(unittest.TestCase):
                 self.assertFalse(preferred.stat().st_mode & stat.S_IXUSR)
                 self.assertTrue(numbered.stat().st_mode & stat.S_IXUSR)
                 self.assertIn(str(numbered), output)
+
+    @unittest.skipUnless(os.name == "posix", "Executable shortcut modes are POSIX-only")
+    def test_macos_installer_does_not_reuse_app_with_non_executable_launcher(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            self._run_shortcut_installer("Darwin", desktop)
+            preferred = desktop / "AWESOME WEBKIT.app"
+            launcher = preferred / "Contents/MacOS/awesome-webkit"
+            launcher.chmod(0o644)
+
+            output = self._run_shortcut_installer("Darwin", desktop)
+
+            numbered = desktop / "AWESOME WEBKIT (2).app"
+            self.assertFalse(launcher.stat().st_mode & stat.S_IXUSR)
+            self.assertTrue(
+                (numbered / "Contents/MacOS/awesome-webkit").stat().st_mode
+                & stat.S_IXUSR
+            )
+            self.assertIn(str(numbered), output)
+
+    def test_macos_app_contains_native_icon_and_plist(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            self._run_shortcut_installer("Darwin", desktop)
+            app = desktop / "AWESOME WEBKIT.app"
+            info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+            icon = (app / "Contents/Resources/AppIcon.icns").read_bytes()
+
+            self.assertEqual(info["CFBundleIconFile"], "AppIcon.icns")
+            self.assertEqual(info["CFBundleExecutable"], "awesome-webkit")
+            self.assertEqual(icon[:4], b"icns")
+            self.assertEqual(struct.unpack(">I", icon[4:8])[0], len(icon))
+            self.assertIn(b"\x89PNG\r\n\x1a\n", icon)
+            self.assertEqual(
+                install_shortcut.brand_icon_png(128)[:8], b"\x89PNG\r\n\x1a\n"
+            )
 
     def test_shortcut_exclusive_write_refuses_a_racing_existing_file(self):
         with tempfile.TemporaryDirectory() as raw:

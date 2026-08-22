@@ -173,6 +173,16 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
 }
 """
         )
+
+    def test_active_batch_points_and_overlay_input_survive_refresh_boundaries(self):
+        self.assertIn("S.batch.points", self.source)
+        self.assertIn("'submitted point ' + p.number + ' is saved and waiting'", self.source)
+        self.assertIn("if (!S.card) renderPins();", self.source)
+        self.assertIn("root.addEventListener(type, (event) => event.stopPropagation())", self.source)
+        for event_name in ("keydown", "keyup", "keypress", "beforeinput", "input"):
+            self.assertIn("'{}'".format(event_name), self.source)
+        self.assertIn(".wk-pin-rect.submitted", self.css)
+        self.assertIn(".wk-pin.submitted", self.css)
         self.assertIn("'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'", self.source)
 
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):

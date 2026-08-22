@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.3")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.4")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2829,6 +2829,101 @@ class ControlCenterTests(unittest.TestCase):
         key = SessionRuntime._feedback_phase_key(inbox)
         self.assertEqual(key[0], "feedback")
 
+    def test_preview_revision_is_persisted_for_frontend_tab_refresh(self):
+        session = {
+            "id": "preview-revision-session",
+            "status": "active",
+            "previewRevision": 0,
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
+        runtime = mock.Mock()
+        runtime.session = dict(session)
+        self.app.sessions.runtimes[session["id"]] = runtime
+
+        self.assertEqual(self.app.sessions._bump_preview_revision(session["id"]), 1)
+        self.assertEqual(self.app.sessions._bump_preview_revision(session["id"]), 2)
+
+        saved = self.app.sessions._get_session(session["id"])
+        self.assertEqual(saved["previewRevision"], 2)
+        self.assertEqual(runtime.session["previewRevision"], 2)
+
+    def test_unchanged_feedback_phase_becomes_visible_error_instead_of_false_waiting(self):
+        worktree = self.root / "unchanged-feedback-worktree"
+        inbox = worktree / ".webkit" / "feedback" / "blue"
+        inbox.mkdir(parents=True)
+        (inbox / "feedback.json").write_text(json.dumps({
+            "version": 1,
+            "kind": "feedback",
+            "batchId": "batch-1",
+            "round": 1,
+        }), encoding="utf-8")
+        session = {
+            "id": "unchanged-feedback-session",
+            "worktree": str(worktree),
+            "feedbackDir": ".webkit/feedback",
+            "color": "blue",
+            "emoji": "🔵",
+            "status": "active",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
+        runtime = SessionRuntime(self.app.sessions, session)
+        phase = runtime._feedback_phase_key(inbox)
+        runtime._observe_feedback_phase(inbox, phase)
+        runtime.jobs.put(None)
+        runner = mock.Mock()
+        runner.run.return_value = False
+
+        with mock.patch("control_center.ProviderRunner", return_value=runner):
+            runtime._work_loop()
+
+        saved = self.app.sessions._get_session(session["id"])
+        self.assertEqual(saved["status"], "error")
+        self.assertIn("without advancing", saved["error"])
+        events = runtime.log.read_after(0)["events"]
+        self.assertEqual(events[-1]["kind"], "turn_complete")
+        self.assertEqual(events[-1]["meta"]["outcome"], "failed")
+
+    def test_feedback_transition_is_forwarded_before_agent_turn_completes(self):
+        worktree = self.root / "immediate-transition-worktree"
+        inbox = worktree / ".webkit" / "feedback" / "blue"
+        inbox.mkdir(parents=True)
+        session = {
+            "id": "immediate-transition-session",
+            "worktree": str(worktree),
+            "feedbackDir": ".webkit/feedback",
+            "color": "blue",
+            "emoji": "🔵",
+            "status": "active",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
+        runtime = SessionRuntime(self.app.sessions, session)
+        phase = ("verdicts", "same-revision")
+        runtime._observe_feedback_phase(inbox, phase)
+        runtime.jobs.put(None)
+        runner = mock.Mock()
+        runner.run.return_value = False
+
+        with mock.patch("control_center.ProviderRunner", return_value=runner), mock.patch.object(
+            runtime, "_feedback_phase_key", side_effect=[phase, None]
+        ), mock.patch.object(
+            runtime, "_forward_transition_request", return_value=True
+        ) as forward:
+            runtime._work_loop()
+
+        forward.assert_called_once_with(inbox)
+        self.assertEqual(
+            self.app.sessions._get_session(session["id"])["status"], "active"
+        )
+        complete = runtime.log.read_after(0)["events"][-1]
+        self.assertEqual(complete["kind"], "turn_complete")
+        self.assertEqual(complete["meta"]["outcome"], "completed")
+
     def test_control_center_forwards_a_queued_transition_and_removes_the_request(self):
         worktree = self.root / "transition-worktree"
         inbox = worktree / ".webkit" / "feedback" / "blue"
@@ -3089,8 +3184,14 @@ class ControlCenterTests(unittest.TestCase):
             "worktree": str(self.root),
             "color": "blue",
             "emoji": "🔵",
+            "status": "active",
+            "previewRevision": 0,
         }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
         runtime = SessionRuntime(self.app.sessions, session)
+        self.app.sessions.runtimes[session["id"]] = runtime
         runtime.enqueue("first message", "chat")
         runtime.enqueue("second message", "chat")
         runtime.jobs.put(None)
@@ -3102,6 +3203,9 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(
             runner.run.call_args_list,
             [mock.call("first message"), mock.call("second message")],
+        )
+        self.assertEqual(
+            self.app.sessions._get_session(session["id"])["previewRevision"], 2
         )
 
     def test_preview_uses_a_bounded_pipe_drain_and_instance_identity(self):
@@ -3775,7 +3879,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.3",
+            "requiredVersion": "0.8.4",
         })
 
         status = subprocess.run(
@@ -3822,9 +3926,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.3")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.4")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.3")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.4")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3832,7 +3936,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.3")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.4")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -3890,7 +3994,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.3"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.4"
         )
         self.assertEqual(
             subprocess.run(
@@ -3898,6 +4002,79 @@ class ControlCenterTests(unittest.TestCase):
                 cwd=managed_path, text=True, capture_output=True, check=True,
             ).stdout,
             "",
+        )
+
+    def test_registered_project_exposes_and_applies_required_webkit_update(self):
+        source = self.root / "registered-update-source"
+        source.mkdir()
+        (source / "index.html").write_text("<title>Registered</title>\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=source, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
+        subprocess.run(["git", "add", "index.html"], cwd=source, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Initial"], cwd=source,
+            check=True, capture_output=True,
+        )
+        with mock.patch.object(self.app.projects, "_find_port_block", return_value=6531):
+            project = self.app.projects.add_existing(str(source), "codex")
+        managed = Path(project["path"])
+        (managed / "webkit" / "VERSION").write_text("0.8.3\n", encoding="utf-8")
+        subprocess.run(["git", "add", "webkit/VERSION"], cwd=managed, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "Downgrade test kit"], cwd=managed,
+            check=True, capture_output=True,
+        )
+        old_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=managed,
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        self.app.projects.integrate_managed_target(project, validated_sha=old_sha)
+
+        listed = next(
+            item for item in self.app.projects.list_projects()
+            if item["id"] == project["id"]
+        )
+        self.assertEqual(listed["webkitUpdate"], {
+            "code": "webkit_update_required",
+            "installedVersion": "0.8.3",
+            "requiredVersion": "0.8.4",
+        })
+
+        active = {
+            "id": "registered-update-active",
+            "projectId": project["id"],
+            "status": "active",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(active)
+        )
+        with self.assertRaisesRegex(ControlCenterError, "active agents"):
+            self.app.projects.add_existing(
+                str(source), "codex", update_webkit=True
+            )
+        self.app.sessions._set_session_status(active["id"], "discarded")
+
+        def copy_working_payload(target):
+            return self.app.projects._copy_missing_tree(KIT_ROOT / "webkit", target)
+
+        with mock.patch.object(
+            self.app.projects,
+            "_copy_current_kit_payload",
+            side_effect=copy_working_payload,
+        ):
+            updated = self.app.projects.add_existing(
+                str(source), "codex", update_webkit=True
+            )
+
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.4")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.4")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.4")
+        self.assertIsNone(
+            next(
+                item for item in self.app.projects.list_projects()
+                if item["id"] == project["id"]
+            )["webkitUpdate"]
         )
 
     def test_kit_update_payload_excludes_untracked_source_files(self):

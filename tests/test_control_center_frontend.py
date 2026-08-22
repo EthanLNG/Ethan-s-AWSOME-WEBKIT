@@ -75,6 +75,7 @@ async function testHomeSelectionPersists() {
     renderProjectView: () => { projectRenders += 1; },
     currentSession: () => null,
     setChatStatus: () => {},
+    refreshChangedPreviewWindows: () => {},
     closeFinishedPreviewWindows: () => {},
   });
   install(ctx, "refreshProjects", "selectProject");
@@ -97,8 +98,10 @@ async function testHomeSelectionPersists() {
 
 async function testFinishedSessionsCloseTheirOwnedPreviewWindows() {
   let closes = 0;
+  const replacements = [];
   const tab = {
     closed: false,
+    location: { replace(url) { replacements.push(url); } },
     close() {
       this.closed = true;
       closes += 1;
@@ -106,10 +109,14 @@ async function testFinishedSessionsCloseTheirOwnedPreviewWindows() {
   };
   const previewTabs = new Map();
   const ctx = context({ previewTabs });
-  install(ctx, "rememberPreviewWindow", "closeFinishedPreviewWindows");
-  const session = { id: "session-a", kind: "color" };
+  install(ctx, "rememberPreviewWindow", "refreshChangedPreviewWindows", "closeFinishedPreviewWindows");
+  const session = { id: "session-a", kind: "color", previewRevision: 0, previewUrl: "http://127.0.0.1:5311/" };
 
   ctx.rememberPreviewWindow(session, tab);
+  ctx.refreshChangedPreviewWindows([{ sessions: [session] }]);
+  assert.equal(replacements.length, 0, "an unchanged preview revision must not reload");
+  ctx.refreshChangedPreviewWindows([{ sessions: [{ ...session, previewRevision: 1 }] }]);
+  assert.deepEqual(replacements, [session.previewUrl], "a changed preview revision must reload the owned tab");
   ctx.closeFinishedPreviewWindows([{ sessions: [session] }]);
   assert.equal(closes, 0, "a live session must keep its preview tab");
   assert.equal(previewTabs.has(session.id), true);
@@ -135,7 +142,7 @@ async function testApiPreservesStructuredErrorDetails() {
         details: {
           code: "webkit_update_required",
           installedVersion: "0.4.1",
-          requiredVersion: "0.8.3",
+          requiredVersion: "0.8.4",
         },
       }),
     }),
@@ -151,7 +158,48 @@ async function testApiPreservesStructuredErrorDetails() {
   assert.equal(failure.status, 409);
   assert.equal(failure.details.code, "webkit_update_required");
   assert.equal(failure.details.installedVersion, "0.4.1");
-  assert.equal(failure.details.requiredVersion, "0.8.3");
+  assert.equal(failure.details.requiredVersion, "0.8.4");
+}
+
+async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
+  const requests = [];
+  const busy = [];
+  const toasts = [];
+  let refreshes = 0;
+  const project = {
+    id: "project-one",
+    path: "/managed/project-one",
+    sourcePath: "/source/project-one",
+    provider: "codex",
+    webkitUpdate: {
+      code: "webkit_update_required",
+      installedVersion: "0.8.3",
+      requiredVersion: "0.8.4",
+    },
+  };
+  const ctx = context({
+    selectedProject: () => project,
+    $: () => ({}),
+    setBusy: (_button, value) => busy.push(value),
+    api: async (path, options) => {
+      requests.push({ path, options });
+      return { project: { webkitUpdated: project.webkitUpdate } };
+    },
+    refreshProjects: async () => { refreshes += 1; },
+    toast: (message) => toasts.push(message),
+  });
+  install(ctx, "updateSelectedProjectWebkit");
+
+  await ctx.updateSelectedProjectWebkit();
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, "/api/projects/existing");
+  assert.equal(requests[0].options.body.path, project.sourcePath);
+  assert.equal(requests[0].options.body.provider, "codex");
+  assert.equal(requests[0].options.body.updateWebkit, true);
+  assert.deepEqual(busy, [true, false]);
+  assert.equal(refreshes, 1);
+  assert.match(toasts[0], /0\.8\.3 to 0\.8\.4/);
 }
 
 async function testChatAsyncWorkStaysWithItsSession() {
@@ -671,7 +719,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
       failure.details = requests.length === 1 ? {
         code: "webkit_update_required",
         installedVersion: "0.4.1",
-        requiredVersion: "0.8.3",
+        requiredVersion: "0.8.4",
       } : {};
       throw failure;
     },
@@ -682,7 +730,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   assert.equal(requests[0].path, "/api/projects/existing");
   assert.equal(requests[0].options.body.updateWebkit, false);
   assert.equal(updatePrompt.hidden, false, "old kits should reveal the inline update action");
-  assert.equal(versions.textContent, "0.4.1 to 0.8.3");
+  assert.equal(versions.textContent, "0.4.1 to 0.8.4");
 
   await ctx.saveProject({ preventDefault() {}, submitter: updateButton });
   assert.equal(requests[1].options.body.updateWebkit, true);
@@ -779,6 +827,7 @@ async function testIssueActionStartsAnUncoloredAgent() {
   await testHomeSelectionPersists();
   await testFinishedSessionsCloseTheirOwnedPreviewWindows();
   await testApiPreservesStructuredErrorDetails();
+  await testRegisteredProjectCanUpdateItsVendoredWebkit();
   await testChatAsyncWorkStaysWithItsSession();
   await testSharedModalCompletionsAreGenerationScoped();
   await testSettingsCompletionIsGenerationScoped();
@@ -796,6 +845,23 @@ async function testIssueActionStartsAnUncoloredAgent() {
 
 
 class ControlCenterFrontendTests(unittest.TestCase):
+    def test_registered_project_update_action_is_visible_in_markup(self):
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('id="updateProjectWebkitButton"', markup)
+        self.assertIn("Update Webkit to ${webkitUpdate.requiredVersion}", source)
+        self.assertIn("Update Webkit first", source)
+
+    def test_completed_agent_thinking_is_collapsible_with_duration(self):
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        self.assertIn('event.kind === "turn_start"', source)
+        self.assertIn('event.kind === "turn_complete"', source)
+        self.assertIn('"Hide" : "View"} thinking', source)
+        self.assertIn("formatThinkingDuration(event.meta?.durationMs)", source)
+        self.assertIn(".thinking-group", styles)
+        self.assertIn(".thinking-events", styles)
+
     def test_project_issue_has_persistent_actionable_markup(self):
         markup = INDEX_HTML.read_text(encoding="utf-8")
         styles = STYLES_CSS.read_text(encoding="utf-8")

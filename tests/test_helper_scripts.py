@@ -1,5 +1,6 @@
 import http.client
 import importlib.util
+import errno
 import json
 import os
 import stat
@@ -105,6 +106,46 @@ class TransitionRoundTests(unittest.TestCase):
             )
             self.assertFalse(request.is_symlink())
             self.assertEqual(json.loads(request.read_text(encoding="utf-8"))["mode"], "complete")
+
+    def test_control_center_queue_tolerates_agent_sandbox_fsync_eperm(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inbox = Path(raw) / "feedback"
+            inbox.mkdir()
+            real_fsync = TRANSITION.os.fsync
+
+            def sandboxed_fsync(descriptor):
+                if stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    raise OSError(errno.EPERM, "Operation not permitted")
+                return real_fsync(descriptor)
+
+            with mock.patch.object(TRANSITION.os, "fsync", side_effect=sandboxed_fsync):
+                TRANSITION.queue_control_center_transition(inbox, {
+                    "version": 1,
+                    "mode": "complete",
+                    "batchId": "batch-1",
+                    "round": 1,
+                })
+
+            queued = json.loads(
+                (inbox / "transition-request.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(queued["mode"], "complete")
+
+    def test_control_center_queue_keeps_real_fsync_failures_fatal(self):
+        with tempfile.TemporaryDirectory() as raw:
+            inbox = Path(raw) / "feedback"
+            inbox.mkdir()
+            with mock.patch.object(
+                TRANSITION.os, "fsync", side_effect=OSError(errno.EIO, "I/O error")
+            ):
+                with self.assertRaisesRegex(ValueError, "could not be queued"):
+                    TRANSITION.queue_control_center_transition(inbox, {
+                        "version": 1,
+                        "mode": "complete",
+                        "batchId": "batch-1",
+                        "round": 1,
+                    })
+            self.assertFalse((inbox / "transition-request.json").exists())
 
     def test_config_requires_a_bounded_stable_regular_file(self):
         with tempfile.TemporaryDirectory() as raw:

@@ -58,9 +58,9 @@ cd ~/Projects/Ethans-AWESOME-WEBKIT
 ./launch-control-center.sh
 ```
 
-The repository also includes `AWESOME WEBKIT.command` for macOS and
-`AWESOME WEBKIT.cmd` for Windows. To install a desktop shortcut from the clone
-on macOS or Linux:
+The repository also includes `AWESOME WEBKIT.command` for direct macOS launch
+and `AWESOME WEBKIT.cmd` for Windows. To install a branded desktop launcher
+from the clone on macOS or Linux:
 
 ```sh
 set -eu

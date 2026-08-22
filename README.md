@@ -18,7 +18,6 @@
   <img src="https://img.shields.io/badge/local--first-111111" alt="Local first">
   <img src="https://img.shields.io/badge/Git--backed-111111" alt="Git backed">
   <img src="https://img.shields.io/badge/token--efficient-111111" alt="Token efficient">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-proprietary-b00020" alt="Proprietary license"></a>
 </p>
 
 **Generate an irresponsible number of designs, stupidly fast. Never get lost.**

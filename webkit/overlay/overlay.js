@@ -2165,7 +2165,7 @@
     abcBody.append(seg, stepRow, promptsBox);
     abcWrap.append(abcHead, abcBody);
 
-    const actions = el('div', 'wk-row wk-actions');
+    const actions = el('div', 'wk-row wk-actions wk-edit-actions');
     const delBtn = el('button', 'wk-btn danger', 'Delete');
     const cancelBtn = el('button', 'wk-btn ghost', 'Cancel');
     const addRectBtn = el('button', 'wk-btn ghost', '+ Rectangle');

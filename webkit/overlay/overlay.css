@@ -536,7 +536,23 @@ input:focus-visible {
 .wk-prompt-in:focus { border-color: var(--wk-accent); box-shadow: 0 0 0 3px var(--wk-accent-soft); }
 
 /* ===== buttons ===== */
-.wk-actions { margin-top: 2px; }
+.wk-edit-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: 6px;
+  margin-top: 2px;
+  min-width: 0;
+}
+.wk-edit-actions > :nth-child(1) { grid-column: 1; }
+.wk-edit-actions > :nth-child(2) { grid-column: 2; }
+.wk-edit-actions > :nth-child(3) { grid-column: 3; }
+.wk-edit-actions > :nth-child(4) { grid-column: 4; }
+.wk-edit-actions > :nth-child(5) { grid-column: 5; }
+.wk-edit-actions .wk-btn {
+  min-width: 0;
+  padding-inline: 8px;
+  white-space: nowrap;
+}
 .wk-btn {
   border-radius: 8px;
   border: 1px solid var(--wk-line);

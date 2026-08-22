@@ -142,7 +142,7 @@ async function testApiPreservesStructuredErrorDetails() {
         details: {
           code: "webkit_update_required",
           installedVersion: "0.4.1",
-          requiredVersion: "0.8.4",
+          requiredVersion: "0.8.5",
         },
       }),
     }),
@@ -158,7 +158,7 @@ async function testApiPreservesStructuredErrorDetails() {
   assert.equal(failure.status, 409);
   assert.equal(failure.details.code, "webkit_update_required");
   assert.equal(failure.details.installedVersion, "0.4.1");
-  assert.equal(failure.details.requiredVersion, "0.8.4");
+  assert.equal(failure.details.requiredVersion, "0.8.5");
 }
 
 async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
@@ -174,7 +174,7 @@ async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
     webkitUpdate: {
       code: "webkit_update_required",
       installedVersion: "0.8.3",
-      requiredVersion: "0.8.4",
+      requiredVersion: "0.8.5",
     },
   };
   const ctx = context({
@@ -199,7 +199,7 @@ async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
   assert.equal(requests[0].options.body.updateWebkit, true);
   assert.deepEqual(busy, [true, false]);
   assert.equal(refreshes, 1);
-  assert.match(toasts[0], /0\.8\.3 to 0\.8\.4/);
+  assert.match(toasts[0], /0\.8\.3 to 0\.8\.5/);
 }
 
 async function testChatAsyncWorkStaysWithItsSession() {
@@ -719,7 +719,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
       failure.details = requests.length === 1 ? {
         code: "webkit_update_required",
         installedVersion: "0.4.1",
-        requiredVersion: "0.8.4",
+        requiredVersion: "0.8.5",
       } : {};
       throw failure;
     },
@@ -730,7 +730,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   assert.equal(requests[0].path, "/api/projects/existing");
   assert.equal(requests[0].options.body.updateWebkit, false);
   assert.equal(updatePrompt.hidden, false, "old kits should reveal the inline update action");
-  assert.equal(versions.textContent, "0.4.1 to 0.8.4");
+  assert.equal(versions.textContent, "0.4.1 to 0.8.5");
 
   await ctx.saveProject({ preventDefault() {}, submitter: updateButton });
   assert.equal(requests[1].options.body.updateWebkit, true);

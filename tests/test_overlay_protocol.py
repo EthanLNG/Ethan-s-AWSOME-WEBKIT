@@ -185,6 +185,14 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
         self.assertIn(".wk-pin.submitted", self.css)
         self.assertIn("'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'", self.source)
 
+    def test_edit_card_actions_stay_inside_the_bounded_card(self):
+        self.assertIn("'wk-row wk-actions wk-edit-actions'", self.source)
+        self.assertIn("grid-template-columns: auto minmax(0, 1fr) auto auto auto", self.css)
+        self.assertIn(".wk-edit-actions .wk-btn", self.css)
+        self.assertIn(".wk-edit-actions > :nth-child(5) { grid-column: 5; }", self.css)
+        self.assertIn("padding-inline: 8px", self.css)
+        self.assertIn("white-space: nowrap", self.css)
+
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):
         self.run_node(
             r"""

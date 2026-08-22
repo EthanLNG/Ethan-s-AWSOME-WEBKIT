@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.5 (2026-08-22): Stable feedback editing
+
+- Kept the four edit-point footer actions inside the bounded feedback card by
+  giving the row an explicit responsive grid and compact button padding.
+- Confirmed that website key handlers are isolated by the v0.8.4 Shadow DOM
+  event boundary. Existing sessions must update their vendored Webkit before
+  they can receive that behavior.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.4 (2026-08-22): Reliable live feedback
 
 - Made sandboxed round-transition queue signals tolerate the known macOS

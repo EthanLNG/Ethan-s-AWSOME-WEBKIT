@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OVERLAY = ROOT / "webkit" / "overlay" / "overlay.js"
 OVERLAY_CSS = ROOT / "webkit" / "overlay" / "overlay.css"
+QA_FIXTURE = ROOT / "tests" / "fixtures" / "overlay-qa.html"
 
 
 class OverlayProtocolTests(unittest.TestCase):
@@ -16,6 +17,7 @@ class OverlayProtocolTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = OVERLAY.read_text(encoding="utf-8")
         cls.css = OVERLAY_CSS.read_text(encoding="utf-8")
+        cls.qa_fixture = QA_FIXTURE.read_text(encoding="utf-8")
         start = cls.source.index("  function isOverlayScript")
         end = cls.source.index("  // ===== end pure protocol helpers")
         cls.pure_helpers = cls.source[start:end]
@@ -192,6 +194,11 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
         self.assertIn(".wk-edit-actions > :nth-child(5) { grid-column: 5; }", self.css)
         self.assertIn("padding-inline: 8px", self.css)
         self.assertIn("white-space: nowrap", self.css)
+
+    def test_browser_fixture_detects_space_leaking_into_the_page(self):
+        self.assertIn("pageSpaceKeydowns: 0", self.qa_fixture)
+        self.assertIn("window.addEventListener('keydown'", self.qa_fixture)
+        self.assertIn("event.code !== 'Space'", self.qa_fixture)
 
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):
         self.run_node(

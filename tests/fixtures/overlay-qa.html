@@ -65,6 +65,7 @@
         reviewNavigationHits: 0,
         reviewRoundOffset: 0,
         stateOverrideResponses: 0,
+        pageSpaceKeydowns: 0,
         resolvePermission: null,
         rejectPermission: null,
         releaseUpload: null,
@@ -88,6 +89,7 @@
         stateOutput.dataset.reviewNavigationHits = String(qa.reviewNavigationHits);
         stateOutput.dataset.reviewRoundOffset = String(qa.reviewRoundOffset);
         stateOutput.dataset.stateOverrideResponses = String(qa.stateOverrideResponses);
+        stateOutput.dataset.pageSpaceKeydowns = String(qa.pageSpaceKeydowns);
         stateOutput.dataset.permissionPending = String(!!qa.resolvePermission);
         stateOutput.dataset.uploadPending = String(!!qa.releaseUpload);
         const overlayRoot = document.querySelector('[data-wk-host]')?.shadowRoot;
@@ -107,9 +109,15 @@
           `unexpected-stops:${qa.unexpectedStops}`,
           `review-nav:${qa.reviewNavigationHits}/${qa.reviewNavigationRequests}`,
           `round-offset:${qa.reviewRoundOffset}`,
+          `page-space:${qa.pageSpaceKeydowns}`,
         ].join(' ');
       };
       paintState();
+      window.addEventListener('keydown', (event) => {
+        if (event.code !== 'Space') return;
+        qa.pageSpaceKeydowns += 1;
+        paintState();
+      });
       const dialog = document.getElementById('test-modal');
       const secondDialog = document.getElementById('test-modal-second');
       const showModal = (target) => { if (!target.open) target.showModal(); };

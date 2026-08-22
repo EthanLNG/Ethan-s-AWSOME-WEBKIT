@@ -1,15 +1,43 @@
-# Ethan's AWESOME WEBKIT
+<p align="center">
+  <img src="control-center/static/brand-icon.svg" width="112" alt="AWESOME WEBKIT logo">
+</p>
 
-[![Quality](https://github.com/EthanLNG/Ethan-s-AWSOME-WEBKIT/actions/workflows/quality.yml/badge.svg)](https://github.com/EthanLNG/Ethan-s-AWSOME-WEBKIT/actions/workflows/quality.yml)
+<h1 align="center">Ethan's AWESOME WEBKIT</h1>
 
-**Live website feedback for coding agents.** Open the real local site, draw a
-rectangle around a problem, type or dictate the change, and send it to Codex or
-Claude Code. The agent applies each point in its own Git commit. You then review
-the exact target with a before/after toggle and accept, delete, or redo it.
+<p align="center">
+  <strong>Design at the speed of AI.</strong><br>
+  The braindead-simple, stupidly-fast visual feedback loop for coding agents.
+</p>
 
-Need choices instead of one answer? A feedback point can request A/B/C variants.
-The agent builds section-scoped alternatives and you switch between them live
-before selecting a winner.
+<p align="center">
+  <code>POINT&nbsp;&nbsp;→&nbsp;&nbsp;DESCRIBE&nbsp;&nbsp;→&nbsp;&nbsp;BUILD&nbsp;&nbsp;→&nbsp;&nbsp;COMPARE&nbsp;&nbsp;→&nbsp;&nbsp;SHIP</code>
+</p>
+
+<p align="center">
+  <a href="https://github.com/EthanLNG/Ethan-s-AWSOME-WEBKIT/actions/workflows/quality.yml"><img src="https://github.com/EthanLNG/Ethan-s-AWSOME-WEBKIT/actions/workflows/quality.yml/badge.svg" alt="Quality"></a>
+  <img src="https://img.shields.io/badge/local--first-111111" alt="Local first">
+  <img src="https://img.shields.io/badge/Git--backed-111111" alt="Git backed">
+  <img src="https://img.shields.io/badge/token--efficient-111111" alt="Token efficient">
+</p>
+
+**Turn a thought into a reviewed website change in one tight loop.** Open the
+real local site, point at exactly what is wrong, type or dictate the fix, and let
+Codex or Claude Code build it. Compare before and after on the live page, then
+accept, redo, delete, or generate alternatives without breaking your flow.
+
+- **Stupidly fast iteration:** visual feedback, agent work, and live review stay
+  in the same loop, so you can move from idea to verified change in moments.
+- **Token-efficient by design:** precise points, rectangles, and page context
+  tell the agent where to work without repeatedly describing the whole screen.
+- **Automatic Git and GitHub safety:** isolated worktrees, point-level commits,
+  guarded merges, and verified pushes keep every iteration traceable and
+  recoverable.
+- **Braindead simple:** point, describe, and review. The Webkit handles branches,
+  preview ports, agent sessions, version control, and cleanup behind the scenes.
+
+Need choices instead of one answer? Request A/B/C variants from any feedback
+point. The agent builds section-scoped alternatives and you switch between them
+live before selecting a winner.
 
 ## What is included
 

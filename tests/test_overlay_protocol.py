@@ -279,15 +279,22 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertNotIn("S.agentWakePending || S.sentVerdicts", self.source)
 
     def test_review_bar_and_variant_chip_stay_compact_until_screen_edge(self):
+        self.assertIn("width: max-content;", self.css)
         self.assertIn("max-width: calc(100vw - 40px);", self.css)
         self.assertIn("left: 20px;", self.css)
         self.assertIn("right: 20px;", self.css)
+        self.assertIn("width: auto;", self.css)
         self.assertIn("wk-chip-dot", self.source)
         self.assertNotIn("wk-chip-flask", self.source)
         self.assertNotIn("wk-chip-cycle", self.source)
 
     def test_redo_can_request_a_fresh_variant_experiment(self):
-        self.assertIn("Generate ' + redoVariantCount + ' variants", self.source)
+        self.assertIn("let redoVariantCount", self.source)
+        self.assertIn("Generate fewer variants", self.source)
+        self.assertIn("Generate more variants", self.source)
+        self.assertIn("Math.max(2, redoVariantCount - 1)", self.source)
+        self.assertIn("Math.min(10, redoVariantCount + 1)", self.source)
+        self.assertIn("variantStep.hidden = !redoVariants", self.source)
         self.assertIn("nextVerdict.redoAbcRequest", self.source)
         self.assertIn("!txt && !redoVoiceNote && !redoVariants", self.source)
 

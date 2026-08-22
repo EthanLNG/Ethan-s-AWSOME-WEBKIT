@@ -3797,7 +3797,7 @@
     const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
     let redoVoiceNote = originalRedoVoiceNote;
     const existingRedoAbc = existing && existing.redoAbcRequest;
-    const redoVariantCount = existingRedoAbc && existingRedoAbc.mode === 'model' &&
+    let redoVariantCount = existingRedoAbc && existingRedoAbc.mode === 'model' &&
       Number.isInteger(existingRedoAbc.count) ? existingRedoAbc.count : 4;
     let redoVariants = !!existingRedoAbc;
     let miniOwner = null;
@@ -3809,22 +3809,46 @@
     micBtn.setAttribute('aria-label', MIC_ARIA_LABEL);
     micBtn.appendChild(microphoneIcon());
     const langSelect = speechLanguageSelect();
-    const variants = el('button', 'wk-btn wk-mini-variants', 'Generate ' + redoVariantCount + ' variants');
+    const variantRow = el('div', 'wk-mini-variant-row');
+    const variants = el('button', 'wk-btn wk-mini-variants', 'Generate variants');
     variants.type = 'button';
-    variants.setAttribute('aria-pressed', String(redoVariants));
-    variants.classList.toggle('active', redoVariants);
-    variants.addEventListener('click', () => {
-      redoVariants = !redoVariants;
+    const variantStep = el('div', 'wk-mini-variant-step');
+    const variantMinus = el('button', 'wk-step', '-');
+    const variantCount = el('span', 'wk-count-n', String(redoVariantCount));
+    const variantPlus = el('button', 'wk-step', '+');
+    variantMinus.type = variantPlus.type = 'button';
+    variantMinus.setAttribute('aria-label', 'Generate fewer variants');
+    variantPlus.setAttribute('aria-label', 'Generate more variants');
+    function paintRedoVariants() {
       variants.setAttribute('aria-pressed', String(redoVariants));
       variants.classList.toggle('active', redoVariants);
+      variantStep.hidden = !redoVariants;
+      variantCount.textContent = String(redoVariantCount);
+      variantMinus.disabled = redoVariantCount <= 2;
+      variantPlus.disabled = redoVariantCount >= 10;
+    }
+    variants.addEventListener('click', () => {
+      redoVariants = !redoVariants;
+      paintRedoVariants();
     });
+    variantMinus.addEventListener('click', () => {
+      redoVariantCount = Math.max(2, redoVariantCount - 1);
+      paintRedoVariants();
+    });
+    variantPlus.addEventListener('click', () => {
+      redoVariantCount = Math.min(10, redoVariantCount + 1);
+      paintRedoVariants();
+    });
+    variantStep.append(variantMinus, variantCount, variantPlus);
+    variantRow.append(variants, variantStep);
+    paintRedoVariants();
     const cancel = el('button', 'wk-btn ghost', 'Cancel');
     const save = el('button', 'wk-btn primary', 'Redo it');
     micBtn.type = cancel.type = save.type = 'button';
     row.append(ta, langSelect, micBtn);
     const actions = el('div', 'wk-row wk-actions');
     actions.append(el('span', 'wk-spacer'), cancel, save);
-    node.append(label, row, variants, actions);
+    node.append(label, row, variantRow, actions);
     wrap.appendChild(node);
     const mic = DICTATION_MODE === 'voice-note'
       ? makeVoiceRecorder(micBtn, langSelect, (note) => {

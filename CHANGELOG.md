@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.11 (2026-08-22): Flexible redo variants
+
+- Made the number of variants requested from Redo adjustable from 2 to 10,
+  with the saved selection restored when a verdict is edited.
+- Kept the review control pill on one line until its content genuinely reaches
+  the 20px viewport margin, then retained the compact narrow-screen layout.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.10 (2026-08-22): Reliable agent and review lifecycle
 
 - Initialized every colored agent with hidden, read-only Webkit context as soon

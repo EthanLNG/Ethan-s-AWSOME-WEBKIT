@@ -647,6 +647,7 @@ input:focus-visible {
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%);
+  width: max-content;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -862,6 +863,9 @@ input:focus-visible {
 .wk-mini-variants { align-self: flex-start; border-radius: 999px; color: var(--wk-accent); }
 .wk-mini-variants:hover { border-color: var(--wk-accent); background: var(--wk-accent-soft); }
 .wk-mini-variants.active { border-color: var(--wk-accent); background: var(--wk-accent); color: #fff; }
+.wk-mini-variant-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wk-mini-variant-step { display: inline-flex; align-items: center; gap: 6px; }
+.wk-mini-variant-step .wk-step:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ===== toasts ===== */
 .wk-toasts {
@@ -929,6 +933,7 @@ input:focus-visible {
   .wk-bar {
     left: 20px;
     right: 20px;
+    width: auto;
     transform: none;
     max-width: none;
     bottom: 60px;

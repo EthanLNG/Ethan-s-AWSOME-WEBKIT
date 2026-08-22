@@ -276,6 +276,25 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertIn("if (document.hidden) schedulePoll(true)", self.source)
         self.assertIn("S.agentWakePending = true", self.source)
         self.assertIn("if (S.reviewing) S.sentVerdicts = S.phase !== 'reviewing'", self.source)
+        self.assertNotIn("S.agentWakePending || S.sentVerdicts", self.source)
+
+    def test_review_bar_and_variant_chip_stay_compact_until_screen_edge(self):
+        self.assertIn("max-width: calc(100vw - 40px);", self.css)
+        self.assertIn("left: 20px;", self.css)
+        self.assertIn("right: 20px;", self.css)
+        self.assertIn("wk-chip-dot", self.source)
+        self.assertNotIn("wk-chip-flask", self.source)
+        self.assertNotIn("wk-chip-cycle", self.source)
+
+    def test_redo_can_request_a_fresh_variant_experiment(self):
+        self.assertIn("Generate ' + redoVariantCount + ' variants", self.source)
+        self.assertIn("nextVerdict.redoAbcRequest", self.source)
+        self.assertIn("!txt && !redoVoiceNote && !redoVariants", self.source)
+
+    def test_current_review_rectangle_stays_above_overlapping_points(self):
+        self.assertIn(".wk-pin-rect.review.current", self.css)
+        self.assertIn("z-index: 3;", self.css)
+        self.assertIn(".wk-pin.review.current { z-index: 4;", self.css)
 
     def test_review_feedback_waits_for_explicit_send_and_stays_deletable(self):
         done_start = self.source.index("doneBtn.addEventListener('click'")

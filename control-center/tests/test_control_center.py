@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.9")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.10")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2756,6 +2756,14 @@ class ControlCenterTests(unittest.TestCase):
             session = self.app.sessions.start_session(project["id"], color)
 
         self.assertEqual(session["status"], "active")
+        runtime = self.app.sessions.runtimes[session["id"]]
+        bootstrap_job = runtime.jobs.get_nowait()
+        self.assertEqual(bootstrap_job["source"], "bootstrap")
+        self.assertFalse(bootstrap_job["show_prompt"])
+        self.assertFalse(bootstrap_job["show_turn"])
+        self.assertFalse(bootstrap_job["show_agent_output"])
+        self.assertIn("visual design system", bootstrap_job["prompt"])
+        self.assertIn("frame-aware", bootstrap_job["prompt"])
         self.assertEqual(
             (Path(project["path"]) / "remote-note.txt").read_text(encoding="utf-8"),
             "collaborator update\n",
@@ -2884,6 +2892,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(saved["status"], "error")
         self.assertIn("without advancing", saved["error"])
         events = runtime.log.read_after(0)["events"]
+        self.assertFalse(any("feedback.json" in event.get("text", "") for event in events))
         self.assertEqual(events[-1]["kind"], "turn_complete")
         self.assertEqual(events[-1]["meta"]["outcome"], "failed")
 
@@ -3207,6 +3216,33 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(
             self.app.sessions._get_session(session["id"])["previewRevision"], 2
         )
+
+    def test_bootstrap_context_runs_without_appearing_in_chat(self):
+        session = {
+            "id": "silent-bootstrap-session",
+            "worktree": str(self.root),
+            "color": "blue",
+            "emoji": "🔵",
+            "status": "active",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
+        runtime = SessionRuntime(self.app.sessions, session)
+        runtime.enqueue(
+            "private initialization context",
+            "bootstrap",
+            show_prompt=False,
+            show_turn=False,
+            show_agent_output=False,
+        )
+        runtime.jobs.put(None)
+        runner = mock.Mock()
+        with mock.patch("control_center.ProviderRunner", return_value=runner) as provider:
+            runtime._work_loop()
+        runner.run.assert_called_once_with("private initialization context")
+        self.assertTrue(provider.call_args.kwargs["read_only"])
+        self.assertEqual(runtime.log.read_after(0)["events"], [])
 
     def test_preview_uses_a_bounded_pipe_drain_and_instance_identity(self):
         worktree = self.root / "preview-worktree"
@@ -3666,6 +3702,14 @@ class ControlCenterTests(unittest.TestCase):
         self.assertFalse(result["agentManaged"])
         self.assertTrue(result["controllerManaged"])
         runtime.enqueue.assert_called_once()
+        merge_call = runtime.enqueue.call_args
+        self.assertEqual(merge_call.args[1], "merge")
+        self.assertIn("Validate our work", merge_call.args[0])
+        self.assertEqual(
+            merge_call.kwargs["display"],
+            "Merge in progress. I will let you know when it is ready.",
+        )
+        self.assertEqual(merge_call.kwargs["display_role"], "user")
         marker = worktree / ".webkit" / "control-center-merge.json"
         marker.parent.mkdir(exist_ok=True)
         marker.write_text('{"status":"ready","message":"ready"}', encoding="utf-8")
@@ -3879,7 +3923,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.9",
+            "requiredVersion": "0.8.10",
         })
 
         status = subprocess.run(
@@ -3926,9 +3970,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.9")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.10")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.9")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.10")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3936,7 +3980,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.9")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.10")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -3994,7 +4038,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.9"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.10"
         )
         self.assertEqual(
             subprocess.run(
@@ -4038,7 +4082,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.9",
+            "requiredVersion": "0.8.10",
         })
 
         active = {
@@ -4067,9 +4111,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.9")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.9")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.9")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.10")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.10")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.10")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()
@@ -4570,6 +4614,27 @@ class ControlCenterTests(unittest.TestCase):
         self.assertTrue(runtime.claimed_lock.exists())
         self.app.sessions._release(runtime)
         self.assertFalse(Path(config["lock_dir"]).joinpath("blue.lock").exists())
+
+    def test_release_closes_the_owned_external_preview_tab(self):
+        worktree = self.root / "close-preview-worktree"
+        script = worktree / "webkit" / "scripts" / "open-preview.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+        session = {
+            "id": "close-preview", "worktree": str(worktree), "color": "red",
+            "emoji": "🔴", "previewUrl": "http://127.0.0.1:6539/index.html",
+        }
+        runtime = SessionRuntime(self.app.sessions, session)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch("control_center.run_command", return_value=completed) as run:
+            self.app.sessions._close_preview_tab(runtime)
+        run.assert_called_once_with(
+            [str(script), "--close", session["previewUrl"]],
+            cwd=worktree,
+            check=False,
+            timeout=15,
+        )
 
     def test_generic_merge_rejects_seed_sessions(self):
         session = {

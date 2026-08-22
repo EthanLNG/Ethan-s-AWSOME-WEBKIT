@@ -73,17 +73,28 @@ exit; never merge or discard the controller-owned branch yourself.
 """
 
 
-CONTROL_CENTER_PROMPT = """You are the {emoji} ({color}) AWESOME WEBKIT background agent.
+CONTROL_CENTER_BOOT_PROMPT = """You are the {emoji} ({color}) AWESOME WEBKIT background agent.
 You are already running inside this color's isolated Git worktree. The local
 Control Center owns the preview process, color lock, browser tab, and waiting.
 
-Read webkit/CONTROL-CENTER.md and webkit/LOOP.md, then process exactly the
-current Webkit state transition in .webkit/feedback/{color}/. If feedback.json
-is awaiting the agent, apply the points, commit one point at a time, publish an
-atomic review.json, and then exit. If verdicts.json is present, process the
-verdicts, archive the round correctly, and then exit. Do not run wait-for-file,
-do not merge to any target branch, do not discard the worktree, and do not open another
-agent app. The controller will invoke you again for the next transition.
+Before website work, read webkit/CONTROL-CENTER.md and webkit/LOOP.md and obey
+their finite-transition protocol. Keep every website change aligned with the
+site's existing visual design system and frame-aware, so local edits remain
+coherent with the full scene visible on screen. Do not run wait-for-file, merge
+to a target branch, discard the worktree, or open another agent app. The
+controller owns those lifecycle actions and will invoke you for each transition.
+
+Initialize this session context now without changing files, then wait for a
+specific task or Webkit transition.
+"""
+
+
+CONTROL_CENTER_PROMPT = """Process exactly the current Webkit state transition in
+`{inbox}/`. Re-read webkit/CONTROL-CENTER.md and webkit/LOOP.md first. If
+feedback.json is awaiting the agent, apply the points, commit one point at a
+time, publish an atomic review.json, and then exit. If verdicts.json is present,
+process the verdicts, archive the round correctly, and then exit. Follow the
+session context and do not perform controller-owned lifecycle actions.
 """
 
 
@@ -6742,12 +6753,16 @@ class ProjectManager:
 
 
 class ProviderRunner:
-    def __init__(self, session, event_log, persist_thread, set_process, allow_git=False):
+    def __init__(
+        self, session, event_log, persist_thread, set_process,
+        allow_git=False, read_only=False,
+    ):
         self.session = session
         self.event_log = event_log
         self.persist_thread = persist_thread
         self.set_process = set_process
         self.allow_git = allow_git
+        self.read_only = read_only
 
     def _codex_git_write_dirs(self):
         worktree = Path(self.session["worktree"]).resolve()
@@ -6805,7 +6820,8 @@ class ProviderRunner:
             if not executable:
                 raise ControlCenterError("Codex CLI is not installed.", 409)
             command = [
-                executable, "exec", "--json", "--sandbox", "workspace-write",
+                executable, "exec", "--json", "--sandbox",
+                "read-only" if self.read_only else "workspace-write",
             ]
             if self.allow_git:
                 for path in self._codex_git_write_dirs():
@@ -6825,7 +6841,8 @@ class ProviderRunner:
                 self.persist_thread(thread_id)
             command = [
                 executable, "-p", "--output-format", "stream-json", "--verbose",
-                "--permission-mode", "auto", "--effort", reasoning,
+                "--permission-mode", "plan" if self.read_only else "auto",
+                "--effort", reasoning,
             ]
             if self.session.get("hasRun"):
                 command.extend(["--resume", thread_id])
@@ -7108,6 +7125,14 @@ class BoundedPreviewLog:
             self.thread.join(timeout=1)
 
 
+class DiscardingEventLog:
+    """Provider event sink for silent session initialization."""
+
+    @staticmethod
+    def append(*_args, **_kwargs):
+        return None
+
+
 class SessionRuntime:
     def __init__(self, manager, session):
         self.manager = manager
@@ -7140,19 +7165,25 @@ class SessionRuntime:
         if self.session.get("kind") != "support":
             self.watcher.start()
 
-    def enqueue(self, prompt, source, display=None):
+    def enqueue(
+        self, prompt, source, display=None, display_role=None,
+        show_prompt=True, show_turn=True, show_agent_output=True,
+    ):
         with self.enqueue_lock:
             if self.stop_event.is_set():
                 raise ControlCenterError("That session is stopping and cannot accept more work.", 409)
-            self.jobs.put({"prompt": prompt, "source": source, "display": display})
+            self.jobs.put({
+                "prompt": prompt,
+                "source": source,
+                "display": display,
+                "display_role": display_role,
+                "show_prompt": bool(show_prompt),
+                "show_turn": bool(show_turn),
+                "show_agent_output": bool(show_agent_output),
+            })
 
     def _feedback_prompt(self, inbox):
-        return CONTROL_CENTER_PROMPT.format(
-            emoji=self.session["emoji"], color=self.session["color"]
-        ).replace(
-            ".webkit/feedback/{}/".format(self.session["color"]),
-            str(inbox) + "/",
-        )
+        return CONTROL_CENTER_PROMPT.format(inbox=str(inbox))
 
     def _feedback_job_locked(self):
         if (
@@ -7168,6 +7199,7 @@ class SessionRuntime:
             "prompt": self._feedback_prompt(self.feedback_latest_inbox),
             "source": "feedback",
             "display": None,
+            "show_prompt": False,
             "feedback_inbox": self.feedback_latest_inbox,
             "feedback_key": self.feedback_latest_key,
             "feedback_revision": self.feedback_revision,
@@ -7228,18 +7260,24 @@ class SessionRuntime:
                     self.session["id"],
                     "merging" if job["source"] in ("merge", "seed-finalize") else "busy",
                 )
-                shown = job["display"] if job.get("display") is not None else job["prompt"]
-                self.log.append("user" if job["source"] == "chat" else "system", shown, job["source"])
+                if job.get("show_prompt", True):
+                    shown = job["display"] if job.get("display") is not None else job["prompt"]
+                    display_role = job.get("display_role")
+                    if display_role not in ("user", "system"):
+                        display_role = "user" if job["source"] == "chat" else "system"
+                    self.log.append(display_role, shown, job["source"])
                 turn_started = time.monotonic()
-                self.log.append(
-                    "system", "", "turn_start", {"source": job["source"]}
-                )
+                if job.get("show_turn", True):
+                    self.log.append(
+                        "system", "", "turn_start", {"source": job["source"]}
+                    )
                 runner = ProviderRunner(
                     self.session,
-                    self.log,
+                    self.log if job.get("show_agent_output", True) else DiscardingEventLog(),
                     lambda thread_id: self.manager._set_thread(self.session["id"], thread_id),
                     self._set_process,
                     allow_git=job["source"] in ("chat", "feedback"),
+                    read_only=job["source"] == "bootstrap",
                 )
                 turn_outcome = "completed"
                 try:
@@ -7294,15 +7332,16 @@ class SessionRuntime:
                             "message": str(exc),
                         })
                 finally:
-                    self.log.append(
-                        "system", "", "turn_complete", {
-                            "source": job["source"],
-                            "outcome": turn_outcome,
-                            "durationMs": max(
-                                0, int(round((time.monotonic() - turn_started) * 1000))
-                            ),
-                        }
-                    )
+                    if job.get("show_turn", True):
+                        self.log.append(
+                            "system", "", "turn_complete", {
+                                "source": job["source"],
+                                "outcome": turn_outcome,
+                                "durationMs": max(
+                                    0, int(round((time.monotonic() - turn_started) * 1000))
+                                ),
+                            }
+                        )
             finally:
                 if filesystem_feedback:
                     self._finish_feedback_job()
@@ -7807,6 +7846,15 @@ class SessionManager:
             self.runtimes[session_id] = runtime
             runtime.log.append("system", "{} {} session started in an isolated worktree.".format(entry["emoji"], provider), "status")
             runtime.start()
+            runtime.enqueue(
+                CONTROL_CENTER_BOOT_PROMPT.format(
+                    emoji=session["emoji"], color=session["color"]
+                ),
+                "bootstrap",
+                show_prompt=False,
+                show_turn=False,
+                show_agent_output=False,
+            )
             return public_session(session)
 
     def start_issue_session(
@@ -9077,7 +9125,12 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             marker=str(marker),
         )
         self._set_session_status(session_id, "merging")
-        runtime.enqueue(prompt, "merge")
+        runtime.enqueue(
+            prompt,
+            "merge",
+            display="Merge in progress. I will let you know when it is ready.",
+            display_role="user",
+        )
         return {"queued": True, "agentManaged": False, "controllerManaged": True}
 
     @staticmethod
@@ -9441,9 +9494,46 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             self.projects.unlink_project_issue_session(project["id"], session_id)
         return {"discarded": True}
 
+    @staticmethod
+    def _close_preview_tab(runtime):
+        session = runtime.session
+        if session.get("kind") == "support" or not session.get("previewUrl"):
+            return
+        worktree = Path(session.get("worktree", ""))
+        if not worktree.is_dir():
+            return
+        try:
+            script = safe_project_target(
+                worktree, worktree / "webkit" / "scripts" / "open-preview.sh"
+            )
+        except (ControlCenterError, OSError, ValueError):
+            return
+        if not script.is_file() or script.is_symlink():
+            return
+        try:
+            result = run_command(
+                [str(script), "--close", session["previewUrl"]],
+                cwd=worktree,
+                check=False,
+                timeout=15,
+            )
+            if result.returncode != 0:
+                runtime.log.append(
+                    "system",
+                    "The finished preview tab could not be closed automatically.",
+                    "status",
+                )
+        except ControlCenterError:
+            runtime.log.append(
+                "system",
+                "The finished preview tab could not be closed automatically.",
+                "status",
+            )
+
     def _release(self, runtime):
         session = runtime.session
         try:
+            self._close_preview_tab(runtime)
             runtime.stop()
             lock = runtime.claimed_lock
             owner = runtime.claimed_owner

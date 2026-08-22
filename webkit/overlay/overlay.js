@@ -2782,7 +2782,7 @@
     clearInterval(tabTitleTimer);
     tabTitleTimer = 0;
     tabTitleTick = 0;
-    const mode = S.agentWakePending || S.sentVerdicts
+    const mode = S.agentWakePending
       ? 'working'
       : tabActivityMode(S.phase);
     if (mode === 'normal' || (mode === 'review-ready' && !document.hidden)) {
@@ -2805,7 +2805,7 @@
 
   function schedulePoll(reset) {
     clearTimeout(pollT);
-    const activity = S.agentWakePending || S.sentVerdicts
+    const activity = S.agentWakePending
       ? 'working'
       : tabActivityMode(S.phase);
     const delay = tabPollDelay(activity, S.mode, document.hidden);
@@ -3594,23 +3594,19 @@
     return scopeId ? (window.__abc?.get?.(scopeId) || null) : null;
   }
 
-  // The chip is the ONLY variant switcher on screen during review, so it has to
-  // read as a real button rather than the flat status pill it used to be:
-  // flask · the current letter, large · the whole letter run with the live one
-  // lit · a cycle glyph that says "clicking me advances this".
+  // The chip is the only variant switcher on screen during review. Keep it
+  // compact: the active letter plus one dot for each available variant.
   function paintAbcChip(letter, letters) {
     B.abcChip.textContent = '';
-    B.abcChip.append(el('span', 'wk-chip-flask', '⚗'), el('span', 'wk-chip-letter', String(letter)));
-    // the run only earns its width while it's short - /ABC allows up to 10
-    // variants, and ten pips would push the review bar into a second row
-    if (letters && letters.length > 1 && letters.length <= 5) {
+    B.abcChip.append(el('span', 'wk-chip-letter', String(letter)));
+    if (letters && letters.length > 1) {
       const run = el('span', 'wk-chip-run');
-      for (const L of letters) run.appendChild(el('span', 'wk-chip-l' + (L === letter ? ' on' : ''), L));
+      run.setAttribute('aria-hidden', 'true');
+      for (const L of letters) {
+        run.appendChild(el('span', 'wk-chip-dot' + (L === letter ? ' on' : '')));
+      }
       B.abcChip.appendChild(run);
-    } else if (letters && letters.length > 5) {
-      B.abcChip.appendChild(el('span', 'wk-chip-of', 'of ' + letters.length));
     }
-    B.abcChip.appendChild(el('span', 'wk-chip-cycle', '⟳'));
   }
 
   function updateBar() {
@@ -3800,6 +3796,10 @@
     ta.value = (existing && existing.redoText) || '';
     const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
     let redoVoiceNote = originalRedoVoiceNote;
+    const existingRedoAbc = existing && existing.redoAbcRequest;
+    const redoVariantCount = existingRedoAbc && existingRedoAbc.mode === 'model' &&
+      Number.isInteger(existingRedoAbc.count) ? existingRedoAbc.count : 4;
+    let redoVariants = !!existingRedoAbc;
     let miniOwner = null;
     let saveBusy = false;
     let closed = false;
@@ -3809,13 +3809,22 @@
     micBtn.setAttribute('aria-label', MIC_ARIA_LABEL);
     micBtn.appendChild(microphoneIcon());
     const langSelect = speechLanguageSelect();
+    const variants = el('button', 'wk-btn wk-mini-variants', 'Generate ' + redoVariantCount + ' variants');
+    variants.type = 'button';
+    variants.setAttribute('aria-pressed', String(redoVariants));
+    variants.classList.toggle('active', redoVariants);
+    variants.addEventListener('click', () => {
+      redoVariants = !redoVariants;
+      variants.setAttribute('aria-pressed', String(redoVariants));
+      variants.classList.toggle('active', redoVariants);
+    });
     const cancel = el('button', 'wk-btn ghost', 'Cancel');
     const save = el('button', 'wk-btn primary', 'Redo it');
     micBtn.type = cancel.type = save.type = 'button';
     row.append(ta, langSelect, micBtn);
     const actions = el('div', 'wk-row wk-actions');
     actions.append(el('span', 'wk-spacer'), cancel, save);
-    node.append(label, row, actions);
+    node.append(label, row, variants, actions);
     wrap.appendChild(node);
     const mic = DICTATION_MODE === 'voice-note'
       ? makeVoiceRecorder(micBtn, langSelect, (note) => {
@@ -3863,9 +3872,13 @@
           return;
         }
         const txt = ta.value.trim();
-        if (!txt && !redoVoiceNote) { ta.focus(); return; }
+        if (!txt && !redoVoiceNote && !redoVariants) { ta.focus(); return; }
         close(false);
-        const saved = recordVerdict({ verdict: 'redo', redoText: txt, redoVoiceNote }, target);
+        const nextVerdict = { verdict: 'redo', redoText: txt, redoVoiceNote };
+        if (redoVariants) {
+          nextVerdict.redoAbcRequest = { mode: 'model', count: redoVariantCount };
+        }
+        const saved = recordVerdict(nextVerdict, target);
         if (!saved && redoVoiceNote?.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
       } finally {
         saveBusy = false;

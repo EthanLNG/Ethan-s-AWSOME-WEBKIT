@@ -1175,10 +1175,12 @@ class PreviewServerTests(unittest.TestCase):
         invalid_items = (
             {"pointId": "point-1", "verdict": "accept", "chosenLetter": "A"},
             {"pointId": "point-1", "verdict": "accept", "redoText": "again"},
+            {"pointId": "point-1", "verdict": "accept", "redoAbcRequest": {"mode": "model", "count": 4}},
             {"pointId": "point-1", "verdict": "delete", "chosenLetter": "A"},
             {"pointId": "point-1", "verdict": "delete", "redoVoiceNote": None},
             {"pointId": "point-1", "verdict": "redo", "redoText": 3},
             {"pointId": "point-1", "verdict": "redo", "redoText": "x" * 10001},
+            {"pointId": "point-1", "verdict": "redo", "redoAbcRequest": {"mode": "model", "count": 1}},
         )
         for item in invalid_items:
             with self.subTest(item=item):
@@ -1208,6 +1210,18 @@ class PreviewServerTests(unittest.TestCase):
         accepted["verdicts"][0]["chosenLetter"] = "B"
         status, _, _ = self.post_json("/__wk/verdicts", accepted)
         self.assertEqual(status, 200)
+
+    def test_redo_accepts_a_valid_fresh_variant_request(self):
+        self.write_data("feedback.json", self.batch())
+        self.write_data("review.json", self.review())
+        value = self.verdicts((("point-1", "redo"),))
+        value["verdicts"][0]["redoAbcRequest"] = {"mode": "model", "count": 4}
+        status, _, payload = self.post_json("/__wk/verdicts", value)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            self.read_data("verdicts.json")["verdicts"][0]["redoAbcRequest"],
+            {"mode": "model", "count": 4},
+        )
 
     def test_redo_accepts_multiline_human_text_and_rejects_controls(self):
         self.write_data("feedback.json", self.batch())

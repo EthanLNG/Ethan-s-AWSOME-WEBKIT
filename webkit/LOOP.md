@@ -380,7 +380,8 @@ Read `"$inbox/verdicts.json"`. Full schema:
       "verdict": "accept",        // "accept" | "delete" | "redo"
       "chosenLetter": "C",        // present iff accepting an abc point; the winner
       "redoText": "try a warmer palette", // may be empty with a voice note
-      "redoVoiceNote": null        // same shape and local-transcription rule as point.voiceNote
+      "redoVoiceNote": null,       // same shape and local-transcription rule as point.voiceNote
+      "redoAbcRequest": {"mode": "model", "count": 4} // optional fresh variants
     }
   ]
 }
@@ -426,6 +427,10 @@ Per verdict:
   Re-edit per that transcript plus `redoText` (a correction on top of your
   attempt; do not revert first unless the redo text says to start over), make
   new commit(s), and use the same message format with the **next** round number.
+  When `redoAbcRequest` is present, use the abc skill to turn this redo into a
+  fresh canonical variant experiment using that request. Safely remove any
+  earlier experiment for the point first, then record the new `handled: "abc"`
+  metadata in the next review.
 
 ## Step 9: ROUND TRANSITION
 
@@ -487,8 +492,9 @@ the supplied one.
    webkit/scripts/transition-round.py <slug> complete <batchId> <round>
    ```
 
-   The server archives all three live files and returns to `collecting`; the
-   overlay then posts any points queued during review as a fresh batch.
+   The server archives all three live files and returns to `collecting`.
+   Points queued during review stay saved in the overlay until the user sends
+   them as a fresh batch.
 2. Confirm the working tree is clean (commit any strays; there should not be
    any if you followed step 4).
 3. Loop to step 1 and **re-read this file first**.

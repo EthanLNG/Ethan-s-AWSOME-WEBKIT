@@ -139,7 +139,13 @@ input:focus-visible {
   border-color: var(--wk-accent);
   background: var(--wk-accent-soft);
 }
-.wk-pin-rect.review.current { border-width: 2px; border-color: var(--wk-accent); }
+.wk-pin-rect.review:not(.current) { opacity: 0.42; }
+.wk-pin-rect.review.current {
+  z-index: 3;
+  border-width: 2.5px;
+  border-color: var(--wk-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--wk-accent) 16%, transparent);
+}
 .wk-pin {
   position: absolute;
   left: 0;
@@ -163,7 +169,8 @@ input:focus-visible {
 .wk-pin:hover { z-index: 3; }
 .wk-pin.submitted { border-color: var(--wk-accent); color: var(--wk-accent); cursor: pointer; }
 .wk-pin.review { border-color: var(--wk-accent); color: var(--wk-accent); }
-.wk-pin.review.current { background: var(--wk-accent); color: #fff; }
+.wk-pin.review:not(.current) { opacity: 0.68; }
+.wk-pin.review.current { z-index: 4; background: var(--wk-accent); color: #fff; }
 .wk-pin.verdicted.v-accept { border-color: var(--wk-ok); color: var(--wk-ok); }
 .wk-pin.verdicted.v-redo { border-color: var(--wk-warn); color: var(--wk-warn); }
 .wk-pin.verdicted.v-delete { border-color: var(--wk-muted); color: var(--wk-muted); opacity: 0.75; }
@@ -643,7 +650,8 @@ input:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  max-width: calc(100vw - 210px);   flex-wrap: wrap;
+  max-width: calc(100vw - 40px);
+  flex-wrap: wrap;
   justify-content: center;
   background: var(--wk-paper);
   border: 1.5px solid var(--wk-ink);
@@ -717,12 +725,7 @@ input:focus-visible {
 .wk-dot-i.v-redo::before { background: var(--wk-warn); border-color: var(--wk-warn); }
 .wk-dot-i.v-delete::before { background: var(--wk-muted); border-color: var(--wk-muted); }
 
-/* ===== A/B variants pill (the ONLY variant switcher shown during review) =====
- * overlay.js hides the page's own .abc-switch button for the scope under
- * review, so this chip carries the whole job: it must read as a pressable
- * control, not a status label. Hence the raised surface, the oversized current
- * letter, the full letter run with the live one lit, and a ⟳ that spins on
- * hover - "click me and the variant changes" has to be legible at a glance. */
+/* ===== A/B variants pill (the ONLY variant switcher shown during review) ===== */
 .wk-abc-chip {
   position: absolute;
   left: 50%;
@@ -738,7 +741,7 @@ input:focus-visible {
   color: var(--wk-accent);
   border-radius: 999px;
   font: 700 12px/1 var(--wk-font);
-  padding: 5px 6px 5px 10px;
+  padding: 6px 10px;
   cursor: pointer;
   white-space: nowrap;
   box-shadow: var(--wk-shadow-soft);
@@ -747,40 +750,21 @@ input:focus-visible {
 }
 .wk-abc-chip:hover { background: var(--wk-accent-soft); box-shadow: var(--wk-shadow); }
 .wk-abc-chip:active { transform: translateX(-50%) translateY(1px); box-shadow: var(--wk-shadow-soft); }
-.wk-abc-chip .wk-chip-flask { font-size: 13px; opacity: 0.85; }
 .wk-abc-chip .wk-chip-letter {
   font: 800 15px/1 var(--wk-font);
   letter-spacing: 0.01em;
   min-width: 11px;
   text-align: center;
 }
-/* the run of available letters - shows at a glance that there ARE others */
-.wk-abc-chip .wk-chip-run { display: inline-flex; gap: 2px; }
-.wk-abc-chip .wk-chip-l {
-  font: 700 9px/13px var(--wk-font);
-  min-width: 13px;
-  height: 13px;
-  text-align: center;
-  border-radius: 4px;
-  color: var(--wk-muted);
-  background: rgba(15, 23, 42, 0.05);
-}
-.wk-abc-chip .wk-chip-l.on { color: #fff; background: var(--wk-accent); }
-.wk-abc-chip .wk-chip-of { font: 600 10px/1 var(--wk-font); color: var(--wk-muted); }
-.wk-abc-chip .wk-chip-cycle {
-  font-size: 13px;
-  line-height: 1;
-  width: 20px;
-  height: 20px;
+.wk-abc-chip .wk-chip-run { display: inline-flex; align-items: center; gap: 4px; }
+.wk-abc-chip .wk-chip-dot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--wk-accent);
-  color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 0.3s ease;
+  border: 1px solid var(--wk-accent);
+  background: transparent;
 }
-.wk-abc-chip:hover .wk-chip-cycle { transform: rotate(180deg); }
+.wk-abc-chip .wk-chip-dot.on { background: var(--wk-accent); transform: scale(1.3); }
 .wk-abc-chip.disabled {
   border-color: var(--wk-line);
   background: transparent;
@@ -788,10 +772,6 @@ input:focus-visible {
   cursor: default;
   box-shadow: none;
 }
-.wk-abc-chip.disabled .wk-chip-cycle,
-.wk-abc-chip.error .wk-chip-cycle { background: transparent; color: inherit; }
-.wk-abc-chip.disabled:hover .wk-chip-cycle,
-.wk-abc-chip.error:hover .wk-chip-cycle { transform: none; }
 .wk-abc-chip.error {
   border-color: var(--wk-danger);
   background: rgba(220, 38, 38, 0.08);
@@ -879,6 +859,9 @@ input:focus-visible {
 .wk-mini-ta { min-height: 48px; flex: 1; }
 .wk-mini .wk-row { align-items: flex-start; }
 .wk-mini .wk-mic, .wk-mini .wk-speech-lang { margin-top: 2px; }
+.wk-mini-variants { align-self: flex-start; border-radius: 999px; color: var(--wk-accent); }
+.wk-mini-variants:hover { border-color: var(--wk-accent); background: var(--wk-accent-soft); }
+.wk-mini-variants.active { border-color: var(--wk-accent); background: var(--wk-accent); color: #fff; }
 
 /* ===== toasts ===== */
 .wk-toasts {
@@ -940,17 +923,12 @@ input:focus-visible {
 .wk-toast-x:hover { color: var(--wk-ink); }
 
 /* ===== small viewports (phones / narrow responsive checks) =====
- * Centered at bottom:14px with max-width:calc(100vw-210px), the review bar
- * collapses to a narrow pill on a ~375px screen: it overlaps the send button
- * (left:106px) and wraps its ~12 children into a tall blob over the lower
- * viewport. Dock it full-width ABOVE the corner row instead (that row occupies
- * y=14..50; bottom:60px clears it). The card is a fixed 320px, wider than a
- * ~336px viewport once positionCard clamps it - let it shrink to fit; the JS
- * clamp measures offsetWidth so it self-corrects. */
+ * Move the review bar above the corner controls once it needs the narrow-screen
+ * layout. Keep 20px of breathing room on both sides before content wraps. */
 @media (max-width: 560px) {
   .wk-bar {
-    left: 8px;
-    right: 8px;
+    left: 20px;
+    right: 20px;
     transform: none;
     max-width: none;
     bottom: 60px;

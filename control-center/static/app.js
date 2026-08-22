@@ -834,10 +834,19 @@ function renderChatEvent(event, target) {
   if (event.kind === "turn_start") {
     const details = document.createElement("details");
     details.className = "thinking-group";
-    details.open = true;
+    details.open = false;
     const summary = document.createElement("summary");
     const label = document.createElement("span");
-    label.textContent = "Agent is thinking…";
+    label.className = "thinking-label";
+    const indicator = document.createElement("span");
+    indicator.className = "thinking-indicator";
+    indicator.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.textContent = "Agent is thinking";
+    const dots = document.createElement("span");
+    dots.className = "thinking-dots";
+    dots.setAttribute("aria-hidden", "true");
+    label.append(indicator, text, dots);
     summary.appendChild(label);
     const body = document.createElement("div");
     body.className = "thinking-events";
@@ -854,6 +863,7 @@ function renderChatEvent(event, target) {
     if (finalNode) target.appendChild(finalNode);
     turn.duration = formatThinkingDuration(event.meta?.durationMs);
     const updateLabel = () => {
+      turn.label.replaceChildren();
       turn.label.textContent = `${turn.details.open ? "Hide" : "View"} thinking · ${turn.duration}`;
     };
     turn.details.open = false;

@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.8.10 (2026-08-22): Reliable agent and review lifecycle
+
+- Initialized every colored agent with hidden, read-only Webkit context as soon
+  as the session starts, including visual-system and full-scene coherence
+  guidance, while keeping protocol and merge instructions out of user chat.
+- Collapsed thinking by default with an animated live indicator and replaced
+  the merge protocol wall with a short user-side progress message.
+- Kept the review pill on one line until it reaches a 20px screen margin,
+  simplified the variant control, and made the current feedback rectangle stay
+  visually above overlapping points.
+- Added canonical variant generation to Redo with end-to-end protocol
+  validation and agent instructions.
+- Made tab activity follow authoritative agent state and added external-browser
+  cleanup when a finished session releases its preview.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.9 (2026-08-22): Deliberate review feedback
 
 - Made Done save new review-phase feedback locally without sending it, leaving

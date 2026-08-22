@@ -2833,7 +2833,8 @@ def _feedback_update_marker_error(marker, batch_id, round_number):
 def _persisted_verdict_error(payload, review):
     allowed_top = {"version", "kind", "batchId", "round", "sentAt", "verdicts"}
     allowed_item = {
-        "pointId", "verdict", "chosenLetter", "redoText", "redoVoiceNote"
+        "pointId", "verdict", "chosenLetter", "redoText", "redoVoiceNote",
+        "redoAbcRequest",
     }
     if not isinstance(payload, dict) or not set(payload).issubset(allowed_top):
         return "verdict payload contains unsupported fields"
@@ -2869,12 +2870,16 @@ def _persisted_verdict_error(payload, review):
             item["redoText"], _MAX_REDO_TEXT
         ):
             return "verdict redoText is invalid"
-        if verdict != "redo" and ("redoText" in item or "redoVoiceNote" in item):
+        if verdict != "redo" and any(
+            field in item for field in ("redoText", "redoVoiceNote", "redoAbcRequest")
+        ):
             return "redo fields are allowed only on redo"
         if verdict != "accept" and "chosenLetter" in item:
             return "chosenLetter is allowed only on accept"
         if "redoVoiceNote" in item and not _valid_voice_note_shape(item["redoVoiceNote"]):
             return "redoVoiceNote shape is invalid"
+        if "redoAbcRequest" in item and not _valid_abc_request(item["redoAbcRequest"]):
+            return "redoAbcRequest is invalid"
     if len(ids) != len(set(ids)) or set(ids) != set(review_by_id):
         return "verdicts must cover exactly the active review points"
     for item in items:
@@ -4348,9 +4353,16 @@ class Handler(SimpleHTTPRequestHandler):
                 })
             if verdict != "redo" and (
                 "redoText" in item or "redoVoiceNote" in item
+                or "redoAbcRequest" in item
             ):
                 return self._send_json(400, {
                     "error": "redo fields are allowed only on a redo verdict"
+                })
+            if "redoAbcRequest" in item and not _valid_abc_request(
+                item["redoAbcRequest"]
+            ):
+                return self._send_json(400, {
+                    "error": "redoAbcRequest must be a valid variant request"
                 })
             if verdict != "accept" and "chosenLetter" in item:
                 return self._send_json(400, {

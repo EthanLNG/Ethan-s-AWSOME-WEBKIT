@@ -1433,7 +1433,7 @@ _DICTATION = CONFIG.get("dictation", {})
 if not isinstance(_DICTATION, dict):
     _DICTATION = {}
 _DICTATION_MODE = os.environ.get("WK_DICTATION_MODE", _DICTATION.get("mode", "speech"))
-if _DICTATION_MODE not in ("speech", "voice-note"):
+if _DICTATION_MODE not in ("speech", "voice-note", "cloud-voice-note"):
     _DICTATION_MODE = "speech"
 _INTERACTION = CONFIG.get("interaction", {})
 if not isinstance(_INTERACTION, dict):
@@ -1889,7 +1889,7 @@ def _valid_voice_note_shape(value):
     if value is None:
         return True
     if not isinstance(value, dict) or not set(value).issubset(
-        {"path", "mimeType", "bytes", "durationMs", "language"}
+        {"path", "mimeType", "bytes", "durationMs", "language", "transcription"}
     ):
         return False
     if (
@@ -1906,6 +1906,8 @@ def _valid_voice_note_shape(value):
         isinstance(value["language"], str)
         and re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8}){0,3}", value["language"])
     ):
+        return False
+    if "transcription" in value and value["transcription"] != "openai":
         return False
     return True
 

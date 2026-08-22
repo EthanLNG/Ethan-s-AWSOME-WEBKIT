@@ -158,7 +158,11 @@ function rememberPreviewWindow(session, tab) {
 function refreshChangedPreviewWindows(projects) {
   const sessions = new Map();
   (projects || []).forEach((project) => {
-    (project.sessions || []).forEach((session) => sessions.set(session.id, session));
+    (project.sessions || []).forEach((session) => {
+      if (!session.status || ["active", "busy", "merging", "discarding", "error"].includes(session.status)) {
+        sessions.set(session.id, session);
+      }
+    });
   });
   previewTabs.forEach((entry, sessionId) => {
     const session = sessions.get(sessionId);
@@ -177,7 +181,11 @@ function refreshChangedPreviewWindows(projects) {
 function closeFinishedPreviewWindows(projects) {
   const liveSessionIds = new Set();
   (projects || []).forEach((project) => {
-    (project.sessions || []).forEach((session) => liveSessionIds.add(session.id));
+    (project.sessions || []).forEach((session) => {
+      if (!session.status || ["active", "busy", "merging", "discarding", "error"].includes(session.status)) {
+        liveSessionIds.add(session.id);
+      }
+    });
   });
   previewTabs.forEach((entry, sessionId) => {
     if (liveSessionIds.has(sessionId)) return;
@@ -345,6 +353,13 @@ function openSettings() {
   $("#voiceCapability").textContent = capability.available
     ? `Ready: ${capability.engine}. Recordings stay on this computer.`
     : (capability.help || "Install local Whisper to enable agent voice notes.");
+  const cloudCapability = state.system.cloudVoiceTranscription || { available: false };
+  const cloudVoiceInput = document.querySelector('input[name="dictationMode"][value="cloud-voice-note"]');
+  cloudVoiceInput.disabled = !cloudCapability.available;
+  $("#cloudVoiceNoteOption").classList.toggle("disabled", !cloudCapability.available);
+  $("#cloudVoiceCapability").textContent = cloudCapability.available
+    ? `Ready: ${cloudCapability.engine}. Audio is sent to OpenAI for transcription.`
+    : (cloudCapability.help || "Set OPENAI_API_KEY to enable cloud voice notes.");
   const selected = document.querySelector(`input[name="dictationMode"][value="${state.settings.dictationMode}"]`)
     || document.querySelector('input[name="dictationMode"][value="speech"]');
   selected.checked = true;
@@ -523,6 +538,17 @@ function openSessionPreview(session) {
   else toast(`Preview ready at ${session.previewUrl}. Allow popups to focus it automatically.`);
 }
 
+function sessionsForDisplay(project) {
+  const sessions = (project?.sessions || []).filter((session) => session.kind !== "seeds");
+  const active = sessions.filter((session) => (
+    ["active", "busy", "merging", "error"].includes(session.status)
+  ));
+  const merged = sessions
+    .filter((session) => session.status === "merged")
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+  return [...active, ...merged];
+}
+
 function renderProjectView() {
   const project = selectedProject();
   if (!project) {
@@ -569,7 +595,6 @@ function renderProjectView() {
   const live = (project.sessions || []).filter((session) => (
     ["active", "busy", "merging", "error"].includes(session.status)
   ));
-  const active = live.filter((session) => session.kind !== "seeds");
   const byColor = new Map(live.map((session) => [session.color, session]));
   const grid = $("#colorGrid");
   grid.replaceChildren();
@@ -607,7 +632,22 @@ function renderProjectView() {
     }
     grid.appendChild(card);
   });
-  renderSessions(active);
+  renderSessions(sessionsForDisplay(project));
+}
+
+async function dismissMergedSession(session, row) {
+  if (row.classList.contains("popping")) return;
+  row.classList.add("popping");
+  try {
+    await Promise.all([
+      api(`/api/sessions/${session.id}/dismiss`, { method: "POST", body: {} }),
+      new Promise((resolve) => window.setTimeout(resolve, 180)),
+    ]);
+    await refreshProjects();
+  } catch (error) {
+    row.classList.remove("popping");
+    toast(error.message);
+  }
 }
 
 function renderSessions(sessions) {
@@ -622,7 +662,8 @@ function renderSessions(sessions) {
   }
   sessions.forEach((session) => {
     const row = document.createElement("article");
-    row.className = "session-row";
+    const merged = session.status === "merged";
+    row.className = `session-row${merged ? " merged" : ""}`;
     const emoji = document.createElement("span");
     emoji.className = "session-emoji";
     emoji.textContent = session.emoji;
@@ -642,7 +683,7 @@ function renderSessions(sessions) {
     chat.className = "open-chat";
     chat.textContent = "Chat";
     chat.addEventListener("click", (event) => openSession(session, event.currentTarget));
-    if (session.kind !== "support") {
+    if (!merged && session.kind !== "support") {
       const preview = document.createElement("button");
       preview.type = "button";
       preview.className = "open-chat";
@@ -651,8 +692,21 @@ function renderSessions(sessions) {
       preview.addEventListener("click", () => openSessionPreview(session));
       actions.append(preview);
     }
-    actions.append(chat);
-    row.append(emoji, info, status, actions);
+    if (!merged) actions.append(chat);
+    row.append(emoji, info, status);
+    if (!merged) row.append(actions);
+    if (merged) {
+      branch.textContent = `${session.branch} · click to clear`;
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-label", `Dismiss merged ${title.textContent} session`);
+      row.addEventListener("click", () => dismissMergedSession(session, row));
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        dismissMergedSession(session, row);
+      });
+    }
     list.appendChild(row);
   });
 }

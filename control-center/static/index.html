@@ -270,8 +270,13 @@
             <input type="radio" name="dictationMode" value="voice-note">
             <span><b>Agent voice notes</b><small>Records audio with no browser transcription. The agent transcribes it locally with Whisper.</small></span>
           </label>
+          <label id="cloudVoiceNoteOption">
+            <input type="radio" name="dictationMode" value="cloud-voice-note">
+            <span><b>OpenAI cloud voice notes</b><small>Saves the audio, then uses OpenAI transcription before the agent acts. The recording is sent to OpenAI.</small></span>
+          </label>
         </div>
         <p class="capability-note" id="voiceCapability"></p>
+        <p class="capability-note" id="cloudVoiceCapability"></p>
       </div>
       <div class="settings-section">
         <h2>How should the website behave?</h2>

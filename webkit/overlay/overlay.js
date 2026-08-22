@@ -90,7 +90,7 @@
       !/^[A-Za-z0-9_-]{1,128}$/.test(dataset.wkTrustedTypesPolicy || '') ||
       !['before', 'after'].includes(dataset.wkMode) ||
       typeof dataset.wkEmoji !== 'string' || !dataset.wkEmoji ||
-      !['speech', 'voice-note'].includes(dataset.wkDictationMode) ||
+      !['speech', 'voice-note', 'cloud-voice-note'].includes(dataset.wkDictationMode) ||
       !['browse-default', 'draw-default'].includes(dataset.wkInteractionMode) ||
       (dataset.wkMode === 'after' && (dataset.wkBeforePrefix || '') !== '') ||
       (dataset.wkMode === 'before' &&
@@ -479,7 +479,11 @@
     ? NORMAL_TAB_TITLE.slice(EMOJI.length).trim()
     : NORMAL_TAB_TITLE;
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
-  const DICTATION_MODE = DS.wkDictationMode === 'voice-note' ? 'voice-note' : 'speech';
+  const DICTATION_MODE = ['voice-note', 'cloud-voice-note'].includes(DS.wkDictationMode)
+    ? DS.wkDictationMode
+    : 'speech';
+  const USES_VOICE_NOTES = DICTATION_MODE !== 'speech';
+  const USES_CLOUD_TRANSCRIPTION = DICTATION_MODE === 'cloud-voice-note';
   const INTERACTION_MODE = DS.wkInteractionMode === 'draw-default'
     ? 'draw-default'
     : 'browse-default';
@@ -505,10 +509,10 @@
         : code);
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
-  const MIC_TITLE = DICTATION_MODE === 'voice-note'
+  const MIC_TITLE = USES_VOICE_NOTES
     ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' outside a text field'
     : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' outside a text field';
-  const MIC_ARIA_LABEL = DICTATION_MODE === 'voice-note'
+  const MIC_ARIA_LABEL = USES_VOICE_NOTES
     ? 'Start or stop recording a voice note'
     : 'Start or stop speech dictation';
 
@@ -650,8 +654,10 @@
 
   function speechLanguageSelect() {
     const select = el('select', 'wk-speech-lang');
-    select.setAttribute('aria-label', DICTATION_MODE === 'voice-note' ? 'Voice-note language' : 'Dictation language');
-    select.title = DICTATION_MODE === 'voice-note' ? 'Language hint for local transcription' : 'Speech recognition language';
+    select.setAttribute('aria-label', USES_VOICE_NOTES ? 'Voice-note language' : 'Dictation language');
+    select.title = USES_VOICE_NOTES
+      ? (USES_CLOUD_TRANSCRIPTION ? 'Language hint for OpenAI transcription' : 'Language hint for local transcription')
+      : 'Speech recognition language';
     const english = el('option', '', 'English');
     english.value = 'en-US';
     const hebrew = el('option', '', 'עברית');
@@ -1913,12 +1919,15 @@
         const note = result.voiceNote;
         note.durationMs = durationMs;
         note.language = langSelect.value === 'he-IL' ? 'he' : 'en';
+        if (USES_CLOUD_TRANSCRIPTION) note.transcription = 'openai';
         if (discarded || attempt !== generation) {
           deleteVoiceNote(note);
         } else {
           onSaved(note);
           saved = true;
-          toast('Voice note attached. The agent will transcribe it locally.');
+          toast(USES_CLOUD_TRANSCRIPTION
+            ? 'Voice note attached. OpenAI will transcribe it for the agent.'
+            : 'Voice note attached. The agent will transcribe it locally.');
         }
       } catch (error) {
         if (!discarded && attempt === generation) {
@@ -2241,7 +2250,7 @@
     micBtn.appendChild(microphoneIcon());
     const langSelect = speechLanguageSelect();
     const voiceStatus = el('span', 'wk-voice-status');
-    voiceStatus.hidden = DICTATION_MODE !== 'voice-note';
+    voiceStatus.hidden = !USES_VOICE_NOTES;
     voiceStatus.setAttribute('role', 'status');
     voiceStatus.setAttribute('aria-live', 'polite');
     head.append(num, title, voiceStatus, langSelect, micBtn);
@@ -2249,7 +2258,7 @@
     const taWrap = el('div', 'wk-ta-wrap');
     const ta = el('textarea', 'wk-ta');
     ta.setAttribute('aria-label', editing ? 'Edit feedback details' : 'Feedback details');
-    ta.placeholder = DICTATION_MODE === 'voice-note'
+    ta.placeholder = USES_VOICE_NOTES
       ? 'Type a note, record one, or use both…'
       : 'What should change here?';
     ta.value = draft.text;
@@ -2332,7 +2341,7 @@
     }
 
     function paintVoiceStatus(state) {
-      if (DICTATION_MODE !== 'voice-note') return;
+      if (!USES_VOICE_NOTES) return;
       if (state?.recording) voiceStatus.textContent = 'recording…';
       else if (state?.starting) voiceStatus.textContent = 'connecting…';
       else if (state?.stopping) voiceStatus.textContent = 'finishing…';
@@ -2341,7 +2350,7 @@
       else voiceStatus.textContent = 'voice note';
       voiceStatus.classList.toggle('ready', !!draft.voiceNote);
     }
-    const mic = DICTATION_MODE === 'voice-note'
+    const mic = USES_VOICE_NOTES
       ? makeVoiceRecorder(micBtn, langSelect, (note) => {
         if (draft.voiceNote && draft.voiceNote.path !== originalVoiceNote?.path) deleteVoiceNote(draft.voiceNote);
         draft.voiceNote = note;
@@ -3850,7 +3859,7 @@
     actions.append(el('span', 'wk-spacer'), cancel, save);
     node.append(label, row, variantRow, actions);
     wrap.appendChild(node);
-    const mic = DICTATION_MODE === 'voice-note'
+    const mic = USES_VOICE_NOTES
       ? makeVoiceRecorder(micBtn, langSelect, (note) => {
         if (redoVoiceNote && redoVoiceNote.path !== originalRedoVoiceNote?.path) deleteVoiceNote(redoVoiceNote);
         redoVoiceNote = note;

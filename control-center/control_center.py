@@ -329,7 +329,9 @@ def normalized_settings(value):
     if dictate_hotkey == toggle_hotkey:
         dictate_hotkey = "KeyC" if toggle_hotkey == "KeyV" else "KeyV"
     return {
-        "dictationMode": dictation_mode if dictation_mode in ("speech", "voice-note") else "speech",
+        "dictationMode": dictation_mode
+        if dictation_mode in ("speech", "voice-note", "cloud-voice-note")
+        else "speech",
         "interactionMode": interaction_mode
         if interaction_mode in ("browse-default", "draw-default")
         else "browse-default",
@@ -3451,6 +3453,7 @@ class ProjectManager:
             "github": self._github_cli_status(),
             "platform": platform.system().lower(),
             "voiceTranscription": self._voice_engine_status(),
+            "cloudVoiceTranscription": self._cloud_voice_engine_status(),
         }
 
     @staticmethod
@@ -3485,6 +3488,20 @@ class ProjectManager:
             "available": False,
             "engine": None,
             "help": help_text,
+        }
+
+    @staticmethod
+    def _cloud_voice_engine_status():
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if api_key:
+            return {
+                "available": True,
+                "engine": "OpenAI GPT-4o Transcribe",
+            }
+        return {
+            "available": False,
+            "engine": None,
+            "help": "Set OPENAI_API_KEY before starting the Control Center to enable OpenAI cloud voice notes.",
         }
 
     @staticmethod
@@ -3564,7 +3581,9 @@ class ProjectManager:
             item["sessions"] = [
                 public_session(s) for s in state.get("sessions", [])
                 if s.get("projectId") == project["id"]
-                and s.get("status") in ("active", "busy", "merging", "discarding", "error")
+                and s.get("status") in (
+                    "active", "busy", "merging", "discarding", "error", "merged"
+                )
             ]
             projects.append(item)
         return projects
@@ -9448,6 +9467,26 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         with self.lock:
             return self._discard(session_id, confirmation)
 
+    def dismiss_merged(self, session_id):
+        with self.lock:
+            session = self._get_session(session_id)
+            if session.get("status") != "merged":
+                raise ControlCenterError("Only a merged session can be dismissed.", 409)
+
+            def remove(state):
+                state["sessions"] = [
+                    item for item in state.get("sessions", [])
+                    if item.get("id") != session_id
+                ]
+                for project in state.get("projects", []):
+                    onboarding = project.get("onboarding")
+                    if isinstance(onboarding, dict) and onboarding.get("sessionId") == session_id:
+                        onboarding.pop("sessionId", None)
+
+            self.store.update(remove)
+            self.store._remove_pruned_logs([session_id])
+            return {"dismissed": True}
+
     def _discard(self, session_id, confirmation):
         session = self._get_session(session_id)
         if confirmation != session_id:
@@ -9907,8 +9946,17 @@ class ControlCenter:
         interaction_mode = submitted.get("interactionMode", current["interactionMode"])
         toggle_hotkey = submitted.get("toggleHotkey", current["toggleHotkey"])
         dictate_hotkey = submitted.get("dictateHotkey", current["dictateHotkey"])
-        if dictation_mode not in ("speech", "voice-note"):
-            raise ControlCenterError("Choose browser speech or agent voice notes.")
+        if dictation_mode not in ("speech", "voice-note", "cloud-voice-note"):
+            raise ControlCenterError(
+                "Choose browser speech, local agent voice notes, or OpenAI cloud voice notes."
+            )
+        if (
+            dictation_mode == "cloud-voice-note"
+            and not self.projects._cloud_voice_engine_status()["available"]
+        ):
+            raise ControlCenterError(
+                self.projects._cloud_voice_engine_status()["help"], 409
+            )
         if interaction_mode not in ("browse-default", "draw-default"):
             raise ControlCenterError("Choose normal website clicks or immediate rectangle drawing.")
         if not valid_hotkey(toggle_hotkey) or not valid_hotkey(dictate_hotkey):

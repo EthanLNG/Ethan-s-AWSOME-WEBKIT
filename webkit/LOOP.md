@@ -181,7 +181,9 @@ Read `"$inbox/feedback.json"`. Full schema:
       "text": "make this button bigger and bolder",
       "voiceNote": null,    // or {"path":"<feedback_dir>/blue/voice-notes/voice-id.webm",
                             //     "mimeType":"audio/webm", "bytes":12345,
-                            //     "durationMs":4200, "language":"en"}; text may be empty
+                            //     "durationMs":4200, "language":"en",
+                            //     "transcription":"openai"}; text may be empty;
+                            //     transcription is omitted for local Whisper
       "abcRequest": null,   // see below
       "status": "new"       // the overlay ALWAYS writes "new". "redo" only exists if
                             // YOU set it when re-queuing a point into a later round
@@ -208,16 +210,22 @@ The user's `text` is the instruction; the geometry is only there to tell you
 *where*. A non-null `uiState` means the point was drawn inside a dialog or
 popover. Edit the selected elements normally; the overlay reopens those
 surfaces automatically during review so the user sees the same UI state.
-If `voiceNote` is non-null, transcribe it locally before interpreting
-the request:
+If `voiceNote` is non-null, transcribe it before interpreting the request. Use
+the engine selected by the saved note:
 
 ```sh
-python3 webkit/scripts/transcribe-voice-note.py <voiceNote.path> --language <voiceNote.language>
+# When voiceNote.transcription is "openai":
+python3 webkit/scripts/transcribe-voice-note.py <voiceNote.path> --language <voiceNote.language> --engine openai
+
+# Otherwise:
+python3 webkit/scripts/transcribe-voice-note.py <voiceNote.path> --language <voiceNote.language> --engine local
 ```
 
 Treat that output as the point's instruction (combined with any typed `text`).
 Do not skip, guess, or claim to have heard the recording if the helper reports
-that local Whisper is unavailable; report the concrete setup error instead.
+that the selected transcription engine is unavailable; report the concrete
+setup error instead. OpenAI transcription requires `OPENAI_API_KEY`. The helper
+never stores that key or includes it in its output.
 After a successful transcription, leave the source audio file in place. The
 preview server owns recording cleanup. It retains a note while any live
 feedback, review, or verdict file references it, then removes it only after the

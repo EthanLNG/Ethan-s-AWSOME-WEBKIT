@@ -175,6 +175,11 @@ be pushed again later.
   The server retains referenced audio long enough for safe retries, then removes
   unreferenced notes after a durable round transition. The resulting transcript
   still becomes input to the selected coding-agent provider.
+- OpenAI cloud voice-note mode uses the same bounded recording storage, then
+  sends the audio to OpenAI's transcription API. It is disabled unless
+  `OPENAI_API_KEY` is present when the Control Center starts. The transcript
+  becomes input to the selected Codex or Claude agent. The key is never written
+  to Webkit state, feedback, recordings, or chat logs.
 - `api_proxy_origin` is a privileged developer bridge and is disabled by default.
   It requires the explicit `WK_ENABLE_API_PROXY=1` process opt-in. Do not enable
   it for untrusted project configuration or pages with untrusted scripts.
@@ -230,6 +235,7 @@ Safety limits fail closed. They do not silently publish partial data:
 - **A Chromium-based browser** for the full experience. The feedback and review
   UI works in other modern browsers, but browser dictation support varies.
 - **Local Whisper and ffmpeg**, optional, only for Agent voice-note mode.
+- **An OpenAI API key**, optional, only for OpenAI cloud voice-note mode.
 - **GitHub CLI**, optional, for automatic private repository creation and sync.
 
 On macOS with Google Chrome, the direct launcher can close stale matching tabs

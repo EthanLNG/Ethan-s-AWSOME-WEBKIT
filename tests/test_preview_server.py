@@ -732,6 +732,7 @@ class PreviewServerTests(unittest.TestCase):
             ),
             "mimeType": "audio/webm",
             "bytes": 5,
+            "transcription": "openai",
         }
         feedback = self.batch()
         feedback["points"][0]["voiceNote"] = valid_note
@@ -739,6 +740,11 @@ class PreviewServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
 
         (self.inbox / "feedback.json").unlink()
+        feedback["batchId"] = "batch-invalid-engine"
+        feedback["points"][0]["voiceNote"]["transcription"] = "anthropic"
+        status, _, _ = self.post_json("/__wk/feedback", feedback)
+        self.assertEqual(status, 400)
+
         outside = self.root / "outside.webm"
         outside.write_bytes(b"audio")
         feedback["batchId"] = "batch-2"

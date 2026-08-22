@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-"""Transcribe a Webkit voice note with an installed, local Whisper engine."""
+"""Transcribe a Webkit voice note locally or with OpenAI."""
 
 import argparse
+import json
+import mimetypes
 import os
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
+
+
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+MAX_OPENAI_RESPONSE_BYTES = 1024 * 1024
+OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_TRANSCRIPTION_MODEL = "gpt-4o-transcribe"
 
 
 def command_timeout_seconds():
@@ -81,18 +92,103 @@ def transcribe(path, language):
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Transcribe an AWESOME WEBKIT voice note locally")
+def _multipart_field(boundary, name, value):
+    return (
+        "--{}\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n{}\r\n"
+        .format(boundary, name, value)
+    ).encode("utf-8")
+
+
+def transcribe_openai(path, language):
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is required for OpenAI cloud transcription"
+        )
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise RuntimeError("voice note could not be read: {}".format(exc))
+    if not 0 < size <= MAX_AUDIO_BYTES:
+        raise RuntimeError("voice note must be between 1 byte and 25 MB")
+    try:
+        audio = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("voice note could not be read: {}".format(exc))
+    if len(audio) != size:
+        raise RuntimeError("voice note changed while it was read")
+
+    boundary = "webkit-{}".format(secrets.token_hex(16))
+    mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    filename = path.name.replace('"', "") or "voice-note.webm"
+    body = bytearray()
+    body.extend(_multipart_field(boundary, "model", OPENAI_TRANSCRIPTION_MODEL))
+    if language:
+        body.extend(_multipart_field(boundary, "language", language))
+    body.extend((
+        "--{}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n"
+        "Content-Type: {}\r\n\r\n"
+        .format(boundary, filename, mime_type)
+    ).encode("utf-8"))
+    body.extend(audio)
+    body.extend("\r\n--{}--\r\n".format(boundary).encode("ascii"))
+    request = urllib.request.Request(
+        OPENAI_TRANSCRIPTION_URL,
+        data=bytes(body),
+        headers={
+            "Authorization": "Bearer " + api_key,
+            "Content-Type": "multipart/form-data; boundary=" + boundary,
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=command_timeout_seconds()
+        ) as response:
+            payload = response.read(MAX_OPENAI_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = exc.read(MAX_OPENAI_RESPONSE_BYTES + 1)
+            detail = json.loads(payload.decode("utf-8")).get("error", {}).get("message")
+        except (AttributeError, UnicodeDecodeError, ValueError):
+            detail = None
+        raise RuntimeError(
+            "OpenAI transcription request failed with HTTP {}{}".format(
+                exc.code, ": " + str(detail)[:500] if detail else ""
+            )
+        )
+    except (OSError, urllib.error.URLError) as exc:
+        raise RuntimeError("OpenAI transcription request failed: {}".format(exc))
+    if len(payload) > MAX_OPENAI_RESPONSE_BYTES:
+        raise RuntimeError("OpenAI transcription response exceeded 1 MB")
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise RuntimeError("OpenAI transcription returned invalid JSON")
+    text = result.get("text") if isinstance(result, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("OpenAI transcription returned an empty transcript")
+    return text.strip()
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Transcribe an AWESOME WEBKIT voice note")
     parser.add_argument("audio")
     parser.add_argument("--language", choices=("en", "he"))
-    args = parser.parse_args()
+    parser.add_argument("--engine", choices=("local", "openai"), default="local")
+    args = parser.parse_args(argv)
     path = Path(args.audio).expanduser().resolve()
     if not path.is_file():
         parser.error("audio file not found: {}".format(path))
     try:
-        text = transcribe(path, args.language)
+        text = (
+            transcribe_openai(path, args.language)
+            if args.engine == "openai"
+            else transcribe(path, args.language)
+        )
         if not text:
-            raise RuntimeError("Whisper returned an empty transcript")
+            raise RuntimeError("Transcription returned an empty transcript")
         print(text)
     except Exception as exc:
         print("transcription failed: {}".format(exc), file=sys.stderr)

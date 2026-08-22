@@ -323,6 +323,40 @@ class TranscriptionTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "positive"):
                     TRANSCRIBE.command_timeout_seconds()
 
+    def test_openai_transcription_sends_saved_audio_and_returns_text(self):
+        with tempfile.TemporaryDirectory() as raw:
+            audio = Path(raw) / "voice.webm"
+            audio.write_bytes(b"safe-audio")
+            response = mock.MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = json.dumps({
+                "text": "A clear cloud transcript."
+            }).encode("utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "test-key-not-real", "WK_TRANSCRIPTION_TIMEOUT": "12"},
+                clear=False,
+            ), mock.patch.object(
+                TRANSCRIBE.urllib.request, "urlopen", return_value=response
+            ) as urlopen:
+                result = TRANSCRIBE.transcribe_openai(audio, "en")
+
+        self.assertEqual(result, "A clear cloud transcript.")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, TRANSCRIBE.OPENAI_TRANSCRIPTION_URL)
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 12)
+        self.assertIn(b'gpt-4o-transcribe', request.data)
+        self.assertIn(b'safe-audio', request.data)
+        self.assertNotIn(b'test-key-not-real', request.data)
+
+    def test_openai_transcription_requires_an_explicit_api_key(self):
+        with tempfile.TemporaryDirectory() as raw:
+            audio = Path(raw) / "voice.webm"
+            audio.write_bytes(b"safe-audio")
+            with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY"):
+                    TRANSCRIBE.transcribe_openai(audio, "en")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -131,6 +131,26 @@ async function testFinishedSessionsCloseTheirOwnedPreviewWindows() {
   assert.match(extractFunction("openSessionPreview"), /rememberPreviewWindow\(session, tab\)/);
 }
 
+function testMergedSessionsRenderBelowActiveSessions() {
+  const ctx = context();
+  install(ctx, "sessionsForDisplay");
+  const displayed = ctx.sessionsForDisplay({ sessions: [
+    { id: "merged-old", status: "merged", updatedAt: "2026-01-01", kind: "color" },
+    { id: "active", status: "active", updatedAt: "2026-01-03", kind: "color" },
+    { id: "merged-new", status: "merged", updatedAt: "2026-01-02", kind: "color" },
+    { id: "seed", status: "merged", updatedAt: "2026-01-04", kind: "seeds" },
+  ] });
+  assert.deepEqual(
+    Array.from(displayed, (session) => session.id),
+    ["active", "merged-new", "merged-old"],
+    "merged cards must stay below active cards and newest merged cards come first",
+  );
+  const renderSessionsSource = extractFunction("renderSessions");
+  assert.match(renderSessionsSource, /row\.className = `session-row\$\{merged/);
+  assert.match(renderSessionsSource, /click to clear/);
+  assert.match(extractFunction("dismissMergedSession"), /\/dismiss/);
+}
+
 async function testApiPreservesStructuredErrorDetails() {
   const ctx = context({
     CONTROL_CENTER_TOKEN: "test-token-1234567890",
@@ -142,7 +162,7 @@ async function testApiPreservesStructuredErrorDetails() {
         details: {
           code: "webkit_update_required",
           installedVersion: "0.4.1",
-          requiredVersion: "0.8.12",
+          requiredVersion: "0.8.13",
         },
       }),
     }),
@@ -158,7 +178,7 @@ async function testApiPreservesStructuredErrorDetails() {
   assert.equal(failure.status, 409);
   assert.equal(failure.details.code, "webkit_update_required");
   assert.equal(failure.details.installedVersion, "0.4.1");
-  assert.equal(failure.details.requiredVersion, "0.8.12");
+  assert.equal(failure.details.requiredVersion, "0.8.13");
 }
 
 async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
@@ -174,7 +194,7 @@ async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
     webkitUpdate: {
       code: "webkit_update_required",
       installedVersion: "0.8.3",
-      requiredVersion: "0.8.12",
+      requiredVersion: "0.8.13",
     },
   };
   const ctx = context({
@@ -199,7 +219,7 @@ async function testRegisteredProjectCanUpdateItsVendoredWebkit() {
   assert.equal(requests[0].options.body.updateWebkit, true);
   assert.deepEqual(busy, [true, false]);
   assert.equal(refreshes, 1);
-  assert.match(toasts[0], /0\.8\.3 to 0\.8\.12/);
+  assert.match(toasts[0], /0\.8\.3 to 0\.8\.13/);
 }
 
 async function testChatAsyncWorkStaysWithItsSession() {
@@ -719,7 +739,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
       failure.details = requests.length === 1 ? {
         code: "webkit_update_required",
         installedVersion: "0.4.1",
-        requiredVersion: "0.8.12",
+        requiredVersion: "0.8.13",
       } : {};
       throw failure;
     },
@@ -730,7 +750,7 @@ async function testExistingProjectOffersAndRequestsWebkitUpdate() {
   assert.equal(requests[0].path, "/api/projects/existing");
   assert.equal(requests[0].options.body.updateWebkit, false);
   assert.equal(updatePrompt.hidden, false, "old kits should reveal the inline update action");
-  assert.equal(versions.textContent, "0.4.1 to 0.8.12");
+  assert.equal(versions.textContent, "0.4.1 to 0.8.13");
 
   await ctx.saveProject({ preventDefault() {}, submitter: updateButton });
   assert.equal(requests[1].options.body.updateWebkit, true);
@@ -826,6 +846,7 @@ async function testIssueActionStartsAnUncoloredAgent() {
 (async () => {
   await testHomeSelectionPersists();
   await testFinishedSessionsCloseTheirOwnedPreviewWindows();
+  testMergedSessionsRenderBelowActiveSessions();
   await testApiPreservesStructuredErrorDetails();
   await testRegisteredProjectCanUpdateItsVendoredWebkit();
   await testChatAsyncWorkStaysWithItsSession();

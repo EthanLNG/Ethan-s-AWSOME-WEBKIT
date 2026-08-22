@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.8.13 (2026-08-23): Cloud voice notes and visible merge handoff
+
+- Added an optional OpenAI cloud voice-note mode backed by GPT-4o Transcribe.
+  The mode appears only when `OPENAI_API_KEY` is available, keeps the recording
+  in the existing bounded session storage, and marks the saved note so either
+  Codex or Claude uses the selected transcription engine reliably.
+- Kept completed merges visible below active sessions with a green merged state
+  and a fast, playful click-to-clear interaction.
+- Kept merged sessions out of the live preview set so their browser tabs still
+  close automatically as soon as merge cleanup finishes.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. Set `OPENAI_API_KEY`
+before launching the Control Center only if you want cloud voice notes.
+
 ## v0.8.12 (2026-08-22): Exact review pill bounds
 
 - Included the review pill's padding and border in its viewport width cap so it

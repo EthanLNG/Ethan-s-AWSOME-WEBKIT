@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.12")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.13")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2597,7 +2597,7 @@ class ControlCenterTests(unittest.TestCase):
         with mock.patch.object(
             self.app.projects, "validated_providers", return_value=["codex"]
         ), self.assertRaisesRegex(
-            ControlCenterError, "browser speech or agent voice notes"
+            ControlCenterError, "browser speech, local agent voice notes"
         ):
             self.app.save_preferences({
                 "providers": ["codex"],
@@ -2608,8 +2608,39 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(after.get("settings"), before.get("settings"))
 
     def test_voice_note_setting_rejects_unknown_mode(self):
-        with self.assertRaisesRegex(Exception, "browser speech or agent voice notes"):
+        with self.assertRaisesRegex(Exception, "browser speech, local agent voice notes"):
             self.app.save_settings({"dictationMode": "cosmetic-only"})
+
+    def test_cloud_voice_note_setting_requires_and_detects_openai_key(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False):
+            self.assertFalse(
+                self.app.projects.system_status()["cloudVoiceTranscription"]["available"]
+            )
+            with self.assertRaisesRegex(ControlCenterError, "OPENAI_API_KEY"):
+                self.app.save_settings({"dictationMode": "cloud-voice-note"})
+        with mock.patch.dict(
+            os.environ, {"OPENAI_API_KEY": "test-key-not-real"}, clear=False
+        ), mock.patch.object(
+            self.app.sessions, "refresh_previews_for_settings",
+            return_value={"restarted": 0, "deferred": 0},
+        ):
+            result = self.app.save_settings({"dictationMode": "cloud-voice-note"})
+        self.assertEqual(result["settings"]["dictationMode"], "cloud-voice-note")
+
+    def test_merged_session_can_be_dismissed_but_active_session_cannot(self):
+        self.app.store.update(lambda state: state["sessions"].extend([
+            {"id": "merged-card", "projectId": "project", "status": "merged"},
+            {"id": "active-card", "projectId": "project", "status": "active"},
+        ]))
+        EventLog(self.state_dir, "merged-card").append("system", "merged")
+        result = self.app.sessions.dismiss_merged("merged-card")
+        self.assertEqual(result, {"dismissed": True})
+        self.assertNotIn(
+            "merged-card", {item["id"] for item in self.app.store.read()["sessions"]}
+        )
+        self.assertFalse((self.state_dir / "logs" / "merged-card.jsonl").exists())
+        with self.assertRaisesRegex(ControlCenterError, "Only a merged session"):
+            self.app.sessions.dismiss_merged("active-card")
 
     def test_interaction_setting_rejects_unknown_mode(self):
         with self.assertRaisesRegex(Exception, "normal website clicks or immediate rectangle drawing"):
@@ -3930,7 +3961,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.12",
+            "requiredVersion": "0.8.13",
         })
 
         status = subprocess.run(
@@ -3977,9 +4008,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.12")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.13")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.12")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.13")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3987,7 +4018,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.12")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.13")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -4045,7 +4076,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.12"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.13"
         )
         self.assertEqual(
             subprocess.run(
@@ -4089,7 +4120,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.12",
+            "requiredVersion": "0.8.13",
         })
 
         active = {
@@ -4118,9 +4149,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.12")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.12")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.12")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.13")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.13")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.13")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()

@@ -342,9 +342,9 @@ class TranscriptionTests(unittest.TestCase):
                 result = TRANSCRIBE.transcribe_openai(audio, "en")
 
         self.assertEqual(result, "A clear cloud transcript.")
-        request = urlopen.call_args.args[0]
+        request = urlopen.call_args[0][0]
         self.assertEqual(request.full_url, TRANSCRIBE.OPENAI_TRANSCRIPTION_URL)
-        self.assertEqual(urlopen.call_args.kwargs["timeout"], 12)
+        self.assertEqual(urlopen.call_args[1]["timeout"], 12)
         self.assertIn(b'gpt-4o-transcribe', request.data)
         self.assertIn(b'safe-audio', request.data)
         self.assertNotIn(b'test-key-not-real', request.data)

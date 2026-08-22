@@ -9510,9 +9510,20 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
             return
         if not script.is_file() or script.is_symlink():
             return
+        command = [str(script), "--close", session["previewUrl"]]
+        if platform.system().lower() == "windows":
+            shell = shutil.which("bash") or shutil.which("sh")
+            if shell is None:
+                runtime.log.append(
+                    "system",
+                    "The finished preview tab could not be closed automatically.",
+                    "status",
+                )
+                return
+            command.insert(0, shell)
         try:
             result = run_command(
-                [str(script), "--close", session["previewUrl"]],
+                command,
                 cwd=worktree,
                 check=False,
                 timeout=15,
@@ -9523,7 +9534,7 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
                     "The finished preview tab could not be closed automatically.",
                     "status",
                 )
-        except ControlCenterError:
+        except (ControlCenterError, OSError):
             runtime.log.append(
                 "system",
                 "The finished preview tab could not be closed automatically.",

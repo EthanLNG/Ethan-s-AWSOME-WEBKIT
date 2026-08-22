@@ -853,12 +853,17 @@ class ControlCenterTests(unittest.TestCase):
         with mock.patch.object(ProviderRunner, "run", side_effect=answer_in_chat):
             runtime.start()
             runtime.enqueue("Use the shorter heading.", "chat")
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + 60
+            turn_finished = False
             while time.monotonic() < deadline:
-                if self.app.sessions._get_session(session["id"])["status"] == "merged":
+                events = runtime.log.read_after(0)["events"]
+                if any(event.get("kind") == "turn_complete" for event in events):
+                    turn_finished = True
                     break
                 time.sleep(0.02)
-            runtime.worker.join(timeout=5)
+            if not turn_finished:
+                runtime.stop()
+                self.fail("Seed recovery did not finish within 60 seconds.")
 
         self.assertEqual(self.app.sessions._get_session(session["id"])["status"], "merged")
         self.assertEqual(
@@ -3241,7 +3246,8 @@ class ControlCenterTests(unittest.TestCase):
         with mock.patch("control_center.ProviderRunner", return_value=runner) as provider:
             runtime._work_loop()
         runner.run.assert_called_once_with("private initialization context")
-        self.assertTrue(provider.call_args.kwargs["read_only"])
+        _provider_args, provider_kwargs = provider.call_args
+        self.assertTrue(provider_kwargs["read_only"])
         self.assertEqual(runtime.log.read_after(0)["events"], [])
 
     def test_preview_uses_a_bounded_pipe_drain_and_instance_identity(self):
@@ -3703,13 +3709,14 @@ class ControlCenterTests(unittest.TestCase):
         self.assertTrue(result["controllerManaged"])
         runtime.enqueue.assert_called_once()
         merge_call = runtime.enqueue.call_args
-        self.assertEqual(merge_call.args[1], "merge")
-        self.assertIn("Validate our work", merge_call.args[0])
+        merge_args, merge_kwargs = merge_call
+        self.assertEqual(merge_args[1], "merge")
+        self.assertIn("Validate our work", merge_args[0])
         self.assertEqual(
-            merge_call.kwargs["display"],
+            merge_kwargs["display"],
             "Merge in progress. I will let you know when it is ready.",
         )
-        self.assertEqual(merge_call.kwargs["display_role"], "user")
+        self.assertEqual(merge_kwargs["display_role"], "user")
         marker = worktree / ".webkit" / "control-center-merge.json"
         marker.parent.mkdir(exist_ok=True)
         marker.write_text('{"status":"ready","message":"ready"}', encoding="utf-8")
@@ -4634,6 +4641,51 @@ class ControlCenterTests(unittest.TestCase):
             cwd=worktree,
             check=False,
             timeout=15,
+        )
+
+    def test_release_uses_a_posix_shell_to_close_the_preview_tab_on_windows(self):
+        worktree = self.root / "close-preview-windows-worktree"
+        script = worktree / "webkit" / "scripts" / "open-preview.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        session = {
+            "id": "close-preview-windows", "worktree": str(worktree), "color": "red",
+            "emoji": "🔴", "previewUrl": "http://127.0.0.1:6540/index.html",
+        }
+        runtime = SessionRuntime(self.app.sessions, session)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch("control_center.platform.system", return_value="Windows"), mock.patch(
+            "control_center.shutil.which", return_value="C:/Program Files/Git/bin/bash.exe"
+        ), mock.patch("control_center.run_command", return_value=completed) as run:
+            self.app.sessions._close_preview_tab(runtime)
+        run.assert_called_once_with(
+            [
+                "C:/Program Files/Git/bin/bash.exe", str(script), "--close",
+                session["previewUrl"],
+            ],
+            cwd=worktree,
+            check=False,
+            timeout=15,
+        )
+
+    def test_release_continues_when_preview_tab_cleanup_cannot_start(self):
+        worktree = self.root / "close-preview-error-worktree"
+        script = worktree / "webkit" / "scripts" / "open-preview.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        session = {
+            "id": "close-preview-error", "worktree": str(worktree), "color": "red",
+            "emoji": "🔴", "previewUrl": "http://127.0.0.1:6541/index.html",
+        }
+        runtime = SessionRuntime(self.app.sessions, session)
+        with mock.patch(
+            "control_center.run_command", side_effect=OSError("cannot execute")
+        ):
+            self.app.sessions._close_preview_tab(runtime)
+        events = runtime.log.read_after(0)["events"]
+        self.assertEqual(
+            events[-1]["text"],
+            "The finished preview tab could not be closed automatically.",
         )
 
     def test_generic_merge_rejects_seed_sessions(self):

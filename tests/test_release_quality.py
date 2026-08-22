@@ -205,6 +205,16 @@ class ReleaseQualityTests(unittest.TestCase):
                 self.assertIn(limit, readme)
         self.assertIn("Staged commits and session integrations are refused", readme)
 
+    def test_release_keeps_the_proprietary_license_notice(self):
+        license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("AWESOME WEBKIT PROPRIETARY LICENSE", license_text)
+        self.assertIn("All rights reserved", license_text)
+        self.assertIn("NO GENERAL LICENSE GRANT", license_text)
+        self.assertNotIn("Permission is hereby granted", license_text)
+        self.assertIn("Proprietary. All rights reserved.", readme)
+
     def test_install_and_session_shell_blocks_fail_closed(self):
         documents = {
             "AGENTS.md": (ROOT / "AGENTS.md").read_text(encoding="utf-8"),

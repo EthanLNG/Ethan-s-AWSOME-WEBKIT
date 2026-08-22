@@ -18,6 +18,7 @@
   <img src="https://img.shields.io/badge/local--first-111111" alt="Local first">
   <img src="https://img.shields.io/badge/Git--backed-111111" alt="Git backed">
   <img src="https://img.shields.io/badge/token--efficient-111111" alt="Token efficient">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-proprietary-b00020" alt="Proprietary license"></a>
 </p>
 
 **Turn a thought into a reviewed website change in one tight loop.** Open the
@@ -249,4 +250,7 @@ writes always require explicit user approval.
 
 ## License
 
-[Proprietary, all rights reserved](LICENSE).
+**Proprietary. All rights reserved.** The source is public for inspection, but
+no permission is granted to use, copy, modify, distribute, deploy, host, sell,
+or create derivative works from it. GitHub's required platform rights to view
+and fork public repositories still apply. See the full [license](LICENSE).

@@ -40,9 +40,10 @@
  * Server contract (all under /__wk/, JSON in/out):
  *   GET  /__wk/handshake            204 when the injected browser token is current
  *   GET  /__wk/state?known=<rev>  → {changed, rev, color, emoji, phase,
- *                                    batch, review, verdicts}
+ *                                    batch, review, verdicts, pendingPointIds}
  *        phase: collecting | awaiting_agent | reviewing | verdicts_sent
  *   POST /__wk/feedback           ← the batch object (schema below)
+ *   POST /__wk/feedback/edit      ← one revision-checked pending-point edit
  *   POST /__wk/voice-note?id=…    ← raw audio stored beside the feedback inbox
  *   POST /__wk/voice-note/delete  ← remove an abandoned/replaced recording
  *   POST /__wk/verdicts           ← the verdicts object (409 on batch mismatch)
@@ -358,18 +359,79 @@
     };
   }
 
-  function pendingReviewPoints(batchPoints, reviewPoints, optimisticPoints, queuedPoints) {
-    const reviewedIds = new Set((reviewPoints || []).map((point) => point && point.id).filter(Boolean));
-    const seen = new Set(reviewedIds);
-    const pending = [];
+  function pointRevision(point) {
+    return Number.isInteger(point && point.revision) && point.revision > 0
+      ? point.revision
+      : 1;
+  }
+
+  function pendingReviewPoints(
+    batchPoints, reviewPoints, optimisticPoints, queuedPoints, serverPendingIds
+  ) {
+    const reviewed = new Set((reviewPoints || []).map((point) => {
+      const revision = Number.isInteger(point && point.feedbackRevision) && point.feedbackRevision > 0
+        ? point.feedbackRevision
+        : 1;
+      return point && point.id ? point.id + ':' + revision : '';
+    }).filter(Boolean));
+    const authoritativePending = Array.isArray(serverPendingIds)
+      ? new Set(serverPendingIds)
+      : null;
+    const byId = new Map();
     for (const points of [batchPoints, optimisticPoints, queuedPoints]) {
       for (const point of (points || [])) {
-        if (!point || typeof point.id !== 'string' || !point.id || seen.has(point.id)) continue;
-        seen.add(point.id);
-        pending.push(point);
+        if (!point || typeof point.id !== 'string' || !point.id) continue;
+        if (points === batchPoints && authoritativePending && !authoritativePending.has(point.id)) continue;
+        const current = byId.get(point.id);
+        if (!current || pointRevision(point) > pointRevision(current)) byId.set(point.id, point);
       }
     }
-    return pending;
+    return [...byId.values()].filter(
+      (point) => !reviewed.has(point.id + ':' + pointRevision(point))
+    );
+  }
+
+  function anchorFitScore(rect, box) {
+    if (!rect || !box || rect.w <= 0 || rect.h <= 0 || box.w <= 0 || box.h <= 0) return 0;
+    const overlapWidth = Math.min(rect.x + rect.w, box.x + box.w) - Math.max(rect.x, box.x);
+    const overlapHeight = Math.min(rect.y + rect.h, box.y + box.h) - Math.max(rect.y, box.y);
+    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+    const intersection = overlapWidth * overlapHeight;
+    const union = rect.w * rect.h + box.w * box.h - intersection;
+    return union > 0 ? intersection / union : 0;
+  }
+
+  function reanchorRect(rect, capturedBox, liveBox) {
+    if (!rect || !capturedBox || !liveBox || capturedBox.w <= 0 || capturedBox.h <= 0) return rect;
+    const scaleX = liveBox.w / capturedBox.w;
+    const scaleY = liveBox.h / capturedBox.h;
+    if (![scaleX, scaleY].every(Number.isFinite) || scaleX < 0.25 || scaleX > 4 || scaleY < 0.25 || scaleY > 4) {
+      return {
+        x: rect.x + liveBox.x - capturedBox.x,
+        y: rect.y + liveBox.y - capturedBox.y,
+        w: rect.w,
+        h: rect.h,
+      };
+    }
+    return {
+      x: liveBox.x + (rect.x - capturedBox.x) * scaleX,
+      y: liveBox.y + (rect.y - capturedBox.y) * scaleY,
+      w: rect.w * scaleX,
+      h: rect.h * scaleY,
+    };
+  }
+
+  function tabActivityMode(phase) {
+    if (phase === 'awaiting_agent' || phase === 'verdicts_sent' || phase === 'transitioning') {
+      return 'working';
+    }
+    return phase === 'reviewing' ? 'review-ready' : 'normal';
+  }
+
+  function tabPollDelay(activity, overlayMode, hidden) {
+    if (hidden && activity !== 'working') return 0;
+    if (hidden) return 5000;
+    return overlayMode === 'feedback' ? 2000 : 15000;
   }
   // ===== end pure protocol helpers ==========================================
 
@@ -412,6 +474,10 @@
     ? trustedHTMLPolicy.createHTML(value)
     : value;
   const EMOJI = DS.wkEmoji || '⬜';
+  const NORMAL_TAB_TITLE = document.title;
+  const TAB_BASE_TITLE = NORMAL_TAB_TITLE.startsWith(EMOJI)
+    ? NORMAL_TAB_TITLE.slice(EMOJI.length).trim()
+    : NORMAL_TAB_TITLE;
   const IS_BEFORE = DS.wkMode === 'before';   // reduced state: no drawing, ⚗ disabled
   const DICTATION_MODE = DS.wkDictationMode === 'voice-note' ? 'voice-note' : 'speech';
   const INTERACTION_MODE = DS.wkInteractionMode === 'draw-default'
@@ -618,6 +684,8 @@
     verdictsKey: null,          // 'wk:verdicts:<batchId>:<round>' for the active review
     reviewList: [],             // batch points under review, ordered by number
     submittedPoints: [],        // accepted points awaiting the next server-state poll
+    pendingPointIds: null,      // server-authoritative unreviewed point ids
+    agentWakePending: false,    // successful local send awaiting authoritative state
     handledById: new Map(),     // pointId → review.points entry
     verdicts: {},               // pointId → {verdict, chosenLetter?, redoText?}
     deletedIds: new Set(),      // points deleted/sent this session - never resurrect on cross-tab merge
@@ -1142,17 +1210,13 @@
   // rectDoc = {x,y,w,h} in document coords → context[] (≤12, ranked by overlap)
   function captureContext(rectDoc) {
     const vx = rectDoc.x - scrollX, vy = rectDoc.y - scrollY;
-    const areas = new Map();   // element → intersection area (viewport px²)
-    function overlap(elm) {
-      const b = elm.getBoundingClientRect();
-      const w = Math.min(vx + rectDoc.w, b.right) - Math.max(vx, b.left);
-      const h = Math.min(vy + rectDoc.h, b.bottom) - Math.max(vy, b.top);
-      return (w > 0 && h > 0) ? w * h : 0;
-    }
+    const rankedElements = new Map();
     function consider(elm) {
-      if (!elm || areas.has(elm) || SKIP_TAGS.has(elm.tagName) || isOverlayNode(elm)) return;
-      const a = overlap(elm);
-      if (a > 0) areas.set(elm, a);
+      if (!elm || rankedElements.has(elm) || SKIP_TAGS.has(elm.tagName) || isOverlayNode(elm)) return;
+      const b = elm.getBoundingClientRect();
+      const box = { x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height };
+      const score = anchorFitScore(rectDoc, box);
+      if (score > 0) rankedElements.set(elm, { box, score, order: rankedElements.size });
     }
     // 1) elementsFromPoint over a 3×3 grid - fast, respects stacking, and our
     //    host is pointer-events:none so it self-excludes.
@@ -1167,23 +1231,26 @@
     }
     // 2) bbox scan fallback - the rect may sit partly outside the viewport
     //    where elementsFromPoint can't see.
-    if (areas.size === 0 && document.body) {
+    if (rankedElements.size === 0 && document.body) {
       for (const elm of document.body.querySelectorAll('*')) consider(elm);
     }
-    const ranked = [...areas.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
-    return ranked.map(([elm], i) => {
-      const b = elm.getBoundingClientRect();
+    const ranked = [...rankedElements.entries()].sort((left, right) =>
+      right[1].score - left[1].score || left[1].order - right[1].order
+    ).slice(0, 12);
+    const contexts = ranked.map(([elm, geometry]) => {
       return {
         selector: buildSelector(elm),
         tag: elm.tagName.toLowerCase(),
         text: (elm.innerText || elm.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
         box: {
-          x: Math.round(b.left + scrollX), y: Math.round(b.top + scrollY),
-          w: Math.round(b.width), h: Math.round(b.height),
+          x: Math.round(geometry.box.x), y: Math.round(geometry.box.y),
+          w: Math.round(geometry.box.w), h: Math.round(geometry.box.h),
         },
-        role: i === 0 ? 'primary' : 'intersecting',
+        role: 'intersecting',
       };
-    });
+    }).filter((context) => context.selector);
+    if (contexts.length) contexts[0].role = 'primary';
+    return contexts;
   }
 
   function captureUiState() {
@@ -1284,28 +1351,65 @@
         node.getClientRects().length > 0;
     } catch (e) { return true; }
   }
+  const MIN_ANCHOR_FIT = 0.08;
+
+  function correctedPointRects(p) {
+    const rects = p.rects || [p.rect];
+    const fixed = p.anchor === 'viewport';
+    const capturedScroll = p.scroll || { x: 0, y: 0 };
+    return {
+      fixed,
+      boxes: rects.map((rect, rectIndex) => {
+        const contexts = Array.isArray(p.rectContexts) && Array.isArray(p.rectContexts[rectIndex])
+          ? p.rectContexts[rectIndex]
+          : (p.context || []);
+        for (const context of contexts) {
+          if (!context || !context.selector || !context.box ||
+            anchorFitScore(rect, context.box) < MIN_ANCHOR_FIT) continue;
+          try {
+            const matches = document.querySelectorAll(context.selector);
+            if (matches.length !== 1) continue;
+            const live = matches[0].getBoundingClientRect();
+            const capturedBox = fixed ? {
+              x: context.box.x - capturedScroll.x,
+              y: context.box.y - capturedScroll.y,
+              w: context.box.w,
+              h: context.box.h,
+            } : context.box;
+            const sourceRect = fixed ? {
+              x: rect.x - capturedScroll.x,
+              y: rect.y - capturedScroll.y,
+              w: rect.w,
+              h: rect.h,
+            } : rect;
+            const liveBox = fixed ? {
+              x: live.left, y: live.top, w: live.width, h: live.height,
+            } : {
+              x: live.left + scrollX, y: live.top + scrollY,
+              w: live.width, h: live.height,
+            };
+            return reanchorRect(sourceRect, capturedBox, liveBox);
+          } catch (e) { /* try the next captured context */ }
+        }
+        return fixed ? {
+          x: rect.x - capturedScroll.x,
+          y: rect.y - capturedScroll.y,
+          w: rect.w,
+          h: rect.h,
+        } : { ...rect };
+      }),
+    };
+  }
+
   // → {box, fixed:true} in viewport coords for viewport-anchored points, else null
   function pinBox(p) {
     if (p.anchor !== 'viewport') return null;
-    const sel = p.context && p.context[0] && p.context[0].selector;
-    if (sel) {
-      try {
-        const m = document.querySelectorAll(sel);
-        if (m.length === 1) {
-          const b = m[0].getBoundingClientRect();
-          // capture-time scroll cancels: offset of rect within its anchor is
-          // (rect.doc − context.doc), reusable against the live viewport box
-          const ox = p.rect.x - p.context[0].box.x;
-          const oy = p.rect.y - p.context[0].box.y;
-          return { box: { x: b.left + ox, y: b.top + oy, w: p.rect.w, h: p.rect.h }, fixed: true };
-        }
-      } catch (e) { /* fall through to capture-time viewport box */ }
-    }
-    const sc = p.scroll || { x: 0, y: 0 };
-    return { box: { x: p.rect.x - sc.x, y: p.rect.y - sc.y, w: p.rect.w, h: p.rect.h }, fixed: true };
+    return { box: correctedPointRects(p).boxes[0], fixed: true };
   }
   function pointFromDraft(draft) {
-    const existing = draft.editId ? S.points.find((p) => p.id === draft.editId) : null;
+    const existing = draft.editPoint ||
+      (draft.editId ? S.points.find((p) => p.id === draft.editId) : null);
+    const rects = draft.rects || [draft.rect];
     return {
       id: existing ? existing.id : newPointId(),
       number: existing ? existing.number : nextNumber(),
@@ -1315,10 +1419,11 @@
         x: Math.round(draft.rect.x), y: Math.round(draft.rect.y),
         w: Math.round(draft.rect.w), h: Math.round(draft.rect.h),
       },
-      rects: (draft.rects || [draft.rect]).map((rect) => ({
+      rects: rects.map((rect) => ({
         x: Math.round(rect.x), y: Math.round(rect.y),
         w: Math.round(rect.w), h: Math.round(rect.h),
       })),
+      rectContexts: rects.map((rect) => captureContext(rect)),
       viewport: { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 },
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
       anchor: existing ? (existing.anchor || 'doc') : (draft.anchor || 'doc'),
@@ -1371,68 +1476,50 @@
       S.reviewList.forEach((p, i) => {
         if (p.page !== page) return;
         if (!pointSurfaceVisible(p)) return;
-        const va = pinBox(p);
-        const primary = va ? va.box : correctedRect(p);
-        const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
-        const boxes = (p.rects || [p.rect]).map((box) => ({
-          x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
-        }));
+        const geometry = correctedPointRects(p);
+        const boxes = geometry.boxes;
         const v = S.verdicts[p.id];
         boxes.forEach((box, rectIndex) => {
           const els = addPin(p.number, box,
             'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
-            () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''), !!va);
+            () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''), geometry.fixed);
           if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
         });
       });
     }
     const batchPoints = S.batch && Array.isArray(S.batch.points) ? S.batch.points : [];
     const submitted = S.phase !== null && S.phase !== 'collecting'
-      ? pendingReviewPoints(batchPoints, S.reviewList, S.submittedPoints, [])
+      ? pendingReviewPoints(
+        batchPoints, S.reviewList, S.submittedPoints, [], S.pendingPointIds
+      )
       : [];
     const submittedIds = new Set(submitted.map((point) => point.id));
     for (const p of submitted) {
       if (p.page !== page || !pointSurfaceVisible(p)) continue;
-      const va = pinBox(p);
-      const primary = va ? va.box : correctedRect(p);
-      const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
-      (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
-        x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
-      }, 'submitted', () => {}, 'added point ' + p.number + ' is saved and waiting for the agent', !!va));
+      const geometry = correctedPointRects(p);
+      geometry.boxes.forEach((box) => addPin(p.number, box, 'submitted', () => {
+        if (IS_BEFORE || S.card) return;
+        openCard({ pendingPoint: p });
+      }, 'added point ' + p.number + ' is saved and waiting - click to edit', geometry.fixed));
     }
     for (const p of S.points) {
       if (submittedIds.has(p.id) || p.page !== page) continue;
       if (!pointSurfaceVisible(p)) continue;
-      const va = pinBox(p);
-      const primary = va ? va.box : p.rect;
-      const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
-      (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
-        x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
-      }, 'queued', () => {
+      const geometry = correctedPointRects(p);
+      geometry.boxes.forEach((box) => addPin(p.number, box, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
-      }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit', !!va));
+      }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit', geometry.fixed));
     }
     repositionAll();
     updateHint();
   }
 
-  // anchor correction: the agent just changed the layout, so shift the stored
-  // rect by how far its primary context element moved since capture
+  // Anchor correction follows only a close-fitting captured element. Giant
+  // backgrounds and page shells are intentionally ignored, leaving the exact
+  // document coordinates the user drew instead of introducing false drift.
   function correctedRect(p) {
-    const sel = p.context && p.context[0] && p.context[0].selector;
-    if (sel) {
-      try {
-        const m = document.querySelectorAll(sel);
-        if (m.length === 1) {
-          const b = m[0].getBoundingClientRect();
-          const dx = (b.left + scrollX) - p.context[0].box.x;
-          const dy = (b.top + scrollY) - p.context[0].box.y;
-          return { x: p.rect.x + dx, y: p.rect.y + dy, w: p.rect.w, h: p.rect.h };
-        }
-      } catch (e) { /* selector no longer valid - use stored rect */ }
-    }
-    return p.rect;
+    return correctedPointRects(p).boxes[0];
   }
 
   // ===== draw layer ==========================================================
@@ -2091,7 +2178,27 @@
   // ===== editor card =========================================================
   function openCard(init) {
     if (S.card || IS_BEFORE) return;
-    const editing = init.editId ? S.points.find((p) => p.id === init.editId) : null;
+    const restoredPending = init.draft && init.draft.editSource === 'pending'
+      ? init.draft.editPoint
+      : null;
+    const pendingEditing = init.pendingPoint || restoredPending || null;
+    const queuedEditing = !pendingEditing && init.editId
+      ? S.points.find((p) => p.id === init.editId)
+      : null;
+    const pendingGeometry = pendingEditing ? correctedPointRects(pendingEditing) : null;
+    const pendingEditingRects = pendingGeometry
+      ? pendingGeometry.boxes.map((rect) => pendingGeometry.fixed ? {
+        x: rect.x + scrollX,
+        y: rect.y + scrollY,
+        w: rect.w,
+        h: rect.h,
+      } : { ...rect })
+      : null;
+    const editing = pendingEditing ? {
+      ...pendingEditing,
+      rect: { ...pendingEditingRects[0] },
+      rects: pendingEditingRects,
+    } : queuedEditing;
     const originalVoiceNote = editing && editing.voiceNote ? editing.voiceNote : null;
     const draft = init.draft || {
       page: logicalPath(),
@@ -2113,6 +2220,8 @@
       micOn: false,
       voiceNote: editing ? (editing.voiceNote || null) : null,
       editId: editing ? editing.id : null,
+      editSource: pendingEditing ? 'pending' : (queuedEditing ? 'queued' : null),
+      editPoint: pendingEditing ? { ...pendingEditing } : null,
     };
     let cardOwner = null;
     let doneBusy = false;
@@ -2188,7 +2297,7 @@
     const addRectBtn = el('button', 'wk-btn ghost', '+ Rectangle');
     const doneBtn = el('button', 'wk-btn primary', 'Done');
     delBtn.type = cancelBtn.type = addRectBtn.type = doneBtn.type = 'button';
-    delBtn.hidden = !editing;
+    delBtn.hidden = !queuedEditing;
     actions.append(delBtn, el('span', 'wk-spacer'), cancelBtn, addRectBtn, doneBtn);
 
     node.append(head, taWrap, abcWrap, actions);
@@ -2299,10 +2408,10 @@
     delBtn.addEventListener('click', async () => {
       delBtn.disabled = true;
       try {
-        if (editing) {
+        if (queuedEditing) {
           let retired = false;
           try {
-            retired = await withPointQueueLock(() => retireQueuedPointIds([editing.id]));
+            retired = await withPointQueueLock(() => retireQueuedPointIds([queuedEditing.id]));
           } catch (error) {
             toast('Could not delete this point: ' + error.message, { kind: 'error' });
             return;
@@ -2322,9 +2431,10 @@
         if (node.isConnected) delBtn.disabled = false;
       }
     });
-    // commit the draft into S.points. Returns false (and shakes) on empty text.
-    // Exposed on S.card so Send can flush an open card before shipping the batch.
-    function commit() {
+    // Commit a local point, or atomically revise a server-accepted point that
+    // has not entered review yet. Returns false and keeps the card open when a
+    // validation or concurrency check fails.
+    async function commit() {
       draft.text = ta.value;
       if (mic.on || mic.starting || mic.stopping || mic.uploading) {
         const message = mic.on
@@ -2339,6 +2449,52 @@
       }
       if (!draft.text.trim() && !draft.voiceNote) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
       let pt = pointFromDraft(draft);
+      if (pendingEditing) {
+        try {
+          const result = await api('/__wk/feedback/edit', {
+            version: 1,
+            kind: 'feedback_edit',
+            batchId: S.batch && S.batch.batchId,
+            round: S.batch && S.batch.round,
+            pointId: pendingEditing.id,
+            expectedRevision: pointRevision(draft.editPoint || pendingEditing),
+            point: pt,
+          }, 15000);
+          if (!result || !result.point || result.point.id !== pendingEditing.id) {
+            throw new Error('The preview server returned an invalid edited point.');
+          }
+          if (S.batch && Array.isArray(S.batch.points)) {
+            S.batch = {
+              ...S.batch,
+              points: S.batch.points.map((point) =>
+                point.id === result.point.id ? result.point : point
+              ),
+            };
+          }
+          S.submittedPoints = pendingReviewPoints(
+            [], [], S.submittedPoints.filter((point) => point.id !== result.point.id),
+            [result.point]
+          );
+          if (Array.isArray(S.pendingPointIds) && !S.pendingPointIds.includes(result.point.id)) {
+            S.pendingPointIds.push(result.point.id);
+          }
+          S.agentWakePending = true;
+          if (S.reviewing) S.sentVerdicts = true;
+          syncTabTitle();
+          if (originalVoiceNote && originalVoiceNote.path !== draft.voiceNote?.path) {
+            deleteVoiceNote(originalVoiceNote);
+          }
+          LS.remove('wk:card');
+          teardown();
+          toast('Updated point ' + result.point.number + '. The agent will use the latest version.');
+          pollNow();
+          return true;
+        } catch (error) {
+          toast('Could not update this pending point: ' + error.message, { kind: 'error' });
+          pollNow();
+          return false;
+        }
+      }
       if (S.deletedIds.has(pt.id) || LS.get(queuedTombstoneKey(pt.id)) !== null) {
         // A send or delete in another tab won while this editor was open. Keep
         // the user's work as a new point instead of reviving the retired id.
@@ -2387,8 +2543,8 @@
           voiceReady = await mic.finishAndWait();
         }
         if (voiceReady === false || S.card !== cardOwner || !node.isConnected) return;
-        if (!commit()) return;
-        if (S.phase !== 'collecting' && S.phase !== null && S.phase !== 'verdicts_sent') {
+        if (!(await commit())) return;
+        if (!pendingEditing && S.phase !== 'collecting' && S.phase !== null && S.phase !== 'verdicts_sent') {
           sendPoints(false);
         }
       } finally {
@@ -2548,9 +2704,18 @@
           points: snapshot,
         };
         addedToActiveRound = S.phase !== 'collecting' && S.phase !== null;
-        await api('/__wk/feedback', batch, 15000);
+        const result = await api('/__wk/feedback', batch, 15000);
         accepted = true;
-        S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, snapshot);
+        const acceptedPoints = result && Array.isArray(result.points) ? result.points : snapshot;
+        S.agentWakePending = true;
+        if (S.reviewing) S.sentVerdicts = true;
+        syncTabTitle();
+        S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, acceptedPoints);
+        if (Array.isArray(S.pendingPointIds)) {
+          for (const point of acceptedPoints) {
+            if (point && !S.pendingPointIds.includes(point.id)) S.pendingPointIds.push(point.id);
+          }
+        }
         if (!retireQueuedPointIds(sentIds)) {
           // The lock makes this unreachable for cooperating tabs. Keep it as a
           // fail-visible guard for browsers without Web Locks or hostile writes.
@@ -2574,7 +2739,7 @@
       sending = false;
     }
   }
-  sendBtn.addEventListener('click', () => {
+  sendBtn.addEventListener('click', async () => {
     // an open editor card holds an uncommitted note - flush it into the batch
     // ("type the note, hit Send" must not ship without it); shake+refuse if empty
     if (S.card) {
@@ -2582,7 +2747,7 @@
       if (!S.card.ta.value.trim() && !S.card.draft.voiceNote) {
         n.classList.remove('attn'); void n.offsetWidth; n.classList.add('attn'); return;
       }
-      if (!S.card.commit()) return;
+      if (!(await S.card.commit())) return;
     }
     sendPoints(false);
   });
@@ -2607,16 +2772,51 @@
   });
 
   // ===== polling + phase machine =============================================
-  // 2s while the overlay is in feedback mode (the user is actively waiting for
-  // the agent), a lazy 15s in evaluate mode, fully paused while hidden.
+  // 2s while the overlay is in feedback mode and a lazy 15s in evaluate mode.
+  // A hidden working tab keeps a throttled 5s watch so it can announce review
+  // readiness; other hidden phases pause completely.
   let pollT = 0;
+  let tabTitleTimer = 0;
+  let tabTitleTick = 0;
+
+  function syncTabTitle() {
+    clearInterval(tabTitleTimer);
+    tabTitleTimer = 0;
+    tabTitleTick = 0;
+    const mode = S.agentWakePending || S.sentVerdicts
+      ? 'working'
+      : tabActivityMode(S.phase);
+    if (mode === 'normal' || (mode === 'review-ready' && !document.hidden)) {
+      document.title = NORMAL_TAB_TITLE;
+      return;
+    }
+    const paint = () => {
+      tabTitleTick += 1;
+      if (mode === 'working') {
+        document.title = EMOJI + ' Working' + '.'.repeat((tabTitleTick % 3) + 1) +
+          (TAB_BASE_TITLE ? ' · ' + TAB_BASE_TITLE : '');
+      } else {
+        document.title = EMOJI + (tabTitleTick % 2 ? ' Review ready' : ' ● Review ready') +
+          (TAB_BASE_TITLE ? ' · ' + TAB_BASE_TITLE : '');
+      }
+    };
+    paint();
+    tabTitleTimer = setInterval(paint, mode === 'working' ? 900 : 1100);
+  }
+
   function schedulePoll(reset) {
     clearTimeout(pollT);
-    if (document.hidden) return;
-    pollT = setTimeout(pollNow, S.mode === 'feedback' ? 2000 : 15000);
+    const activity = S.agentWakePending || S.sentVerdicts
+      ? 'working'
+      : tabActivityMode(S.phase);
+    const delay = tabPollDelay(activity, S.mode, document.hidden);
+    if (!delay) return;
+    pollT = setTimeout(pollNow, delay);
   }
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) clearTimeout(pollT);
+    syncTabTitle();
+    clearTimeout(pollT);
+    if (document.hidden) schedulePoll(true);
     else pollNow();
   });
 
@@ -2648,8 +2848,12 @@
       : '';
     S.rev = st.rev || '';
     S.phase = st.phase || 'collecting';
+    S.agentWakePending = false;
     S.batch = st.batch || null;
     S.review = st.review || null;
+    S.pendingPointIds = Array.isArray(st.pendingPointIds)
+      ? st.pendingPointIds.filter((id) => typeof id === 'string')
+      : null;
     if (S.phase === 'collecting') {
       S.submittedPoints = [];
     } else {
@@ -2679,6 +2883,8 @@
       S.verdicts = {};
       S.sentVerdicts = false;
     }
+    if (S.reviewing) S.sentVerdicts = S.phase !== 'reviewing';
+    syncTabTitle();
 
     if (S.phase === 'collecting') {
       if (S.reviewing) {
@@ -3417,7 +3623,8 @@
       S.batch && Array.isArray(S.batch.points) ? S.batch.points : [],
       S.reviewList,
       S.submittedPoints,
-      S.points
+      S.points,
+      S.pendingPointIds
     );
     B.pending.hidden = pending.length === 0;
     B.pending.textContent = '+' + pending.length + ' pending';
@@ -3688,6 +3895,8 @@
     try {
       await api('/__wk/verdicts', body);
       S.sentVerdicts = true;
+      S.agentWakePending = true;
+      syncTabTitle();
       toast('Verdicts sent - the ' + EMOJI + ' agent takes it from here.');
       updateBar();
       pollNow();

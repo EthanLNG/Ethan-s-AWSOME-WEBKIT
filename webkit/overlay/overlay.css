@@ -161,7 +161,7 @@ input:focus-visible {
   will-change: transform;
 }
 .wk-pin:hover { z-index: 3; }
-.wk-pin.submitted { border-color: var(--wk-accent); color: var(--wk-accent); cursor: default; }
+.wk-pin.submitted { border-color: var(--wk-accent); color: var(--wk-accent); cursor: pointer; }
 .wk-pin.review { border-color: var(--wk-accent); color: var(--wk-accent); }
 .wk-pin.review.current { background: var(--wk-accent); color: #fff; }
 .wk-pin.verdicted.v-accept { border-color: var(--wk-ok); color: var(--wk-ok); }

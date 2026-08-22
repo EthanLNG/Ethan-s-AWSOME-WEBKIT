@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.8.8 (2026-08-22): Reliable pending feedback
+
+- Made saved pending points directly editable with an atomic revision check, so
+  stale agent work cannot overwrite a correction or be accepted as current.
+- Anchored each rectangle independently to a close-fitting page element and
+  ignored oversized backgrounds that caused marks to drift after reloads.
+- Added colored Working and Review ready tab-title animations, including a
+  throttled background watch that detects completed agent work in hidden tabs.
+- Kept active review controls safely waiting while newly added or edited
+  feedback is being processed.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.7 (2026-08-22): Visible active-review additions
 
 - Kept feedback points and rectangles visible when they are added while an

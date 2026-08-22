@@ -118,10 +118,11 @@ fix/delete `"$inbox/feedback.json"`), then wait again.
   send a message while the turn is waiting; handle it normally without losing
   the waiter state.
 
-The user may add rectangles while a review is open. The server folds them into
-the standing `feedback.json` and writes a typed `verdicts.json` interruption
-with `kind:"feedback_update"`. This wakes the same waiter immediately; handle
-it as described in step 8 instead of treating it as user verdicts.
+The user may add or edit pending rectangles while a review is open. The server
+folds them into the standing `feedback.json` and writes a typed `verdicts.json`
+interruption with `kind:"feedback_update"`. This wakes the same waiter
+immediately; handle it as described in step 8 instead of treating it as user
+verdicts.
 
 ## Step 2: READ the batch
 
@@ -145,11 +146,17 @@ Read `"$inbox/feedback.json"`. Full schema:
       "id": "opaque-id",     // OPAQUE unique string, assigned by the overlay. Never parse
                             // or invent ids; quote them verbatim everywhere.
       "number": 1,          // user-visible ordering; apply points in this order
+      "revision": 2,        // absent means 1; server increments after a pending edit
       "page": "/index.html",
       "createdAt": "2026-07-25T14:12:03Z",
       "rect": { "x": 120, "y": 2260, "w": 300, "h": 84 },  // DOCUMENT coords, CSS px
       "rects": [             // every marked area for this point; rect is the last/primary one
         { "x": 120, "y": 2260, "w": 300, "h": 84 }
+      ],
+      "rectContexts": [      // one context array per rect, used for stable re-anchoring
+        [{ "selector": "#hero .cta-row > a:nth-of-type(1)", "tag": "a",
+           "text": "Get the kit", "box": { "x": 122, "y": 2262, "w": 180, "h": 52 },
+           "role": "primary" }]
       ],
       "viewport": { "w": 1440, "h": 900, "dpr": 2 },
       "scroll": { "x": 0, "y": 1980 },
@@ -296,6 +303,7 @@ Write `"$inbox/review.json"`. Full schema:
   "points": [
     {
       "id": "opaque-id",                // the point id, verbatim
+      "feedbackRevision": 2,             // copy point.revision, or 1 when absent
       "handled": "done",                // "done" | "abc" | "skipped"
       "note": "CTA now 1.25rem / 700",  // one line, shown to the user in the review bar
       "commit": "<full SHA of this point's commit>",   // omit/null for skipped
@@ -386,16 +394,20 @@ it and do not move protocol files by hand. Report the protocol conflict and
 wait for explicit recovery direction rather than reverting or redoing against
 the wrong round.
 
-If `kind` is `feedback_update`, the user added points to this same batch. Do
-not finalize verdicts. `addedPointIds` is only a wake-up hint and may be stale
-after retries. Re-read live `feedback.json`, current `review.json`, and every
-archived review for the batch. Apply every feedback point not represented in
-those manifests, one commit per point. Build a complete round + 1 review in a
-separate file, preserving the original `beforeRef`, then request the
-`feedback-update` transition shown in step 9. If the server replies `409` with
-`missingPoints`, that list is authoritative: apply every returned point,
-rebuild the next review, and retry. When there are no unreviewed points, the
-server archives only the interruption and keeps the current review and round.
+If `kind` is `feedback_update`, the user added points or edited pending points
+in this same batch. Do not finalize verdicts. `addedPointIds` is only a wake-up
+hint and may be stale after retries. Re-read live `feedback.json`, current
+`review.json`, and every archived review for the batch. A point is represented
+only when a review entry has the same `id` and `feedbackRevision`; an absent
+revision means 1. Apply every unrepresented revision, one commit per point. If
+an older revision already has a commit, treat the latest text and rectangles as
+a correction on top of that work, then record the current revision. Build a
+complete round + 1 review in a separate file, preserving the original
+`beforeRef`, then request the `feedback-update` transition shown in step 9. If
+the server replies `409` with `missingPoints`, that list is authoritative:
+apply every returned revision, rebuild the next review, and retry. When there
+are no unreviewed revisions, the server archives only the interruption and
+keeps the current review and round.
 
 Per verdict:
 
@@ -446,11 +458,12 @@ webkit/scripts/transition-round.py <slug> feedback-update <batchId> <round> \
   --next-review <next-review.json>
 ```
 
-The server calculates unreviewed points from the full live batch plus all
-review history. A `409` response includes `missingPoints`; handle all of them,
-rebuild the file, and retry. On success, inspect `nextRound`: it stays on the
-current round if nothing was missing, or advances after the server archives
-the old review and installs the supplied one.
+The server calculates unreviewed point revisions from the full live batch plus
+all review history. A `409` response includes `missingPoints`; handle all of
+them, copy each current revision into `feedbackRevision`, rebuild the file, and
+retry. On success, inspect `nextRound`: it stays on the current round if nothing
+was missing, or advances after the server archives the old review and installs
+the supplied one.
 
 **If any point got `redo`** (the batch continues):
 

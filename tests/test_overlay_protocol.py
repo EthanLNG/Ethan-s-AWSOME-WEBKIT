@@ -35,7 +35,8 @@ class OverlayProtocolTests(unittest.TestCase):
             + "authenticateOverlayHandshake, "
             + "queuedPointKey, queuedTombstoneKey, validQueuedPoint, "
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
-            + "hasQueuedTombstoneCapacity, pendingReviewPoints, "
+            + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
+            + "anchorFitScore, reanchorRect, tabActivityMode, tabPollDelay, "
             + "MAX_QUEUED_TOMBSTONES };"
         )
         program = "const H = new Function(%s)();\n%s" % (json.dumps(exports), body)
@@ -179,7 +180,7 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
 
     def test_active_batch_points_and_overlay_input_survive_refresh_boundaries(self):
         self.assertIn("S.batch.points", self.source)
-        self.assertIn("'added point ' + p.number + ' is saved and waiting for the agent'", self.source)
+        self.assertIn("'added point ' + p.number + ' is saved and waiting - click to edit'", self.source)
         self.assertIn("submittedPoints: []", self.source)
         self.assertIn("B.pending = el('span', 'wk-pending-count')", self.source)
         self.assertNotIn("if (!S.reviewing && S.batch", self.source)
@@ -206,12 +207,75 @@ const pending = H.pendingReviewPoints(
   [{ ...p3, source: 'stale-queued' }, p4]
 );
 assert.deepStrictEqual(pending, [p2, p3, p4]);
+
+const revised = H.pendingReviewPoints(
+  [{ ...p1, revision: 2 }, p2],
+  [{ id: 'p1', feedbackRevision: 1 }],
+  [{ ...p1, revision: 3, source: 'latest' }],
+  [],
+  ['p1']
+);
+assert.deepStrictEqual(revised, [{ ...p1, revision: 3, source: 'latest' }]);
+
+const authoritative = H.pendingReviewPoints(
+  [p1, p2], [], [], [], ['p2']
+);
+assert.deepStrictEqual(authoritative, [p2]);
 """
         )
-        self.assertIn("S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, snapshot)", self.source)
-        self.assertIn("pendingReviewPoints(batchPoints, S.reviewList, S.submittedPoints, [])", self.source)
+        self.assertIn("S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, acceptedPoints)", self.source)
+        self.assertIn("openCard({ pendingPoint: p })", self.source)
+        self.assertIn("api('/__wk/feedback/edit'", self.source)
         self.assertIn("pendingReviewPoints(\n      S.batch", self.source)
         self.assertIn(".wk-pending-count", self.css)
+
+    def test_rectangle_anchoring_prefers_close_context_and_scales_stably(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const mark = { x: 100, y: 100, w: 200, h: 80 };
+const target = { x: 90, y: 90, w: 230, h: 100 };
+const background = { x: 0, y: 0, w: 1920, h: 1080 };
+assert(H.anchorFitScore(mark, target) > H.anchorFitScore(mark, background));
+assert(H.anchorFitScore(mark, background) < 0.08);
+assert.deepStrictEqual(
+  H.reanchorRect(mark, target, { x: 180, y: 150, w: 460, h: 200 }),
+  { x: 200, y: 170, w: 400, h: 160 }
+);
+assert.deepStrictEqual(
+  H.reanchorRect(mark, target, { x: 180, y: 150, w: 2000, h: 100 }),
+  { x: 190, y: 160, w: 200, h: 80 }
+);
+"""
+        )
+        self.assertIn("right[1].score - left[1].score", self.source)
+        self.assertIn("const MIN_ANCHOR_FIT = 0.08", self.source)
+        self.assertIn("rectContexts: rects.map((rect) => captureContext(rect))", self.source)
+        self.assertIn("if (contexts.length) contexts[0].role = 'primary'", self.source)
+        self.assertIn("const pendingEditingRects = pendingGeometry", self.source)
+        self.assertIn("x: rect.x + scrollX", self.source)
+
+    def test_tab_title_tracks_work_and_background_review_ready_state(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+for (const phase of ['awaiting_agent', 'verdicts_sent', 'transitioning']) {
+  assert.strictEqual(H.tabActivityMode(phase), 'working');
+}
+assert.strictEqual(H.tabActivityMode('reviewing'), 'review-ready');
+assert.strictEqual(H.tabActivityMode('collecting'), 'normal');
+assert.strictEqual(H.tabPollDelay('working', 'feedback', true), 5000);
+assert.strictEqual(H.tabPollDelay('review-ready', 'feedback', true), 0);
+assert.strictEqual(H.tabPollDelay('normal', 'feedback', false), 2000);
+assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
+"""
+        )
+        self.assertIn("EMOJI + ' Working'", self.source)
+        self.assertIn("' Review ready'", self.source)
+        self.assertIn("mode === 'review-ready' && !document.hidden", self.source)
+        self.assertIn("if (document.hidden) schedulePoll(true)", self.source)
+        self.assertIn("S.agentWakePending = true", self.source)
+        self.assertIn("if (S.reviewing) S.sentVerdicts = S.phase !== 'reviewing'", self.source)
 
     def test_edit_card_actions_stay_inside_the_bounded_card(self):
         self.assertIn("'wk-row wk-actions wk-edit-actions'", self.source)

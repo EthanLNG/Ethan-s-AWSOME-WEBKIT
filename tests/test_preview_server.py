@@ -571,6 +571,130 @@ class PreviewServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(payload)["phase"], "awaiting_agent")
 
+    def test_pending_feedback_point_edit_is_atomic_revisioned_and_review_safe(self):
+        batch = self.batch()
+        batch["points"][0]["createdAt"] = "2026-08-22T10:00:00Z"
+        status, _, payload = self.post_json("/__wk/feedback", batch)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["points"][0]["id"], "point-1")
+
+        invalid_fresh = self.batch("point-2")
+        invalid_fresh["points"][0]["revision"] = 2
+        status, _, payload = self.post_json("/__wk/feedback", invalid_fresh)
+        self.assertEqual(status, 400, payload)
+        self.assertIn(b"assigned by the preview server", payload)
+
+        edited = dict(batch["points"][0])
+        edited["text"] = "Use the corrected instruction"
+        edited["number"] = 999
+        edited["page"] = "/attacker-controlled.html"
+        edited["createdAt"] = "replaced"
+        request = {
+            "version": 1,
+            "kind": "feedback_edit",
+            "batchId": "batch-1",
+            "round": 1,
+            "pointId": "point-1",
+            "expectedRevision": 1,
+            "point": edited,
+        }
+        status, _, payload = self.post_json("/__wk/feedback/edit", request, token=False)
+        self.assertEqual(status, 403, payload)
+        self.assertEqual(self.read_data("feedback.json"), batch)
+
+        status, _, payload = self.post_json("/__wk/feedback/edit", request)
+        self.assertEqual(status, 200, payload)
+        updated = json.loads(payload)["point"]
+        self.assertEqual(updated["revision"], 2)
+        self.assertEqual(updated["text"], "Use the corrected instruction")
+        self.assertEqual(updated["number"], 1)
+        self.assertEqual(updated["page"], "/index.html")
+        self.assertEqual(updated["createdAt"], "2026-08-22T10:00:00Z")
+        self.assertEqual(self.read_data("feedback.json")["points"], [updated])
+        self.assertEqual(self.read_data("verdicts.json")["addedPointIds"], ["point-1"])
+
+        status, _, payload = self.state_request()
+        state = json.loads(payload)
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(state["phase"], "awaiting_agent")
+        self.assertEqual(state["pendingPointIds"], ["point-1"])
+
+        stale = dict(request)
+        stale["point"] = dict(edited, text="stale overwrite")
+        status, _, payload = self.post_json("/__wk/feedback/edit", stale)
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(self.read_data("feedback.json")["points"], [updated])
+
+        review = self.review()
+        review["points"][0]["feedbackRevision"] = 2
+        self.write_data("review.json", review)
+        current = dict(request, expectedRevision=2)
+        current["point"] = dict(edited, text="too late")
+        status, _, payload = self.post_json("/__wk/feedback/edit", current)
+        self.assertEqual(status, 409, payload)
+        self.assertIn(b"already entered review", payload)
+
+    def test_feedback_edit_revision_forces_stale_agent_work_into_next_review(self):
+        status, _, _ = self.post_json("/__wk/feedback", self.batch())
+        self.assertEqual(status, 200)
+        edited = dict(self.batch()["points"][0], text="Latest instruction")
+        status, _, payload = self.post_json("/__wk/feedback/edit", {
+            "version": 1,
+            "kind": "feedback_edit",
+            "batchId": "batch-1",
+            "round": 1,
+            "pointId": "point-1",
+            "expectedRevision": 1,
+            "point": edited,
+        })
+        self.assertEqual(status, 200, payload)
+
+        stale_review = self.review()
+        self.write_data("review.json", stale_review)
+        status, _, payload = self.state_request()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["phase"], "transitioning")
+
+        next_review = self.review(round_number=2)
+        next_review["points"][0]["feedbackRevision"] = 2
+        status, _, payload = self.post_transition(
+            self.transition("feedback-update", next_review=next_review)
+        )
+        self.assertEqual(status, 200, payload)
+        response = json.loads(payload)
+        self.assertEqual(response["nextRound"], 2)
+        self.assertEqual(response["missingPoints"][0]["revision"], 2)
+        self.assertEqual(self.read_data("review.json")["points"][0]["feedbackRevision"], 2)
+        status, _, payload = self.state_request()
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(json.loads(payload)["pendingPointIds"], [])
+
+    def test_feedback_rectangle_contexts_match_each_rectangle(self):
+        batch = self.batch()
+        point = batch["points"][0]
+        point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        point["rects"] = [point["rect"], {"x": 50, "y": 60, "w": 70, "h": 80}]
+        context = [{
+            "selector": "#target",
+            "tag": "div",
+            "text": "Target",
+            "box": {"x": 8, "y": 18, "w": 40, "h": 50},
+            "role": "primary",
+        }]
+        point["rectContexts"] = [context, context]
+        status, _, payload = self.post_json("/__wk/feedback", batch)
+        self.assertEqual(status, 200, payload)
+
+        invalid = self.batch("point-2")
+        invalid_point = invalid["points"][0]
+        invalid_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        invalid_point["rects"] = [invalid_point["rect"]]
+        invalid_point["rectContexts"] = [context, context]
+        self.assertEqual(
+            self.module._feedback_schema_error(invalid),
+            "feedback point rectangle contexts are invalid",
+        )
+
     def test_existing_feedback_rejects_batch_and_round_skew_but_allows_round_two_additions(self):
         live = self.batch()
         live["round"] = 2

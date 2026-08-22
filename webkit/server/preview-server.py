@@ -1716,7 +1716,7 @@ _BATCH_FIELDS = {
 _POINT_FIELDS = {
     "id", "number", "page", "createdAt", "rect", "rects", "viewport",
     "scroll", "anchor", "context", "uiState", "abcState", "text",
-    "voiceNote", "abcRequest", "status",
+    "voiceNote", "abcRequest", "status", "revision", "rectContexts",
 }
 
 
@@ -1967,6 +1967,15 @@ def _feedback_schema_error(batch):
                 or any(not _valid_rect(rect, allow_negative=True) for rect in rects)
             ):
                 return "feedback point rects are invalid"
+        if "rectContexts" in point:
+            rect_contexts = point["rectContexts"]
+            rects = point.get("rects") or ([point.get("rect")] if point.get("rect") else [])
+            if (
+                not isinstance(rect_contexts, list)
+                or len(rect_contexts) != len(rects)
+                or any(not _valid_context(contexts) for contexts in rect_contexts)
+            ):
+                return "feedback point rectangle contexts are invalid"
         if "viewport" in point:
             viewport = point["viewport"]
             if (
@@ -2000,6 +2009,12 @@ def _feedback_schema_error(batch):
             return "feedback point abcRequest is invalid"
         if "status" in point and point["status"] != "new":
             return "feedback point status must be new"
+        if "revision" in point and (
+            not isinstance(point["revision"], int)
+            or isinstance(point["revision"], bool)
+            or point["revision"] < 2
+        ):
+            return "feedback point revision must be a server-assigned integer"
     if len(numbers) != len(set(numbers)):
         return "feedback point numbers must be unique"
     if set(point_pages) != set(pages):
@@ -2165,6 +2180,70 @@ def _archived_review_point_ids(batch_id):
     except OSError:
         return result
     return result
+
+
+def _review_point_revisions(review):
+    result = set()
+    if not isinstance(review, dict):
+        return result
+    for point in review.get("points") or []:
+        if not isinstance(point, dict):
+            continue
+        point_id = point.get("id")
+        revision = point.get("feedbackRevision", 1)
+        if (
+            isinstance(point_id, str)
+            and _POINT_ID_RE.fullmatch(point_id)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+            and revision >= 1
+        ):
+            result.add((point_id, revision))
+    return result
+
+
+def _archived_review_point_revisions(batch_id):
+    result = set()
+    history = os.path.join(FEEDBACK_DIR, "history")
+    if not os.path.isdir(history) or os.path.islink(history):
+        return result
+    prefix = batch_id + "-r"
+    budget = [0]
+    try:
+        entries = _bounded_history_entries(history, budget)
+        for entry in entries:
+            if not entry.name.startswith(prefix) or not entry.is_dir(follow_symlinks=False):
+                continue
+            review_path = os.path.join(entry.path, "review.json")
+            if not _path_is_within(FEEDBACK_DIR, review_path) or os.path.islink(review_path):
+                continue
+            review = _load_json_object_path(review_path)
+            if review is None or review.get("batchId") != batch_id:
+                continue
+            result.update(_review_point_revisions(review))
+    except _HistoryLimit:
+        raise
+    except OSError:
+        return result
+    return result
+
+
+def _pending_feedback_points(feedback, review):
+    if not isinstance(feedback, dict) or _feedback_schema_error(feedback):
+        return []
+    batch_id = feedback.get("batchId")
+    if not isinstance(batch_id, str) or not _BATCH_ID_RE.fullmatch(batch_id):
+        return []
+    reviewed = _review_point_revisions(review)
+    reviewed.update(_archived_review_point_revisions(batch_id))
+    pending = []
+    for point in feedback.get("points") or []:
+        if not isinstance(point, dict) or not isinstance(point.get("id"), str):
+            continue
+        revision = point.get("revision", 1)
+        if (point["id"], revision) not in reviewed:
+            pending.append(point)
+    return pending
 
 
 def _archive_transaction(
@@ -2655,11 +2734,11 @@ def _references_voice_path(value, relative):
     return False
 
 
-def _review_schema_error(review, feedback):
+def _review_schema_error(review, feedback, check_revisions=True):
     allowed_top = {
         "version", "kind", "batchId", "round", "beforeRef", "createdAt", "points"
     }
-    allowed_point = {"id", "handled", "note", "commit", "abc"}
+    allowed_point = {"id", "handled", "note", "commit", "abc", "feedbackRevision"}
     if not isinstance(review, dict) or not set(review).issubset(allowed_top):
         return "review contains unsupported fields"
     if review.get("version") != 1 or review.get("kind") != "review":
@@ -2682,11 +2761,24 @@ def _review_schema_error(review, feedback):
         set(_point_id_list(feedback.get("points")))
         if isinstance(feedback, dict) else set()
     )
+    feedback_by_id = {
+        point["id"]: point for point in (feedback.get("points") or [])
+        if isinstance(point, dict) and isinstance(point.get("id"), str)
+    } if isinstance(feedback, dict) else {}
     if not set(_point_id_list(points)).issubset(feedback_ids):
         return "review points must be a subset of feedback points"
     for point in points:
         if not set(point).issubset(allowed_point):
             return "review point contains unsupported fields"
+        expected_revision = feedback_by_id.get(point["id"], {}).get("revision", 1)
+        feedback_revision = point.get("feedbackRevision", 1)
+        if check_revisions and (
+            not isinstance(feedback_revision, int)
+            or isinstance(feedback_revision, bool)
+            or feedback_revision < 1
+            or feedback_revision != expected_revision
+        ):
+            return "review point feedback revision is stale"
         handled = point.get("handled")
         if handled not in ("done", "abc", "skipped"):
             return "review point handled value is invalid"
@@ -3530,6 +3622,12 @@ class Handler(SimpleHTTPRequestHandler):
             else:
                 batch = _load_data("feedback.json")
                 verdicts = _load_data("verdicts.json")
+                try:
+                    pending_point_ids = [
+                        point["id"] for point in _pending_feedback_points(batch, review)
+                    ]
+                except _HistoryLimit:
+                    pending_point_ids = None
                 response = {
                     "changed": True,
                     "rev": rev,
@@ -3539,6 +3637,7 @@ class Handler(SimpleHTTPRequestHandler):
                     "batch": batch,
                     "review": review,
                     "verdicts": verdicts,
+                    "pendingPointIds": pending_point_ids,
                     "beforePrefix": before_prefix,
                 }
         return self._send_json(
@@ -3683,6 +3782,8 @@ class Handler(SimpleHTTPRequestHandler):
     def _wk_post(self, raw):
         if raw == "/__wk/feedback":
             return self._wk_feedback()
+        if raw == "/__wk/feedback/edit":
+            return self._wk_feedback_edit()
         if raw == "/__wk/voice-note":
             return self._wk_voice_note()
         if raw == "/__wk/voice-note/delete":
@@ -3924,6 +4025,10 @@ class Handler(SimpleHTTPRequestHandler):
         schema_error = _feedback_schema_error(incoming)
         if schema_error:
             return self._send_json(400, {"error": schema_error})
+        if any("revision" in point for point in points):
+            return self._send_json(400, {
+                "error": "feedback point revisions are assigned by the preview server"
+            })
         with _WRITE_LOCK:
             existing = _load_data("feedback.json")
             review = _load_data("review.json")
@@ -3949,7 +4054,9 @@ class Handler(SimpleHTTPRequestHandler):
                 fresh["points"] = _dedupe_points([], points)
                 fresh["pages"] = list(incoming["pages"])
                 _atomic_write("feedback.json", fresh)
-                return self._send_json(200, {"ok": True, "batchId": batch_id})
+                return self._send_json(200, {
+                    "ok": True, "batchId": batch_id, "points": fresh["points"]
+                })
 
             existing_batch_id = existing.get("batchId")
             existing_round = existing.get("round", 1)
@@ -3994,7 +4101,11 @@ class Handler(SimpleHTTPRequestHandler):
                     })
             novel = _dedupe_points(old_points, points)
             if not novel:
-                return self._send_json(200, {"ok": True, "batchId": existing_batch_id})
+                return self._send_json(200, {
+                    "ok": True,
+                    "batchId": existing_batch_id,
+                    "points": [existing_by_id[point["id"]] for point in points],
+                })
             if any(not _valid_voice_note(point.get("voiceNote")) for point in novel):
                 return self._send_json(400, {
                     "error": "feedback voiceNote must reference an existing safe inbox upload"
@@ -4070,7 +4181,134 @@ class Handler(SimpleHTTPRequestHandler):
                 _atomic_write("feedback.json", existing)
                 raise
             batch_id = existing_batch_id
-        return self._send_json(200, {"ok": True, "batchId": batch_id})
+        return self._send_json(200, {
+            "ok": True, "batchId": batch_id, "points": novel
+        })
+
+    def _wk_feedback_edit(self):
+        incoming = self._read_json_body()
+        if incoming is None:
+            return
+        allowed = {
+            "version", "kind", "batchId", "round", "pointId",
+            "expectedRevision", "point",
+        }
+        if (
+            not isinstance(incoming, dict)
+            or not set(incoming).issubset(allowed)
+            or incoming.get("version") != 1
+            or incoming.get("kind") != "feedback_edit"
+        ):
+            return self._send_json(400, {"error": "expected a version-1 feedback edit"})
+        batch_id = incoming.get("batchId")
+        point_id = incoming.get("pointId")
+        expected_revision = incoming.get("expectedRevision")
+        edited_point = incoming.get("point")
+        if not isinstance(batch_id, str) or not _BATCH_ID_RE.fullmatch(batch_id):
+            return self._send_json(400, {"error": "feedback edit batchId is invalid"})
+        if not isinstance(point_id, str) or not _POINT_ID_RE.fullmatch(point_id):
+            return self._send_json(400, {"error": "feedback edit pointId is invalid"})
+        if (
+            not _valid_round(incoming.get("round"))
+            or not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 1
+            or not isinstance(edited_point, dict)
+            or edited_point.get("id") != point_id
+        ):
+            return self._send_json(400, {"error": "feedback edit metadata is invalid"})
+
+        with _WRITE_LOCK:
+            feedback = _load_data("feedback.json")
+            review = _load_data("review.json")
+            verdicts = _load_data("verdicts.json")
+            if not isinstance(feedback, dict) or _feedback_schema_error(feedback):
+                return self._send_json(409, {"error": "the live feedback batch is unavailable"})
+            if (
+                feedback.get("batchId") != batch_id
+                or feedback.get("round") != incoming.get("round")
+            ):
+                return self._send_json(409, {"error": "the live feedback batch changed"})
+            points = list(feedback.get("points") or [])
+            index = next((i for i, point in enumerate(points) if point.get("id") == point_id), -1)
+            if index < 0:
+                return self._send_json(409, {"error": "the pending feedback point no longer exists"})
+            persisted = points[index]
+            current_revision = persisted.get("revision", 1)
+            if current_revision != expected_revision:
+                return self._send_json(409, {
+                    "error": "the pending feedback point changed while it was open",
+                    "point": persisted,
+                })
+            try:
+                pending_ids = {
+                    point["id"] for point in _pending_feedback_points(feedback, review)
+                }
+            except _HistoryLimit as exc:
+                return self._send_json(507, {
+                    "error": "feedback history cannot be checked", "reason": str(exc)
+                })
+            if point_id not in pending_ids:
+                return self._send_json(409, {
+                    "error": "this point has already entered review and can no longer be edited"
+                })
+            if verdicts is not None and _feedback_update_marker_error(
+                verdicts, batch_id, feedback.get("round")
+            ):
+                return self._send_json(409, {
+                    "error": "the current review transition must finish before this point can be edited"
+                })
+
+            updated = dict(edited_point)
+            updated["id"] = persisted["id"]
+            updated["number"] = persisted["number"]
+            updated["page"] = persisted["page"]
+            if "createdAt" in persisted:
+                updated["createdAt"] = persisted["createdAt"]
+            else:
+                updated.pop("createdAt", None)
+            updated["revision"] = current_revision + 1
+            candidate = dict(feedback)
+            points[index] = updated
+            candidate["points"] = points
+            candidate["updatedAt"] = _now_iso()
+            schema_error = _feedback_schema_error(candidate)
+            if schema_error:
+                return self._send_json(400, {"error": schema_error})
+            if not _valid_voice_note(updated.get("voiceNote")):
+                return self._send_json(400, {
+                    "error": "feedback voiceNote must reference an existing safe inbox upload"
+                })
+
+            previous_ids = []
+            if verdicts is not None:
+                previous_ids = list(verdicts.get("addedPointIds") or [])
+            if point_id not in previous_ids:
+                previous_ids.append(point_id)
+            marker = {
+                "version": 1,
+                "kind": "feedback_update",
+                "batchId": batch_id,
+                "round": feedback.get("round"),
+                "sentAt": _now_iso(),
+                "addedPointIds": previous_ids,
+            }
+            try:
+                _atomic_write("feedback.json", candidate)
+                _atomic_write("verdicts.json", marker)
+            except Exception:
+                _atomic_write("feedback.json", feedback)
+                if verdicts is None:
+                    try:
+                        os.unlink(_data_path("verdicts.json"))
+                    except FileNotFoundError:
+                        pass
+                else:
+                    _atomic_write("verdicts.json", verdicts)
+                raise
+        return self._send_json(200, {
+            "ok": True, "batchId": batch_id, "point": updated
+        })
 
     def _wk_verdicts(self):
         incoming = self._read_json_body()
@@ -4291,7 +4529,9 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send_json(409, {
                     "error": "transition_conflict", "reason": "live review points are invalid"
                 })
-            review_error = _review_schema_error(review, feedback)
+            review_error = _review_schema_error(
+                review, feedback, check_revisions=mode != "feedback-update"
+            )
             if review_error:
                 return self._send_json(409, {
                     "error": "transition_conflict",
@@ -4336,13 +4576,13 @@ class Handler(SimpleHTTPRequestHandler):
 
             current_review_ids = set(_point_id_list(review.get("points")))
             try:
-                archived_review_ids = _archived_review_point_ids(batch_id)
+                reviewed_revisions = _review_point_revisions(review)
+                reviewed_revisions.update(_archived_review_point_revisions(batch_id))
             except _HistoryLimit as exc:
                 return self._send_json(507, {
                     "error": "history_capacity_exceeded",
                     "reason": str(exc),
                 })
-            seen_ids = current_review_ids | archived_review_ids
             missing_points = []
             missing_ids = set()
             for point in feedback.get("points") or []:
@@ -4351,7 +4591,8 @@ class Handler(SimpleHTTPRequestHandler):
                 point_id = point.get("id")
                 if not isinstance(point_id, str) or not point_id:
                     return self._send_json(409, {"error": "transition_conflict", "reason": "feedback contains a malformed point id"})
-                if point_id not in seen_ids and point_id not in missing_ids:
+                point_revision = point.get("revision", 1)
+                if (point_id, point_revision) not in reviewed_revisions and point_id not in missing_ids:
                     missing_ids.add(point_id)
                     missing_points.append(point)
 

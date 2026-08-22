@@ -35,7 +35,8 @@ class OverlayProtocolTests(unittest.TestCase):
             + "authenticateOverlayHandshake, "
             + "queuedPointKey, queuedTombstoneKey, validQueuedPoint, "
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
-            + "hasQueuedTombstoneCapacity, MAX_QUEUED_TOMBSTONES };"
+            + "hasQueuedTombstoneCapacity, pendingReviewPoints, "
+            + "MAX_QUEUED_TOMBSTONES };"
         )
         program = "const H = new Function(%s)();\n%s" % (json.dumps(exports), body)
         result = subprocess.run(
@@ -178,7 +179,10 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
 
     def test_active_batch_points_and_overlay_input_survive_refresh_boundaries(self):
         self.assertIn("S.batch.points", self.source)
-        self.assertIn("'submitted point ' + p.number + ' is saved and waiting'", self.source)
+        self.assertIn("'added point ' + p.number + ' is saved and waiting for the agent'", self.source)
+        self.assertIn("submittedPoints: []", self.source)
+        self.assertIn("B.pending = el('span', 'wk-pending-count')", self.source)
+        self.assertNotIn("if (!S.reviewing && S.batch", self.source)
         self.assertIn("if (!S.card) renderPins();", self.source)
         self.assertIn("root.addEventListener(type, (event) => event.stopPropagation())", self.source)
         for event_name in ("keydown", "keyup", "keypress", "beforeinput", "input"):
@@ -186,6 +190,28 @@ for (const platform of ['Win32', 'Linux x86_64', 'Android', '', null]) {
         self.assertIn(".wk-pin-rect.submitted", self.css)
         self.assertIn(".wk-pin.submitted", self.css)
         self.assertIn("'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'", self.source)
+
+    def test_points_added_during_review_stay_pending_and_deduplicated(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const p1 = { id: 'p1', number: 1 };
+const p2 = { id: 'p2', number: 2, source: 'server' };
+const p3 = { id: 'p3', number: 3, source: 'optimistic' };
+const p4 = { id: 'p4', number: 4, source: 'queued' };
+const pending = H.pendingReviewPoints(
+  [p1, p2],
+  [p1],
+  [{ ...p2, source: 'stale-optimistic' }, p3],
+  [{ ...p3, source: 'stale-queued' }, p4]
+);
+assert.deepStrictEqual(pending, [p2, p3, p4]);
+"""
+        )
+        self.assertIn("S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, snapshot)", self.source)
+        self.assertIn("pendingReviewPoints(batchPoints, S.reviewList, S.submittedPoints, [])", self.source)
+        self.assertIn("pendingReviewPoints(\n      S.batch", self.source)
+        self.assertIn(".wk-pending-count", self.css)
 
     def test_edit_card_actions_stay_inside_the_bounded_card(self):
         self.assertIn("'wk-row wk-actions wk-edit-actions'", self.source)

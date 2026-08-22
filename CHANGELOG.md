@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.8.7 (2026-08-22): Visible active-review additions
+
+- Kept feedback points and rectangles visible when they are added while an
+  earlier review is still open, including the brief interval before the next
+  server-state poll.
+- Added a pending-count chip to the review controls so saved additions remain
+  accounted for without being mistaken for points that are already reviewable.
+- Deduplicated server, optimistic, and locally queued copies of the same point
+  and cleared stale hidden send-button content after successful submission.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.6 (2026-08-22): Reliable direct preview startup
 
 - Added a tagged `claim-color.sh --session` result that distinguishes a reused

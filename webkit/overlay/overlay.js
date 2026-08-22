@@ -357,6 +357,20 @@
       return active;
     };
   }
+
+  function pendingReviewPoints(batchPoints, reviewPoints, optimisticPoints, queuedPoints) {
+    const reviewedIds = new Set((reviewPoints || []).map((point) => point && point.id).filter(Boolean));
+    const seen = new Set(reviewedIds);
+    const pending = [];
+    for (const points of [batchPoints, optimisticPoints, queuedPoints]) {
+      for (const point of (points || [])) {
+        if (!point || typeof point.id !== 'string' || !point.id || seen.has(point.id)) continue;
+        seen.add(point.id);
+        pending.push(point);
+      }
+    }
+    return pending;
+  }
   // ===== end pure protocol helpers ==========================================
 
   // ===== script dataset ======================================================
@@ -603,6 +617,7 @@
     reviewRound: 0,
     verdictsKey: null,          // 'wk:verdicts:<batchId>:<round>' for the active review
     reviewList: [],             // batch points under review, ordered by number
+    submittedPoints: [],        // accepted points awaiting the next server-state poll
     handledById: new Map(),     // pointId → review.points entry
     verdicts: {},               // pointId → {verdict, chosenLetter?, redoText?}
     deletedIds: new Set(),      // points deleted/sent this session - never resurrect on cross-tab merge
@@ -1371,20 +1386,22 @@
         });
       });
     }
-    if (!S.reviewing && S.batch && S.phase !== null && S.phase !== 'collecting') {
-      const queuedIds = new Set(S.points.map((point) => point.id));
-      for (const p of (Array.isArray(S.batch.points) ? S.batch.points : [])) {
-        if (!p || queuedIds.has(p.id) || p.page !== page || !pointSurfaceVisible(p)) continue;
-        const va = pinBox(p);
-        const primary = va ? va.box : correctedRect(p);
-        const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
-        (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
-          x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
-        }, 'submitted', () => {}, 'submitted point ' + p.number + ' is saved and waiting', !!va));
-      }
+    const batchPoints = S.batch && Array.isArray(S.batch.points) ? S.batch.points : [];
+    const submitted = S.phase !== null && S.phase !== 'collecting'
+      ? pendingReviewPoints(batchPoints, S.reviewList, S.submittedPoints, [])
+      : [];
+    const submittedIds = new Set(submitted.map((point) => point.id));
+    for (const p of submitted) {
+      if (p.page !== page || !pointSurfaceVisible(p)) continue;
+      const va = pinBox(p);
+      const primary = va ? va.box : correctedRect(p);
+      const dx = primary.x - p.rect.x, dy = primary.y - p.rect.y;
+      (p.rects || [p.rect]).forEach((box) => addPin(p.number, {
+        x: box.x + dx, y: box.y + dy, w: box.w, h: box.h,
+      }, 'submitted', () => {}, 'added point ' + p.number + ' is saved and waiting for the agent', !!va));
     }
     for (const p of S.points) {
-      if (p.page !== page) continue;
+      if (submittedIds.has(p.id) || p.page !== page) continue;
       if (!pointSurfaceVisible(p)) continue;
       const va = pinBox(p);
       const primary = va ? va.box : p.rect;
@@ -1394,7 +1411,7 @@
       }, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
-      }, S.reviewing ? 'added to current batch - click to edit' : 'click to edit', !!va));
+      }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit', !!va));
     }
     repositionAll();
     updateHint();
@@ -2272,6 +2289,7 @@
       S.card = null;
       renderPins();
       updateSendBtn();
+      if (S.reviewing) updateBar();
     }
     function cancelDraft() {
       if (draft.voiceNote && draft.voiceNote.path !== originalVoiceNote?.path) deleteVoiceNote(draft.voiceNote);
@@ -2469,7 +2487,12 @@
   function updateSendBtn() {
     const n = S.points.length;
     sendBtn.hidden = n === 0;
-    if (n === 0) return;
+    if (n === 0) {
+      sendBtn.classList.remove('queued');
+      sendBtn.replaceChildren();
+      sendBtn.title = '';
+      return;
+    }
     const activeRound = S.phase !== null && S.phase !== 'collecting';
     const queued = S.phase === 'verdicts_sent';
     sendBtn.classList.toggle('queued', activeRound);
@@ -2527,6 +2550,7 @@
         addedToActiveRound = S.phase !== 'collecting' && S.phase !== null;
         await api('/__wk/feedback', batch, 15000);
         accepted = true;
+        S.submittedPoints = pendingReviewPoints([], [], S.submittedPoints, snapshot);
         if (!retireQueuedPointIds(sentIds)) {
           // The lock makes this unreachable for cooperating tabs. Keep it as a
           // fail-visible guard for browsers without Web Locks or hostile writes.
@@ -2536,6 +2560,7 @@
       });
       renderPins();
       updateSendBtn();
+      if (S.reviewing) updateBar();
       if (sentCount) {
         toast((addedToActiveRound
           ? 'Added ' + sentCount + ' point(s) to the current batch'
@@ -2625,6 +2650,15 @@
     S.phase = st.phase || 'collecting';
     S.batch = st.batch || null;
     S.review = st.review || null;
+    if (S.phase === 'collecting') {
+      S.submittedPoints = [];
+    } else {
+      const serverPointIds = new Set(
+        (S.batch && Array.isArray(S.batch.points) ? S.batch.points : [])
+          .map((point) => point && point.id).filter(Boolean)
+      );
+      S.submittedPoints = S.submittedPoints.filter((point) => !serverPointIds.has(point.id));
+    }
     S.points = loadQueuedPoints();
     const nextReviewIdentity = S.review
       ? [S.review.batchId, S.review.round, S.review.beforeRef || ''].join(':')
@@ -3186,6 +3220,8 @@
     B.next.setAttribute('aria-label', 'Next review point');
     B.counter = el('span', 'wk-bar-count');
     B.dots = el('span', 'wk-dots');
+    B.pending = el('span', 'wk-pending-count');
+    B.pending.hidden = true;
 
     B.seg = el('div', 'wk-seg wk-side');
     B.seg.setAttribute('role', 'group');
@@ -3234,7 +3270,7 @@
     B.wait = el('span', 'wk-wait', EMOJI + ' waiting for the agent…');
     B.wait.hidden = true;
 
-    bar.append(B.prev, B.counter, B.dots, B.next, el('span', 'wk-bar-sep'),
+    bar.append(B.prev, B.counter, B.dots, B.pending, B.next, el('span', 'wk-bar-sep'),
       B.seg, B.scopeWrap, B.abcChip, B.note, el('span', 'wk-bar-sep'),
       B.accept, B.redo, B.del, B.dismiss, B.sendv, B.wait);
 
@@ -3377,6 +3413,17 @@
     const done = Object.keys(S.verdicts).filter((id) => S.reviewList.some((p) => p.id === id)).length;
 
     B.counter.textContent = (S.cursor + 1) + '/' + total + ' · p' + pt.number;
+    const pending = pendingReviewPoints(
+      S.batch && Array.isArray(S.batch.points) ? S.batch.points : [],
+      S.reviewList,
+      S.submittedPoints,
+      S.points
+    );
+    B.pending.hidden = pending.length === 0;
+    B.pending.textContent = '+' + pending.length + ' pending';
+    B.pending.title = pending.length + ' added feedback point' + (pending.length === 1 ? '' : 's') +
+      ' saved and waiting for the agent';
+    B.pending.setAttribute('aria-label', B.pending.title);
     B.dots.textContent = '';
     S.reviewList.forEach((p, i) => {
       const dv = S.verdicts[p.id];

@@ -671,6 +671,15 @@ input:focus-visible {
 }
 .wk-nav:hover { border-color: var(--wk-accent); color: var(--wk-accent); }
 .wk-bar-count { font: 700 12px/1 var(--wk-font); color: var(--wk-ink); white-space: nowrap; }
+.wk-pending-count {
+  border: 1px solid color-mix(in srgb, var(--wk-accent) 45%, var(--wk-line));
+  border-radius: 999px;
+  background: var(--wk-accent-soft);
+  color: var(--wk-ink);
+  font: 700 11px/1 var(--wk-font);
+  padding: 5px 8px;
+  white-space: nowrap;
+}
 
 .wk-dots {
   display: inline-flex;

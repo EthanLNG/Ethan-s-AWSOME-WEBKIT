@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.9 (2026-08-22): Deliberate review feedback
+
+- Made Done save new review-phase feedback locally without sending it, leaving
+  the Add or Send control pill as the only way to involve the agent.
+- Kept locally saved points editable and deletable until the user explicitly
+  sends them.
+- Opened ready reviews automatically after refreshing the completed website,
+  removing the redundant Start review confirmation toast.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.8 (2026-08-22): Reliable pending feedback
 
 - Made saved pending points directly editable with an atomic revision check, so

@@ -277,6 +277,24 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertIn("S.agentWakePending = true", self.source)
         self.assertIn("if (S.reviewing) S.sentVerdicts = S.phase !== 'reviewing'", self.source)
 
+    def test_review_feedback_waits_for_explicit_send_and_stays_deletable(self):
+        done_start = self.source.index("doneBtn.addEventListener('click'")
+        done_end = self.source.index("// The header doubles as a drag handle", done_start)
+        self.assertNotIn("sendPoints", self.source[done_start:done_end])
+        self.assertNotIn("sendPoints(true)", self.source)
+        self.assertIn("delBtn.hidden = !queuedEditing", self.source)
+        self.assertIn("queued ? 'Saved' : (activeRound ? 'Add' : 'Send')", self.source)
+        self.assertIn(
+            "Points are saved locally. Send them after the current verdicts finish processing.",
+            self.source,
+        )
+
+    def test_ready_review_opens_without_a_confirmation_toast(self):
+        self.assertIn("function maybeAutoEnterReview()", self.source)
+        self.assertIn("S.reviewAutoPending = true;\n        maybeAutoEnterReview();", self.source)
+        self.assertIn("enterReview({ auto: true });", self.source)
+        self.assertNotIn("action: { label: 'Start review'", self.source)
+
     def test_edit_card_actions_stay_inside_the_bounded_card(self):
         self.assertIn("'wk-row wk-actions wk-edit-actions'", self.source)
         self.assertIn("grid-template-columns: auto minmax(0, 1fr) auto auto auto", self.css)

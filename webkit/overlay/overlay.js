@@ -695,8 +695,9 @@
     sentVerdicts: false,
     abcToggled: new Set(),      // scopeIds the user toggled since review entry
     acceptArmed: null,          // pointId armed for "accept without toggling" confirm
-    offeredReview: '',          // batchId:round already toasted, don't re-nag
-    bootReview: null,           // ?wk-review target during boot - suppresses the offer toast
+    offeredReview: '',          // batchId:round already auto-entered or queued
+    reviewAutoPending: false,   // ready review waiting for an open editor to close
+    bootReview: null,           // ?wk-review target during boot - owns automatic entry
     pinEls: [],                 // [{node, box}] for the rAF repositioner
     altHeld: false,
   };
@@ -2399,6 +2400,7 @@
       renderPins();
       updateSendBtn();
       if (S.reviewing) updateBar();
+      maybeAutoEnterReview();
     }
     function cancelDraft() {
       if (draft.voiceNote && draft.voiceNote.path !== originalVoiceNote?.path) deleteVoiceNote(draft.voiceNote);
@@ -2544,9 +2546,6 @@
         }
         if (voiceReady === false || S.card !== cardOwner || !node.isConnected) return;
         if (!(await commit())) return;
-        if (!pendingEditing && S.phase !== 'collecting' && S.phase !== null && S.phase !== 'verdicts_sent') {
-          sendPoints(false);
-        }
       } finally {
         doneBusy = false;
         if (S.card === cardOwner && node.isConnected) doneBtn.disabled = false;
@@ -2654,22 +2653,22 @@
     sendBtn.classList.toggle('queued', activeRound);
     sendBtn.replaceChildren();
     sendBtn.append(
-      el('span', 'wk-send-label', queued ? 'Queued' : (activeRound ? 'Add' : 'Send')),
+      el('span', 'wk-send-label', queued ? 'Saved' : (activeRound ? 'Add' : 'Send')),
       el('span', 'wk-badge', String(n)),
     );
     sendBtn.title = queued
-      ? 'These points will send as soon as the current verdicts finish processing'
+      ? 'Saved locally. Send after the current verdicts finish processing'
       : activeRound
       ? 'Add ' + n + ' point(s) to the current feedback batch'
       : 'Send ' + n + ' point(s) to the ' + COLOR + ' agent';
   }
 
   let sending = false;
-  async function sendPoints(auto) {
+  async function sendPoints() {
     if (sending) return;
     if (S.phase === 'verdicts_sent') {
       updateSendBtn();
-      if (!auto) toast('Points queued for the next batch.');
+      toast('Points are saved locally. Send them after the current verdicts finish processing.');
       return;
     }
     sending = true;
@@ -2749,7 +2748,7 @@
       }
       if (!(await S.card.commit())) return;
     }
-    sendPoints(false);
+    sendPoints();
   });
 
   // Cross-tab sync: distinct point keys commute, and tombstones always win over
@@ -2849,6 +2848,7 @@
     S.rev = st.rev || '';
     S.phase = st.phase || 'collecting';
     S.agentWakePending = false;
+    if (S.phase !== 'reviewing') S.reviewAutoPending = false;
     S.batch = st.batch || null;
     S.review = st.review || null;
     S.pendingPointIds = Array.isArray(st.pendingPointIds)
@@ -2899,11 +2899,6 @@
         exitReview();
         toast('Round complete - batch archived. Draw away!');
       }
-      // anything still in wk:points while phase was non-collecting is queued
-      // by construction (a send in collecting clears them) → flush it now
-      if (prevPhase !== null && prevPhase !== 'collecting' && S.points.length) {
-        sendPoints(true);
-      }
     } else if (S.phase === 'reviewing' && S.review) {
       const key = S.review.batchId + ':' + S.review.round;
       const reloadKey = 'wk:review-assets:' + key;
@@ -2921,10 +2916,8 @@
         toast('Round ' + S.review.round + ' ready - walking the redone points.');
       } else if (!S.reviewing && S.offeredReview !== key && S.bootReview !== S.review.batchId) {
         S.offeredReview = key;
-        toast(EMOJI + ' review ready - ' + (S.batch?.points?.length || '') + ' point(s) to walk', {
-          ttl: 0,
-          action: { label: 'Start review', fn: () => enterReview({}) },
-        });
+        S.reviewAutoPending = true;
+        maybeAutoEnterReview();
       }
     }
 
@@ -2955,14 +2948,25 @@
     return list.sort((a, b) => (a.number || 0) - (b.number || 0));
   }
 
+  function maybeAutoEnterReview() {
+    if (
+      !S.reviewAutoPending || S.reviewing || S.card ||
+      S.phase !== 'reviewing' || !S.review || !S.batch
+    ) return false;
+    S.reviewAutoPending = false;
+    enterReview({ auto: true });
+    return true;
+  }
+
   function enterReview(opts) {
     if (!S.review || !S.batch) return;
     if (S.mini) S.mini.cancel();
+    S.reviewAutoPending = false;
     S.reviewing = true;
     S.sentVerdicts = S.phase === 'verdicts_sent';
     S.reviewBatchId = S.review.batchId;
     S.reviewRound = S.review.round;
-    S.offeredReview = S.review.batchId + ':' + S.review.round;   // no offer toast for a round we're in
+    S.offeredReview = S.review.batchId + ':' + S.review.round;   // this round is already open
     S.reviewList = orderedReviewList();
     S.handledById = new Map(((S.review.points) || []).map((p) => [p.id, p]));
     // Key verdicts by batch AND round: without the round, round-1's {verdict:'redo'}

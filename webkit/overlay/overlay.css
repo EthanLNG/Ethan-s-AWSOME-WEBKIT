@@ -647,6 +647,7 @@ input:focus-visible {
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%);
+  box-sizing: border-box;
   width: max-content;
   display: flex;
   align-items: center;

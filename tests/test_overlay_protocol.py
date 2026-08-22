@@ -279,6 +279,7 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertNotIn("S.agentWakePending || S.sentVerdicts", self.source)
 
     def test_review_bar_and_variant_chip_stay_compact_until_screen_edge(self):
+        self.assertIn("box-sizing: border-box;", self.css)
         self.assertIn("width: max-content;", self.css)
         self.assertIn("max-width: calc(100vw - 40px);", self.css)
         self.assertIn("left: 20px;", self.css)

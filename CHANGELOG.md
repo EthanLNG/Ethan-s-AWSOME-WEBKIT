@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.8.12 (2026-08-22): Exact review pill bounds
+
+- Included the review pill's padding and border in its viewport width cap so it
+  preserves the full 20px screen margin when its one-line layout must wrap.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.11 (2026-08-22): Flexible redo variants
 
 - Made the number of variants requested from Redo adjustable from 2 to 10,

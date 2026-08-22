@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.5")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.6")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -3879,7 +3879,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.5",
+            "requiredVersion": "0.8.6",
         })
 
         status = subprocess.run(
@@ -3926,9 +3926,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.5")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.6")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.5")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.6")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -3936,7 +3936,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.5")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.6")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -3994,7 +3994,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.5"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.6"
         )
         self.assertEqual(
             subprocess.run(
@@ -4038,7 +4038,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.5",
+            "requiredVersion": "0.8.6",
         })
 
         active = {
@@ -4067,9 +4067,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.5")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.5")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.5")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.6")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.6")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.6")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()

@@ -14,11 +14,15 @@
 #   webkit/scripts/claim-color.sh --full
 #   webkit/scripts/claim-color.sh --slug blue
 #   webkit/scripts/claim-color.sh --active --full
+#   webkit/scripts/claim-color.sh --session
 #
 # A normal claim first discovers a verified live session owned by this exact
 # worktree. If one exists, it is reused and no second color is claimed.
 # --active performs only that discovery and prints:
 #   emoji slug port pid instance
+# --session performs the complete reuse-or-claim decision and prints one of:
+#   active emoji slug port pid instance
+#   claimed emoji slug port
 # The server identity comes from the private reservation and is checked against
 # the response header on that exact loopback port before anything is printed.
 
@@ -29,6 +33,7 @@ registry="$script_dir/runtime_registry.py"
 
 full=0
 active_only=0
+session_mode=0
 requested_slug=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -40,17 +45,26 @@ while [ "$#" -gt 0 ]; do
       active_only=1
       shift
       ;;
+    --session)
+      session_mode=1
+      shift
+      ;;
     --slug)
       [ "$#" -ge 2 ] || { echo "claim-color.sh: --slug needs a palette slug" >&2; exit 2; }
       requested_slug="$2"
       shift 2
       ;;
     *)
-      echo "usage: claim-color.sh [--full] [--active] [--slug <palette-slug>]" >&2
+      echo "usage: claim-color.sh [--full] [--active|--session] [--slug <palette-slug>]" >&2
       exit 2
       ;;
   esac
 done
+
+if [ "$active_only" -eq 1 ] && [ "$session_mode" -eq 1 ]; then
+  echo "claim-color.sh: --active and --session are mutually exclusive" >&2
+  exit 2
+fi
 
 palette="$("$script_dir/config-get.sh" palette)"
 lockdir="${WK_COLOR_LOCKDIR:-$("$script_dir/config-get.sh" get lock_dir)}"
@@ -79,7 +93,10 @@ if active="$(python3 "$registry" discover \
     echo "claim-color.sh: requested '$requested_slug', but this worktree already owns the verified active '$active_slug' session; reuse it or stop and release it first" >&2
     exit 2
   fi
-  if [ "$active_only" -eq 1 ]; then
+  if [ "$session_mode" -eq 1 ]; then
+    printf 'active %s %s %s %s %s\n' \
+      "$active_emoji" "$active_slug" "$active_port" "$active_pid" "$active_instance"
+  elif [ "$active_only" -eq 1 ]; then
     if [ "$full" -eq 1 ]; then
       printf '%s %s %s %s %s\n' \
         "$active_emoji" "$active_slug" "$active_port" "$active_pid" "$active_instance"
@@ -155,7 +172,9 @@ while IFS=' ' read -r slug emoji port; do
   if python3 "$registry" claim-color \
     --lock-dir "$lockdir" --color "$slug" --port "$port" \
     --owner "$me" --grace "$grace" >/dev/null; then
-    if [ "$full" -eq 1 ]; then
+    if [ "$session_mode" -eq 1 ]; then
+      printf 'claimed %s %s %s\n' "$emoji" "$slug" "$port"
+    elif [ "$full" -eq 1 ]; then
       printf '%s %s %s\n' "$emoji" "$slug" "$port"
     else
       printf '%s\n' "$emoji"

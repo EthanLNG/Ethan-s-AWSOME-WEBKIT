@@ -287,6 +287,24 @@ class ShellScriptTests(unittest.TestCase):
         self.assertEqual(released.returncode, 0, released.stderr)
         self.assertFalse((custom_lock_dir / "green.lock").exists())
 
+    def test_session_mode_tags_a_fresh_claim_for_safe_startup(self):
+        common_env = {"WK_COLOR_OWNER": "owner-a", "WK_COLOR_TABS": ""}
+
+        claimed = self.run_script(
+            CLAIM, "--session", "--slug", "green", env=common_env
+        )
+
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.assertEqual(claimed.stdout.strip(), "claimed 🟢 green 6123")
+        released = self.run_script(RELEASE, "--slug", "green", env=common_env)
+        self.assertEqual(released.returncode, 0, released.stderr)
+
+    def test_session_and_active_modes_are_mutually_exclusive(self):
+        result = self.run_script(CLAIM, "--session", "--active")
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("mutually exclusive", result.stderr)
+
     def test_claim_does_not_chmod_preexisting_custom_registry(self):
         self.lock_dir.mkdir(mode=0o700)
         if os.name != "nt":

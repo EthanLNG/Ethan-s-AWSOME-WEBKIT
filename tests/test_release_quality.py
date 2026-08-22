@@ -251,10 +251,12 @@ class ReleaseQualityTests(unittest.TestCase):
         self.assertNotIn("git -C \"$WK_PROJECT\" add -- webkit AGENTS.md", install)
 
         setup = documents["webkit/SETUP.md"]
-        self.assertIn('session_info="$(webkit/scripts/claim-color.sh --full)" || exit 1', setup)
-        self.assertIn("read -r color slug port unexpected", setup)
-        self.assertIn('active_info="$(webkit/scripts/claim-color.sh --active --full', setup)
-        self.assertIn('*) printf \'%s\\n\' "Stop: the existing claim', setup)
+        self.assertIn('session_info="$(webkit/scripts/claim-color.sh --session)" || exit 1', setup)
+        self.assertIn("read -r session_state color slug port server_pid server_instance", setup)
+        self.assertIn("active)", setup)
+        self.assertIn("claimed)", setup)
+        self.assertIn("reused_server=1", setup)
+        self.assertIn("reused_server=0", setup)
         self.assertIn('tracked_runtime="$(git ls-files', setup)
         self.assertNotIn('test -z "$(git ls-files', setup)
 

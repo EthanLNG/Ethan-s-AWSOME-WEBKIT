@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.6 (2026-08-22): Reliable direct preview startup
+
+- Added a tagged `claim-color.sh --session` result that distinguishes a reused
+  live server from a fresh color claim without relying on an ambiguous second
+  discovery call.
+- Updated the direct setup flow to launch fresh claims and reuse verified live
+  servers from the same atomic decision.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. No configuration changes
+are required.
+
 ## v0.8.5 (2026-08-22): Stable feedback editing
 
 - Kept the four edit-point footer actions inside the bounded feedback card by

@@ -18,11 +18,25 @@ Every step below hangs off it.
 ```sh
 set -eu
 
-session_info="$(webkit/scripts/claim-color.sh --full)" || exit 1
+session_info="$(webkit/scripts/claim-color.sh --session)" || exit 1
 case "$session_info" in *$'\n'*|*$'\r'*) exit 1 ;; esac
-IFS=' ' read -r color slug port unexpected <<< "$session_info" || exit 1
+IFS=' ' read -r session_state color slug port server_pid server_instance unexpected \
+  <<< "$session_info" || exit 1
 test -n "$color" && test -n "$slug" && test -n "$port" || exit 1
 test -z "${unexpected:-}" || exit 1
+case "$session_state" in
+  active)
+    test -n "$server_pid" && test -n "$server_instance" || exit 1
+    case "$server_pid" in ''|*[!0-9]*) exit 1 ;; esac
+    test "$server_pid" -gt 0 || exit 1
+    reused_server=1
+    ;;
+  claimed)
+    test -z "${server_pid:-}" && test -z "${server_instance:-}" || exit 1
+    reused_server=0
+    ;;
+  *) exit 1 ;;
+esac
 case "$slug" in
   [A-Za-z0-9]*) ;;
   *) exit 1 ;;
@@ -37,7 +51,7 @@ case "/$feedback_dir/" in */../*|*/./*) exit 1 ;; esac
 inbox="$feedback_dir/$slug"
 ```
 
-- The command first looks for one live session owned by this exact Git
+- The tagged command first looks for one live session owned by this exact Git
   worktree. It validates the color-lock owner, linked global port reservation,
   heartbeat, and private server instance identity. A verified match is reused,
   with its exact color and port. Otherwise the command atomically claims both a
@@ -94,34 +108,6 @@ its archived runtime data has been moved or intentionally removed, then restart
 and claim a fresh session. Never migrate a feedback root during an active round.
 
 ## 2. Start the preview server
-
-First ask whether step 1 found a verified live server:
-
-```sh
-set -eu
-
-active_status=0
-active_info="$(webkit/scripts/claim-color.sh --active --full 2>/dev/null)" || active_status=$?
-case "$active_status" in
-  0)
-    case "$active_info" in *$'\n'*|*$'\r'*) exit 1 ;; esac
-    IFS=' ' read -r active_color active_slug active_port server_pid server_instance unexpected \
-      <<< "$active_info" || exit 1
-    test -n "$active_color" && test -n "$active_slug" && \
-      test -n "$active_port" && test -n "$server_pid" && \
-      test -n "$server_instance" || exit 1
-    test -z "${unexpected:-}" || exit 1
-    case "$active_port:$server_pid" in *[!0-9:]*) exit 1 ;; esac
-    test "$active_port" -ge 1 && test "$active_port" -le 65535 || exit 1
-    test "$server_pid" -gt 0 || exit 1
-    test "$active_color" = "$color" && test "$active_slug" = "$slug" && \
-      test "$active_port" = "$port" || exit 1
-    reused_server=1
-    ;;
-  1) reused_server=0 ;;
-  *) printf '%s\n' "Stop: the existing claim could not be identified safely." >&2; exit 1 ;;
-esac
-```
 
 If `reused_server=1`, do not launch another process. Keep `server_pid` and
 `server_instance` for guarded shutdown. If `reused_server=0`, launch exactly

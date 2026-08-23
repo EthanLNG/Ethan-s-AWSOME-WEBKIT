@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.15 (2026-08-23): Version-locked Control Center upgrades
+
+- Snapshotted the Control Center frontend when its server starts so an older
+  backend can never serve newer, incompatible interface files after an update.
+- Added the running Webkit version to the authenticated health identity and
+  made the launcher safely replace an authenticated outdated process before
+  opening the Control Center.
+- Preserved merged sessions through the upgrade boundary so their green cards
+  remain below active sessions until the user clicks one to clear it.
+
+**Migration:** reopen the AWESOME WEBKIT desktop launcher once. It safely
+restarts an older Control Center process and then opens the current version.
+
 ## v0.8.14 (2026-08-23): Automatic voice-note saves and subscription Fast mode
 
 - Finished and uploaded an active voice recording automatically before saving

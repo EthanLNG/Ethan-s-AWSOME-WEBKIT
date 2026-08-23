@@ -698,9 +698,52 @@ class LauncherTests(unittest.TestCase):
             ) as popen:
                 self.assertEqual(launch.main(), 0)
 
-        ready.assert_called_once_with(runtime)
+        ready.assert_called_once_with(runtime, launch.installed_kit_version())
         opened.assert_called_once_with(runtime)
         popen.assert_not_called()
+
+    def test_launcher_replaces_an_authenticated_outdated_server(self):
+        process = mock.Mock(pid=321)
+        process.poll.return_value = None
+        outdated = {
+            "pid": 123,
+            "port": 8790,
+            "token": "outdated-token-1234567890",
+        }
+        expected_version = launch.installed_kit_version()
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            with mock.patch.object(
+                launch, "STATE_DIR", state_dir
+            ), mock.patch.object(
+                launch, "ready_runtime", side_effect=[None, None, outdated]
+            ) as ready, mock.patch.object(
+                launch, "stop_outdated_runtime", return_value=True
+            ) as stopped, mock.patch.object(
+                launch, "instance_lock_held", return_value=False
+            ), mock.patch.object(
+                launch, "free_port", return_value=8791
+            ), mock.patch.object(
+                launch, "control_center_ready", return_value=True
+            ), mock.patch.object(
+                launch, "open_runtime"
+            ) as opened, mock.patch.object(
+                launch.subprocess, "Popen", return_value=process
+            ) as popen:
+                self.assertEqual(launch.main(), 0)
+
+            self.assertEqual(ready.call_args_list, [
+                mock.call(state_dir.resolve(), expected_version),
+                mock.call(state_dir.resolve(), expected_version),
+                mock.call(state_dir.resolve()),
+            ])
+            stopped.assert_called_once_with(outdated, state_dir.resolve())
+            self.assertEqual(popen.call_count, 1)
+            runtime = json.loads(
+                (state_dir / launch.RUNTIME_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(runtime["kitVersion"], expected_version)
+            opened.assert_called_once_with(runtime)
 
     def test_invalid_port_starts_are_rejected_before_socket_creation(self):
         with mock.patch.object(launch.socket, "socket") as socket_factory:
@@ -845,6 +888,43 @@ class LauncherTests(unittest.TestCase):
             "GET", "/api/health", headers={"X-WKCC-Token": "secret-token"}
         )
         connection.close.assert_called_once_with()
+
+    def test_authenticated_readiness_can_require_the_running_kit_version(self):
+        def ready(version):
+            response = mock.Mock(status=200)
+            response.read.return_value = json.dumps({
+                "ok": True,
+                "pid": 42,
+                "kitVersion": version,
+            }).encode("utf-8")
+            connection = mock.Mock()
+            connection.getresponse.return_value = response
+            return connection
+
+        with mock.patch.object(
+            launch.http.client, "HTTPConnection", return_value=ready("0.8.15")
+        ):
+            self.assertTrue(launch.control_center_ready(
+                8790, "secret-token", 42, "0.8.15"
+            ))
+        with mock.patch.object(
+            launch.http.client, "HTTPConnection", return_value=ready("0.8.14")
+        ):
+            self.assertFalse(launch.control_center_ready(
+                8790, "secret-token", 42, "0.8.15"
+            ))
+
+    def test_outdated_authenticated_runtime_stops_before_replacement(self):
+        runtime = {"pid": 42, "port": 8790, "token": "secret-token"}
+        with mock.patch.object(
+            launch, "runtime_ready", side_effect=[True, False]
+        ), mock.patch.object(
+            launch, "request_control_center_shutdown", return_value=True
+        ) as shutdown, mock.patch.object(
+            launch, "instance_lock_held", return_value=False
+        ):
+            self.assertTrue(launch.stop_outdated_runtime(runtime, Path("/state")))
+        shutdown.assert_called_once_with(8790, "secret-token")
 
     def test_authenticated_readiness_rejects_wrong_pid(self):
         response = mock.Mock(status=200)
@@ -1113,7 +1193,11 @@ class LauncherTests(unittest.TestCase):
             payload = json.loads(response.read().decode("utf-8"))
             connection.close()
             self.assertEqual(response.status, 200)
-            self.assertEqual(payload, {"ok": True, "pid": os.getpid()})
+            self.assertEqual(payload, {
+                "ok": True,
+                "pid": os.getpid(),
+                "kitVersion": server.kit_version,
+            })
 
             connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
             with mock.patch.dict(os.environ, {"WKCC_NO_AUTH": "1"}, clear=False):
@@ -1181,6 +1265,36 @@ class LauncherTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+    def test_running_server_keeps_one_compatible_static_snapshot(self):
+        token = "test-token-1234567890"
+        with tempfile.TemporaryDirectory() as raw:
+            static_root = Path(raw)
+            for name in ("index.html", "styles.css", "brand-icon.svg"):
+                (static_root / name).write_text(name, encoding="utf-8")
+            app_js = static_root / "app.js"
+            app_js.write_text("first frontend", encoding="utf-8")
+            with mock.patch("server.STATIC_ROOT", static_root):
+                server = ControlCenterHTTPServer(
+                    ("127.0.0.1", 0), ControlCenterHandler, object(), token
+                )
+            app_js.write_text("incompatible replacement", encoding="utf-8")
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                connection = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_port, timeout=3
+                )
+                connection.request("GET", "/app.js")
+                response = connection.getresponse()
+                payload = response.read().decode("utf-8")
+                connection.close()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(payload, "first frontend")
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
 
     def test_nested_session_get_routes_must_match_exactly(self):
         token = "test-token-1234567890"

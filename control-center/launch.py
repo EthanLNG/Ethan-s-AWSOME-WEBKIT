@@ -530,7 +530,7 @@ def port_open(port):
         sock.close()
 
 
-def control_center_ready(port, token, pid):
+def control_center_ready(port, token, pid, expected_version=None):
     """Verify the authenticated server identity instead of trusting a bare listener."""
     connection = None
     try:
@@ -543,7 +543,14 @@ def control_center_ready(port, token, pid):
             response.read()
             return False
         payload = json.loads(response.read(4096).decode("utf-8"))
-        return payload.get("ok") is True and int(payload.get("pid")) == int(pid)
+        return (
+            payload.get("ok") is True
+            and int(payload.get("pid")) == int(pid)
+            and (
+                expected_version is None
+                or payload.get("kitVersion") == expected_version
+            )
+        )
     except (OSError, ValueError, TypeError, http.client.HTTPException):
         return False
     finally:
@@ -551,11 +558,13 @@ def control_center_ready(port, token, pid):
             connection.close()
 
 
-def runtime_ready(runtime):
+def runtime_ready(runtime, expected_version=None):
     if not isinstance(runtime, dict):
         return False
     pid = runtime.get("pid")
-    return process_alive(pid) and control_center_ready(runtime.get("port"), runtime.get("token"), pid)
+    return process_alive(pid) and control_center_ready(
+        runtime.get("port"), runtime.get("token"), pid, expected_version
+    )
 
 
 def detached_process_kwargs(system=None):
@@ -682,15 +691,37 @@ def free_port(start=8790):
     raise RuntimeError("No free Control Center port was found.")
 
 
-def ready_runtime(state_dir=None):
+def ready_runtime(state_dir=None, expected_version=None):
     try:
         state_dir = validated_state_dir_path(STATE_DIR if state_dir is None else state_dir)
         runtime = json.loads(
             _read_private_regular(state_dir / RUNTIME_FILE_NAME, 65536)
         )
-        return runtime if runtime_ready(runtime) else None
+        return runtime if runtime_ready(runtime, expected_version) else None
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
+
+
+def installed_kit_version():
+    value = _read_private_regular(HERE.parent / "webkit" / "VERSION", 64).strip()
+    parts = value.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise RuntimeError("Installed Webkit version is invalid")
+    return value
+
+
+def stop_outdated_runtime(runtime, state_dir, timeout=15.0):
+    """Gracefully stop only the authenticated server represented by runtime."""
+    if not runtime_ready(runtime):
+        return True
+    if not request_control_center_shutdown(runtime.get("port"), runtime.get("token")):
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not runtime_ready(runtime) and not instance_lock_held(state_dir):
+            return True
+        time.sleep(0.1)
+    return not runtime_ready(runtime) and not instance_lock_held(state_dir)
 
 
 def open_runtime(runtime):
@@ -722,12 +753,21 @@ def open_runtime(runtime):
 
 def main():
     state_dir = secure_state_dir()
-    runtime = ready_runtime(state_dir)
+    expected_version = installed_kit_version()
+    runtime = ready_runtime(state_dir, expected_version)
     if runtime is None:
         with startup_lock(state_dir=state_dir):
             # Another launcher may have completed while this invocation waited.
-            runtime = ready_runtime(state_dir)
+            runtime = ready_runtime(state_dir, expected_version)
             if runtime is None:
+                outdated = ready_runtime(state_dir)
+                if outdated is not None and not stop_outdated_runtime(
+                    outdated, state_dir
+                ):
+                    raise RuntimeError(
+                        "The installed Control Center changed, but its previous "
+                        "process could not be stopped safely. Close it and retry."
+                    )
                 if instance_lock_held(state_dir):
                     raise RuntimeError(
                         "A Control Center already owns this state directory, but its "
@@ -764,11 +804,14 @@ def main():
                 deadline = time.monotonic() + startup_timeout
                 try:
                     while time.monotonic() < deadline and process.poll() is None:
-                        if control_center_ready(port, token, process.pid):
+                        if control_center_ready(
+                            port, token, process.pid, expected_version
+                        ):
                             runtime = {
                                 "pid": process.pid,
                                 "port": port,
                                 "token": token,
+                                "kitVersion": expected_version,
                             }
                             write_runtime(runtime, state_dir)
                             break

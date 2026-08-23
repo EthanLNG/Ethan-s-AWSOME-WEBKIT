@@ -15,13 +15,20 @@ import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
-from control_center import ControlCenter, ControlCenterError, strict_json_loads
+from control_center import (
+    ControlCenter,
+    ControlCenterError,
+    read_stable_regular_text,
+    strict_json_loads,
+)
 from launch import acquire_instance_lock, release_instance_lock, validated_state_dir_path
 
 
 HERE = Path(__file__).resolve().parent
 KIT_ROOT = HERE.parent
 STATIC_ROOT = HERE / "static"
+STATIC_ASSET_NAMES = ("index.html", "app.js", "styles.css", "brand-icon.svg")
+MAX_STATIC_ASSET_BYTES = 1024 * 1024
 AUTH_TOKEN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 CLIENT_IO_TIMEOUT_SECONDS = 15
 MAX_LOG_MESSAGE_BYTES = 2048
@@ -38,6 +45,20 @@ def kit_version():
         return "unknown"
 
 
+def load_static_assets():
+    """Snapshot one compatible frontend bundle for this server process."""
+    assets = {}
+    for name in STATIC_ASSET_NAMES:
+        text = read_stable_regular_text(
+            STATIC_ROOT / name,
+            MAX_STATIC_ASSET_BYTES,
+            "Control Center static asset {}".format(name),
+        )
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        assets[name] = (text.encode("utf-8"), content_type)
+    return assets
+
+
 class ControlCenterHTTPServer(ThreadingHTTPServer):
     daemon_threads = False
     block_on_close = True
@@ -45,6 +66,8 @@ class ControlCenterHTTPServer(ThreadingHTTPServer):
     def __init__(self, address, handler, app, token):
         if not valid_auth_token(token):
             raise ValueError("Control Center auth tokens must be 16 to 128 URL-safe characters.")
+        self.kit_version = kit_version()
+        self.static_assets = load_static_assets()
         super().__init__(address, handler)
         self.app = app
         self.token = token
@@ -108,7 +131,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if parsed.path == "/api/health":
-                self._json({"ok": True, "pid": os.getpid()})
+                self._json({
+                    "ok": True,
+                    "pid": os.getpid(),
+                    "kitVersion": self.server.kit_version,
+                })
             elif parsed.path == "/api/bootstrap":
                 self._json(self.server.app.bootstrap())
             elif parsed.path == "/api/projects":
@@ -292,17 +319,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _static(self, request_path):
         relative = "index.html" if request_path in ("", "/") else request_path.lstrip("/")
-        target = (STATIC_ROOT / relative).resolve()
-        try:
-            target.relative_to(STATIC_ROOT)
-        except ValueError:
+        asset = self.server.static_assets.get(relative)
+        if asset is None:
             self._json({"error": "Not found."}, 404)
             return
-        if not target.is_file():
-            self._json({"error": "Not found."}, 404)
-            return
-        data = target.read_bytes()
-        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        data, content_type = asset
         self.send_response(200)
         self.send_header("Content-Type", content_type + ("; charset=utf-8" if content_type.startswith("text/") else ""))
         self.send_header("Content-Length", str(len(data)))

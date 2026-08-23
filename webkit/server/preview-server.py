@@ -1409,24 +1409,47 @@ _HOTKEY_CODE = re.compile(r"^[A-Za-z0-9]+$")
 _HOTKEYS = CONFIG.get("hotkeys", {})
 if not isinstance(_HOTKEYS, dict):
     _HOTKEYS = {}
-_HOTKEY_VALUES = {}
 _HOTKEY_RESERVED = {
     "AltLeft", "AltRight", "ControlLeft", "ControlRight", "Escape",
     "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight",
 }
-for _name, _default in (("toggle", "KeyC"), ("dictate", "Space")):
-    _value = os.environ.get("WK_HOTKEY_{}".format(_name.upper()), _HOTKEYS.get(_name, _default))
+
+
+def _resolved_hotkeys(config_hotkeys, environ=None):
+    environ = os.environ if environ is None else environ
+    config_hotkeys = config_hotkeys if isinstance(config_hotkeys, dict) else {}
+    values = {}
+    for name, default in (("toggle", "KeyC"), ("dictate", "Space")):
+        value = environ.get(
+            "WK_HOTKEY_{}".format(name.upper()), config_hotkeys.get(name, default)
+        )
+        if (
+            not isinstance(value, str)
+            or not _HOTKEY_CODE.fullmatch(value)
+            or value in _HOTKEY_RESERVED
+        ):
+            value = default
+        values[name] = value
+
+    # Control Centers before the Space default sent KeyV without a settings
+    # version. Newer previews recognize that mixed-version launch and migrate
+    # it locally, so updating a project's Webkit works even before the desktop
+    # Control Center has been restarted. A versioned explicit KeyV and a
+    # standalone project config remain valid custom choices.
+    settings_version = environ.get("WK_HOTKEY_DEFAULTS_VERSION")
     if (
-        not isinstance(_value, str)
-        or not _HOTKEY_CODE.fullmatch(_value)
-        or _value in _HOTKEY_RESERVED
+        "WK_HOTKEY_DICTATE" in environ
+        and settings_version is None
+        and values["dictate"] == "KeyV"
+        and values["toggle"] != "Space"
     ):
-        _value = _default
-    _HOTKEY_VALUES[_name] = _value
-if _HOTKEY_VALUES["dictate"] == _HOTKEY_VALUES["toggle"]:
-    _HOTKEY_VALUES["dictate"] = (
-        "KeyV" if _HOTKEY_VALUES["toggle"] == "Space" else "Space"
-    )
+        values["dictate"] = "Space"
+    if values["dictate"] == values["toggle"]:
+        values["dictate"] = "KeyV" if values["toggle"] == "Space" else "Space"
+    return values
+
+
+_HOTKEY_VALUES = _resolved_hotkeys(_HOTKEYS)
 _HOTKEY_ATTRS = "".join(
     ' data-wk-hotkey-{}="{}"'.format(name, _HOTKEY_VALUES[name])
     for name in ("toggle", "dictate")

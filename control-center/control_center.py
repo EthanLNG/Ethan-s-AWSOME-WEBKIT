@@ -8824,6 +8824,7 @@ to `{marker}`. If user input is required, write
         env["WK_INTERACTION_MODE"] = settings["interactionMode"]
         env["WK_HOTKEY_TOGGLE"] = settings["toggleHotkey"]
         env["WK_HOTKEY_DICTATE"] = settings["dictateHotkey"]
+        env["WK_HOTKEY_DEFAULTS_VERSION"] = str(settings["defaultsVersion"])
         env["WK_MUTATION_TOKEN"] = runtime.mutation_token
         instance_token = uuid.uuid4().hex
         env["WK_PREVIEW_INSTANCE_TOKEN"] = instance_token
@@ -9948,12 +9949,17 @@ class ControlCenter:
 
     def bootstrap(self):
         state = self.store.read()
+        settings = normalized_settings(state.get("settings"))
+        if settings != state.get("settings"):
+            def persist_settings(current):
+                current["settings"] = normalized_settings(current.get("settings"))
+            self.store.update(persist_settings)
         return {
             "providers": state.get("providers", []),
             "projects": self.projects.list_projects(),
             "sessions": [public_session(session) for session in state.get("sessions", [])],
             "system": self.projects.system_status(),
-            "settings": normalized_settings(state.get("settings")),
+            "settings": settings,
         }
 
     def create_project(self, name, parent, provider, onboarding=None):

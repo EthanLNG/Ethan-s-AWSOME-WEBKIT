@@ -131,6 +131,25 @@ class PreviewServerTests(unittest.TestCase):
             {"toggle": "KeyC", "dictate": "Space"},
         )
 
+    def test_legacy_control_center_v_hotkey_migrates_inside_preview(self):
+        resolve = self.module._resolved_hotkeys
+        self.assertEqual(resolve({}, {
+            "WK_HOTKEY_TOGGLE": "KeyC",
+            "WK_HOTKEY_DICTATE": "KeyV",
+        }), {"toggle": "KeyC", "dictate": "Space"})
+        self.assertEqual(resolve({}, {
+            "WK_HOTKEY_TOGGLE": "KeyC",
+            "WK_HOTKEY_DICTATE": "KeyV",
+            "WK_HOTKEY_DEFAULTS_VERSION": "2",
+        }), {"toggle": "KeyC", "dictate": "KeyV"})
+        self.assertEqual(resolve({"dictate": "KeyV"}, {}), {
+            "toggle": "KeyC", "dictate": "KeyV",
+        })
+        self.assertEqual(resolve({}, {
+            "WK_HOTKEY_TOGGLE": "Space",
+            "WK_HOTKEY_DICTATE": "KeyV",
+        }), {"toggle": "Space", "dictate": "KeyV"})
+
     @staticmethod
     def batch(point_id="point-1"):
         return {

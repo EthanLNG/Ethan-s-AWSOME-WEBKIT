@@ -37,7 +37,7 @@ class OverlayProtocolTests(unittest.TestCase):
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
             + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
             + "anchorFitScore, anchorCoverageScore, anchorContextScore, "
-            + "reanchorRect, tabActivityMode, tabPollDelay, "
+            + "reanchorRect, reviewScrollTarget, tabActivityMode, tabPollDelay, "
             + "MAX_QUEUED_TOMBSTONES };"
         )
         program = "const H = new Function(%s)();\n%s" % (json.dumps(exports), body)
@@ -281,6 +281,32 @@ assert.deepStrictEqual(
         pin = re.search(r"\.wk-pin \{(?P<body>.*?)\n\}", self.css, re.S)
         self.assertIsNotNone(pin)
         self.assertNotIn("transition: transform", pin.group("body"))
+
+    def test_review_navigation_recovers_sticky_points_that_left_the_viewport(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+assert.strictEqual(
+  H.reviewScrollTarget({ x: 20, y: 1200, w: 80, h: 100 }, false, 'doc', 0, 800),
+  850
+);
+assert.strictEqual(
+  H.reviewScrollTarget({ x: 983, y: -39.4, w: 61, h: 48 }, true, 'sticky', 5107, 902),
+  4640.6
+);
+assert.strictEqual(
+  H.reviewScrollTarget({ x: 983, y: 260, w: 61, h: 48 }, true, 'sticky', 4641, 902),
+  null
+);
+assert.strictEqual(
+  H.reviewScrollTarget({ x: 0, y: -30, w: 100, h: 40 }, true, 'fixed', 5000, 900),
+  null
+);
+"""
+        )
+        self.assertIn("function elementViewportAnchorMode(node)", self.source)
+        self.assertIn("va ? va.anchorMode : 'doc'", self.source)
+        self.assertIn("const retry = reviewScrollTarget(", self.source)
 
     def test_tab_title_tracks_work_and_background_review_ready_state(self):
         self.run_node(

@@ -441,6 +441,21 @@
     };
   }
 
+  function reviewScrollTarget(box, viewportCoordinates, anchorMode, currentScrollY, viewportHeight) {
+    if (!box || ![box.x, box.y, box.w, box.h, currentScrollY, viewportHeight].every(Number.isFinite) ||
+      box.w <= 0 || box.h <= 0 || viewportHeight <= 0) return null;
+    if (!viewportCoordinates) {
+      return Math.max(0, box.y + box.h / 2 - viewportHeight / 2);
+    }
+    const margin = Math.min(80, viewportHeight * 0.1);
+    if (box.y >= margin && box.y + box.h <= viewportHeight - margin) return null;
+    // A genuinely fixed target cannot be revealed by scrolling. Sticky targets
+    // can leave the viewport once their containing scene reaches its boundary,
+    // so translate their current viewport position back into a document target.
+    if (anchorMode === 'fixed') return null;
+    return Math.max(0, currentScrollY + box.y + box.h / 2 - viewportHeight / 2);
+  }
+
   function tabActivityMode(phase) {
     if (phase === 'awaiting_agent' || phase === 'verdicts_sent' || phase === 'transitioning') {
       return 'working';
@@ -1445,17 +1460,22 @@
     return n + 1;
   }
 
-  function elementViewportAnchored(node) {
+  function elementViewportAnchorMode(node) {
+    let sticky = false;
     try {
       for (let current = node;
         current && current !== document.body && current !== document.documentElement;
         current = current.parentElement) {
         if (isOverlayNode(current)) continue;
         const position = getComputedStyle(current).position;
-        if (position === 'fixed' || position === 'sticky') return true;
+        if (position === 'fixed') return 'fixed';
+        if (position === 'sticky') sticky = true;
       }
     } catch (e) { /* detached or cross-realm node */ }
-    return false;
+    return sticky ? 'sticky' : null;
+  }
+  function elementViewportAnchored(node) {
+    return elementViewportAnchorMode(node) !== null;
   }
 
   // A rect drawn over a position:fixed/sticky ancestor is anchored to the viewport,
@@ -1501,7 +1521,7 @@
           if (matches.length === 1) resolved.push({
             context,
             node: matches[0],
-            viewportAnchored: elementViewportAnchored(matches[0]),
+            viewportAnchorMode: elementViewportAnchorMode(matches[0]),
           });
         } catch (e) { /* try the next captured context */ }
       }
@@ -1511,15 +1531,22 @@
     // masked a sticky target during capture. Recover them from their trusted,
     // unique live context instead of preserving the bad classification.
     const fixed = p.anchor === 'viewport' || resolvedContexts.some((contexts) =>
-      contexts.some((entry) => entry.viewportAnchored)
+      contexts.some((entry) => entry.viewportAnchorMode)
     );
+    const anchorModes = resolvedContexts.flatMap((contexts) =>
+      contexts.map((entry) => entry.viewportAnchorMode).filter(Boolean)
+    );
+    const anchorMode = anchorModes.includes('fixed')
+      ? 'fixed'
+      : anchorModes.includes('sticky') ? 'sticky' : (fixed ? 'unknown' : 'doc');
     return {
       fixed,
+      anchorMode,
       boxes: rects.map((rect, rectIndex) => {
         for (const entry of resolvedContexts[rectIndex]) {
           const context = entry.context;
           try {
-            if (fixed && p.anchor !== 'viewport' && !entry.viewportAnchored) continue;
+            if (fixed && p.anchor !== 'viewport' && !entry.viewportAnchorMode) continue;
             const live = entry.node.getBoundingClientRect();
             const capturedBox = fixed ? {
               x: context.box.x - capturedScroll.x,
@@ -1556,7 +1583,7 @@
   function pinBox(p) {
     const geometry = correctedPointRects(p);
     if (!geometry.fixed) return null;
-    return { box: geometry.boxes[0], fixed: true };
+    return { box: geometry.boxes[0], fixed: true, anchorMode: geometry.anchorMode };
   }
   function pointFromDraft(draft) {
     const existing = draft.editPoint ||
@@ -3289,12 +3316,30 @@
     updateBar();
     const va = pinBox(pt);
     const box = va ? va.box : correctedRect(pt);
-    if (!opts.noScroll && !va) {
+    if (!opts.noScroll) {
       // instant, not smooth: the flash should land where the eye already is, and
       // smooth scrolls never finish in a backgrounded tab (the jump idiom the
-      // abc widget's RELOAD mode uses is instant for the same reason). A
-      // viewport-anchored (fixed/sticky) point is on screen at any scroll - skip.
-      window.scrollTo({ top: Math.max(0, box.y + box.h / 2 - innerHeight / 2), behavior: 'instant' });
+      // abc widget's RELOAD mode uses is instant for the same reason). Sticky
+      // points are viewport-anchored only while their containing scene is live;
+      // once that scene passes, bring them back instead of treating them as a
+      // permanently visible fixed control.
+      const target = reviewScrollTarget(
+        box, !!va, va ? va.anchorMode : 'doc', scrollY, innerHeight
+      );
+      if (target !== null) {
+        window.scrollTo({ top: target, behavior: 'instant' });
+        requestAnimationFrame(() => {
+          const settled = pinBox(pt);
+          const settledBox = settled ? settled.box : correctedRect(pt);
+          const retry = reviewScrollTarget(
+            settledBox, !!settled, settled ? settled.anchorMode : 'doc', scrollY, innerHeight
+          );
+          if (retry !== null && Math.abs(retry - scrollY) > 1) {
+            window.scrollTo({ top: retry, behavior: 'instant' });
+          }
+          schedulePos();
+        });
+      }
     }
     // flash twice - the CSS animation runs 2 iterations; restart it
     if (S.curPinEls) {

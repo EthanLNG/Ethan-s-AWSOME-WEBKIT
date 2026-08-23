@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.8.18 (2026-08-23): Mixed-version shortcuts and sticky review jumps
+
+- Migrated the legacy injected KeyV dictation default inside the preview server,
+  including sessions launched by an older Control Center process after a
+  project's Webkit has already been updated.
+- Persisted normalized shortcut settings when the Control Center boots so the
+  one-time Space migration cannot be lost across later restarts.
+- Distinguished sticky review targets from permanently fixed interface elements
+  and now scrolls an off-screen sticky point back into its live scene when its
+  number, dot, or navigation arrow is selected.
+- Added a second geometry alignment pass after the jump for scroll-driven pages
+  that update their sticky layout on the following animation frame.
+
+**Migration:** finish or discard active project sessions, reopen the AWESOME
+WEBKIT desktop launcher once, update the project's Webkit, and start a fresh
+color session.
+
 ## v0.8.17 (2026-08-23): Reliable dictation and faithful review geometry
 
 - Made Space the one-time dictation shortcut for a pristine empty feedback

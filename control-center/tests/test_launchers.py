@@ -902,16 +902,16 @@ class LauncherTests(unittest.TestCase):
             return connection
 
         with mock.patch.object(
-            launch.http.client, "HTTPConnection", return_value=ready("0.8.17")
+            launch.http.client, "HTTPConnection", return_value=ready("0.8.18")
         ):
             self.assertTrue(launch.control_center_ready(
-                8790, "secret-token", 42, "0.8.17"
+                8790, "secret-token", 42, "0.8.18"
             ))
         with mock.patch.object(
             launch.http.client, "HTTPConnection", return_value=ready("0.8.15")
         ):
             self.assertFalse(launch.control_center_ready(
-                8790, "secret-token", 42, "0.8.17"
+                8790, "secret-token", 42, "0.8.18"
             ))
 
     def test_outdated_authenticated_runtime_stops_before_replacement(self):

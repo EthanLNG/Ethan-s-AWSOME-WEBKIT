@@ -10,6 +10,10 @@
   and a fast, playful click-to-clear interaction.
 - Kept merged sessions out of the live preview set so their browser tabs still
   close automatically as soon as merge cleanup finishes.
+- Added per-session Normal and Fast speed controls beside reasoning for new and
+  active agents. Codex and Claude Code receive an explicit speed setting on
+  every turn, and the extra plan-usage notice is acknowledged only once in
+  persistent Control Center state.
 
 **Migration:** finish or discard any active project session, click the project's
 Webkit update button, and start a fresh color session. Set `OPENAI_API_KEY`

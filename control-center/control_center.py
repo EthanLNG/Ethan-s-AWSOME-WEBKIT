@@ -103,6 +103,7 @@ DEFAULT_SETTINGS = {
     "interactionMode": "browse-default",
     "toggleHotkey": "KeyC",
     "dictateHotkey": "KeyV",
+    "fastModeNoticeSeen": False,
 }
 
 HOTKEY_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
@@ -324,6 +325,9 @@ def normalized_settings(value):
     interaction_mode = value.get("interactionMode", DEFAULT_SETTINGS["interactionMode"])
     toggle_hotkey = value.get("toggleHotkey", DEFAULT_SETTINGS["toggleHotkey"])
     dictate_hotkey = value.get("dictateHotkey", DEFAULT_SETTINGS["dictateHotkey"])
+    fast_mode_notice_seen = value.get(
+        "fastModeNoticeSeen", DEFAULT_SETTINGS["fastModeNoticeSeen"]
+    )
     toggle_hotkey = toggle_hotkey if valid_hotkey(toggle_hotkey) else "KeyC"
     dictate_hotkey = dictate_hotkey if valid_hotkey(dictate_hotkey) else "KeyV"
     if dictate_hotkey == toggle_hotkey:
@@ -337,6 +341,9 @@ def normalized_settings(value):
         else "browse-default",
         "toggleHotkey": toggle_hotkey,
         "dictateHotkey": dictate_hotkey,
+        "fastModeNoticeSeen": fast_mode_notice_seen
+        if isinstance(fast_mode_notice_seen, bool)
+        else False,
     }
 
 
@@ -6831,6 +6838,9 @@ class ProviderRunner:
         worktree = self.session["worktree"]
         thread_id = validated_provider_thread_id(self.session.get("threadId"))
         reasoning = self.session.get("reasoningEffort", "medium")
+        speed_mode = self.session.get("speedMode", "normal")
+        if speed_mode not in ("normal", "fast"):
+            speed_mode = "normal"
         env = scrubbed_child_environment()
         env["WK_CONTROL_CENTER"] = "1"
         env["WK_SESSION_COLOR"] = self.session["color"]
@@ -6846,6 +6856,11 @@ class ProviderRunner:
                 for path in self._codex_git_write_dirs():
                     command.extend(["--add-dir", str(path)])
             command.extend(["-c", 'model_reasoning_effort="{}"'.format(reasoning)])
+            command.extend([
+                "-c", 'service_tier="{}"'.format(
+                    "fast" if speed_mode == "fast" else "default"
+                ),
+            ])
             if thread_id:
                 command.extend(["resume", thread_id, "-"])
             else:
@@ -6862,6 +6877,9 @@ class ProviderRunner:
                 executable, "-p", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "plan" if self.read_only else "auto",
                 "--effort", reasoning,
+                "--settings", json.dumps(
+                    {"fastMode": speed_mode == "fast"}, separators=(",", ":")
+                ),
             ]
             if self.session.get("hasRun"):
                 command.extend(["--resume", thread_id])
@@ -7746,7 +7764,9 @@ class SessionManager:
             sessions = [s for s in sessions if s.get("projectId") == project_id]
         return [public_session(session) for session in sessions]
 
-    def start_session(self, project_id, color, reasoning_effort="medium"):
+    def start_session(
+        self, project_id, color, reasoning_effort="medium", speed_mode="normal"
+    ):
         project = self.projects.get_project(project_id)
         project_path = Path(project["path"])
         if not project_path.is_dir():
@@ -7796,6 +7816,8 @@ class SessionManager:
             allowed_efforts = ("low", "medium", "high", "xhigh") if provider == "codex" else ("low", "medium", "high", "xhigh", "max")
             if reasoning_effort not in allowed_efforts:
                 raise ControlCenterError("Choose a supported {} reasoning level.".format(provider), 409)
+            if speed_mode not in ("normal", "fast"):
+                raise ControlCenterError("Choose normal or fast agent speed.", 409)
             if not self.projects.system_status()[provider]["installed"]:
                 raise ControlCenterError("{} CLI is not installed.".format(provider), 409)
 
@@ -7835,6 +7857,7 @@ class SessionManager:
                 "threadId": None,
                 "hasRun": False,
                 "reasoningEffort": reasoning_effort,
+                "speedMode": speed_mode,
                 "mutationToken": uuid.uuid4().hex,
                 "createdAt": utc_now(),
             }
@@ -9091,6 +9114,22 @@ to `{marker}`. If user input is required, write
             self.runtimes[session_id].session["reasoningEffort"] = effort
         return {"reasoningEffort": effort}
 
+    def set_speed(self, session_id, speed_mode):
+        session = self._get_session(session_id)
+        if speed_mode not in ("normal", "fast"):
+            raise ControlCenterError("Choose normal or fast agent speed.", 409)
+
+        def mutate(state):
+            for item in state.get("sessions", []):
+                if item["id"] == session_id:
+                    item["speedMode"] = speed_mode
+
+        self.store.update(mutate)
+        session["speedMode"] = speed_mode
+        if session_id in self.runtimes:
+            self.runtimes[session_id].session["speedMode"] = speed_mode
+        return {"speedMode": speed_mode}
+
     def events(self, session_id, after=0):
         self._get_session(session_id)
         if isinstance(after, str) and after.isdigit():
@@ -9946,6 +9985,9 @@ class ControlCenter:
         interaction_mode = submitted.get("interactionMode", current["interactionMode"])
         toggle_hotkey = submitted.get("toggleHotkey", current["toggleHotkey"])
         dictate_hotkey = submitted.get("dictateHotkey", current["dictateHotkey"])
+        fast_mode_notice_seen = submitted.get(
+            "fastModeNoticeSeen", current["fastModeNoticeSeen"]
+        )
         if dictation_mode not in ("speech", "voice-note", "cloud-voice-note"):
             raise ControlCenterError(
                 "Choose browser speech, local agent voice notes, or OpenAI cloud voice notes."
@@ -9963,13 +10005,25 @@ class ControlCenter:
             raise ControlCenterError("Choose a regular key, not a modifier or Escape, for each shortcut.")
         if toggle_hotkey == dictate_hotkey:
             raise ControlCenterError("Open/close and dictation need different shortcut keys.")
+        if not isinstance(fast_mode_notice_seen, bool):
+            raise ControlCenterError("Fast mode notice state must be true or false.")
         saved = {
             "dictationMode": dictation_mode,
             "interactionMode": interaction_mode,
             "toggleHotkey": toggle_hotkey,
             "dictateHotkey": dictate_hotkey,
+            "fastModeNoticeSeen": fast_mode_notice_seen,
         }
         return saved
+
+    def acknowledge_fast_mode_notice(self):
+        def mutate(state):
+            current = normalized_settings(state.get("settings"))
+            current["fastModeNoticeSeen"] = True
+            state["settings"] = current
+
+        self.store.update(mutate)
+        return {"fastModeNoticeSeen": True}
 
     def save_settings(self, settings):
         saved = self._validated_settings(settings)

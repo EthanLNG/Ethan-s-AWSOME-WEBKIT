@@ -70,7 +70,15 @@
               <h2>New agent</h2>
               <p class="section-description">Each active color is a separate branch, preview server, and agent conversation.</p>
             </div>
-            <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
+            <div class="agent-setting-controls">
+              <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
+              <label class="reasoning-control">Speed
+                <select id="newAgentSpeed">
+                  <option value="normal">Normal</option>
+                  <option value="fast">Fast</option>
+                </select>
+              </label>
+            </div>
           </div>
           <div class="color-grid" id="colorGrid"></div>
         </section>
@@ -87,7 +95,15 @@
     <header>
       <button class="icon-button" id="closeChat" type="button" aria-label="Collapse chat">×</button>
       <div><p class="eyebrow" id="chatColor"></p><h2 id="chatTitle">Agent</h2></div>
-      <label class="reasoning-control chat-reasoning"><span id="chatReasoningLabel">Reasoning</span><select id="chatReasoning"></select></label>
+      <div class="agent-setting-controls chat-settings">
+        <label class="reasoning-control chat-reasoning"><span id="chatReasoningLabel">Reasoning</span><select id="chatReasoning"></select></label>
+        <label class="reasoning-control chat-reasoning">Speed
+          <select id="chatSpeed">
+            <option value="normal">Normal</option>
+            <option value="fast">Fast</option>
+          </select>
+        </label>
+      </div>
       <span class="live-dot" id="chatStatus" role="status"><span class="sr-only" id="chatStatusText">Session status</span></span>
     </header>
     <div class="chat-events" id="chatEvents" aria-live="polite"></div>
@@ -225,6 +241,18 @@
       <div class="modal-actions">
         <button class="secondary" value="cancel">Cancel</button>
         <button class="danger" id="confirmAction" type="button">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="fastModeNoticeDialog" class="modal notice-modal" aria-labelledby="fastModeNoticeTitle">
+    <form method="dialog">
+      <p class="eyebrow">Fast mode</p>
+      <h2 id="fastModeNoticeTitle">More speed uses more of your plan.</h2>
+      <p>Fast mode consumes more plan usage. You can switch back to Normal at any time.</p>
+      <div class="modal-error" id="fastModeNoticeError" role="alert" aria-live="assertive"></div>
+      <div class="modal-actions">
+        <button class="primary" id="fastModeNoticeOk" type="button">OK</button>
       </div>
     </form>
   </dialog>

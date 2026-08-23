@@ -44,6 +44,7 @@ const DEFAULT_SETTINGS = {
   interactionMode: "browse-default",
   toggleHotkey: "KeyC",
   dictateHotkey: "KeyV",
+  fastModeNoticeSeen: false,
 };
 const RESERVED_HOTKEYS = new Set([
   "AltLeft", "AltRight", "ControlLeft", "ControlRight",
@@ -80,6 +81,7 @@ const state = {
   seedSelectionInFlight: false,
   chatGeneration: 0,
   chatReasoningRequest: 0,
+  chatSpeedRequest: 0,
   chatReturnFocus: null,
   seedGeneration: 0,
   projectGeneration: 0,
@@ -99,6 +101,8 @@ let eventsPollPromise = null;
 let eventsPollQueued = false;
 let seedPollPromise = null;
 let seedPollQueued = false;
+let fastModeNoticePromise = null;
+let resolveFastModeNotice = null;
 const previewTabs = new Map();
 
 const $ = (selector) => document.querySelector(selector);
@@ -233,6 +237,40 @@ function fillReasoning(select, provider, value) {
     select.appendChild(option);
   });
   select.value = reasoningLevels(provider).includes(value) ? value : "medium";
+}
+
+function fillSpeed(select, value) {
+  select.value = value === "fast" ? "fast" : "normal";
+}
+
+function ensureFastModeNotice() {
+  if (state.settings.fastModeNoticeSeen) return Promise.resolve();
+  if (fastModeNoticePromise) return fastModeNoticePromise;
+  $("#fastModeNoticeError").textContent = "";
+  $("#fastModeNoticeDialog").showModal();
+  fastModeNoticePromise = new Promise((resolve) => {
+    resolveFastModeNotice = resolve;
+  });
+  return fastModeNoticePromise;
+}
+
+async function acknowledgeFastModeNotice() {
+  const button = $("#fastModeNoticeOk");
+  setBusy(button, true, "Saving...");
+  $("#fastModeNoticeError").textContent = "";
+  try {
+    const result = await api("/api/notices/fast-mode", { method: "POST", body: {} });
+    state.settings.fastModeNoticeSeen = result.fastModeNoticeSeen === true;
+    $("#fastModeNoticeDialog").close();
+    const resolve = resolveFastModeNotice;
+    resolveFastModeNotice = null;
+    fastModeNoticePromise = null;
+    if (resolve) resolve();
+  } catch (error) {
+    $("#fastModeNoticeError").textContent = error.message;
+  } finally {
+    setBusy(button, false);
+  }
 }
 
 function hotkeyLabel(code) {
@@ -592,6 +630,8 @@ function renderProjectView() {
   })[onboarding.status] || "Continue seed onboarding";
   const defaultEffort = safeLocalStorageGet(`wkcc:reasoning:${project.provider}`) || "medium";
   fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
+  const savedSpeed = safeLocalStorageGet(`wkcc:speed:${project.provider}`) || "normal";
+  fillSpeed($("#newAgentSpeed"), state.settings.fastModeNoticeSeen ? savedSpeed : "normal");
   const live = (project.sessions || []).filter((session) => (
     ["active", "busy", "merging", "error"].includes(session.status)
   ));
@@ -720,7 +760,12 @@ async function startColor(color, button) {
   setBusy(button, true, "Starting…");
   try {
     const { session } = await api("/api/sessions/start", {
-      method: "POST", body: { projectId: project.id, color, reasoningEffort: $("#newAgentReasoning").value },
+      method: "POST", body: {
+        projectId: project.id,
+        color,
+        reasoningEffort: $("#newAgentReasoning").value,
+        speedMode: $("#newAgentSpeed").value,
+      },
     });
     startedSession = session;
     rememberPreviewWindow(session, previewTab);
@@ -832,6 +877,7 @@ function setChatStatus(session) {
 function openSession(session, returnFocus = document.activeElement) {
   state.chatGeneration += 1;
   state.chatReasoningRequest += 1;
+  state.chatSpeedRequest += 1;
   state.chatSessionId = session.id;
   state.chatCursor = 0;
   state.chatTurn = null;
@@ -849,6 +895,8 @@ function openSession(session, returnFocus = document.activeElement) {
   $("#mergeButton").hidden = session.kind === "seeds";
   $("#chatReasoning").disabled = false;
   fillReasoning($("#chatReasoning"), session.provider, session.reasoningEffort || "medium");
+  $("#chatSpeed").disabled = false;
+  fillSpeed($("#chatSpeed"), session.speedMode || "normal");
   $("#chatInput").value = "";
   $("#chatFiles").value = "";
   state.pendingAttachments = [];
@@ -1055,6 +1103,55 @@ async function changeChatReasoning() {
   } finally {
     if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration
         && request === state.chatReasoningRequest) select.disabled = false;
+  }
+}
+
+async function changeChatSpeed() {
+  const session = currentSession();
+  if (!session) return;
+  const expectedSessionId = session.id;
+  const generation = state.chatGeneration;
+  const select = $("#chatSpeed");
+  const speedMode = select.value;
+  const previous = session.speedMode || "normal";
+  const request = ++state.chatSpeedRequest;
+  select.disabled = true;
+  try {
+    if (speedMode === "fast") await ensureFastModeNotice();
+    if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration
+        || request !== state.chatSpeedRequest) return;
+    const result = await api(`/api/sessions/${session.id}/speed`, {
+      method: "POST", body: { speedMode },
+    });
+    if (expectedSessionId !== state.chatSessionId || generation !== state.chatGeneration
+        || request !== state.chatSpeedRequest) return;
+    session.speedMode = result.speedMode;
+    select.value = result.speedMode;
+    toast(`Agent speed set to ${result.speedMode}.`);
+  } catch (error) {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration
+        && request === state.chatSpeedRequest) {
+      select.value = previous;
+      toast(error.message);
+    }
+  } finally {
+    if (expectedSessionId === state.chatSessionId && generation === state.chatGeneration
+        && request === state.chatSpeedRequest) select.disabled = false;
+  }
+}
+
+async function changeNewAgentSpeed() {
+  const project = selectedProject();
+  if (!project) return;
+  const select = $("#newAgentSpeed");
+  const speedMode = select.value;
+  select.disabled = true;
+  try {
+    if (speedMode === "fast") await ensureFastModeNotice();
+    safeLocalStorageSet(`wkcc:speed:${project.provider}`, speedMode);
+    if (selectedProject()?.id === project.id) select.value = speedMode;
+  } finally {
+    select.disabled = false;
   }
 }
 
@@ -2026,7 +2123,11 @@ $("#newAgentReasoning").addEventListener("change", () => {
   const project = selectedProject();
   if (project) safeLocalStorageSet(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
 });
+$("#newAgentSpeed").addEventListener("change", changeNewAgentSpeed);
 $("#chatReasoning").addEventListener("change", changeChatReasoning);
+$("#chatSpeed").addEventListener("change", changeChatSpeed);
+$("#fastModeNoticeOk").addEventListener("click", acknowledgeFastModeNotice);
+$("#fastModeNoticeDialog").addEventListener("cancel", (event) => event.preventDefault());
 $("#attachButton").addEventListener("click", () => $("#chatFiles").click());
 $("#chatFiles").addEventListener("change", async (event) => {
   await addChatFiles(event.target.files || []);

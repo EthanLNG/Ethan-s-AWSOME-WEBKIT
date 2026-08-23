@@ -2653,7 +2653,33 @@ class ControlCenterTests(unittest.TestCase):
             "interactionMode": "browse-default",
             "toggleHotkey": "KeyC",
             "dictateHotkey": "KeyV",
+            "fastModeNoticeSeen": False,
         })
+
+    def test_fast_mode_notice_acknowledgement_persists_without_preview_restart(self):
+        with mock.patch.object(
+            self.app.sessions, "refresh_previews_for_settings"
+        ) as refresh:
+            result = self.app.acknowledge_fast_mode_notice()
+        self.assertEqual(result, {"fastModeNoticeSeen": True})
+        self.assertTrue(self.app.bootstrap()["settings"]["fastModeNoticeSeen"])
+        refresh.assert_not_called()
+
+    def test_session_speed_updates_persist_and_reject_unknown_values(self):
+        session = {
+            "id": "speed-session", "projectId": "project", "provider": "codex",
+            "color": "blue", "status": "active", "speedMode": "normal",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(dict(session))
+        )
+        result = self.app.sessions.set_speed("speed-session", "fast")
+        self.assertEqual(result, {"speedMode": "fast"})
+        self.assertEqual(
+            self.app.sessions._get_session("speed-session")["speedMode"], "fast"
+        )
+        with self.assertRaisesRegex(ControlCenterError, "normal or fast"):
+            self.app.sessions.set_speed("speed-session", "turbo")
 
     def test_hotkey_settings_reject_reserved_or_duplicate_keys(self):
         with self.assertRaisesRegex(Exception, "not a modifier or Escape"):
@@ -2789,9 +2815,12 @@ class ControlCenterTests(unittest.TestCase):
         ), mock.patch.object(
             self.app.sessions, "_claim_and_preview"
         ), mock.patch.object(SessionRuntime, "start"):
-            session = self.app.sessions.start_session(project["id"], color)
+            session = self.app.sessions.start_session(
+                project["id"], color, "medium", "fast"
+            )
 
         self.assertEqual(session["status"], "active")
+        self.assertEqual(session["speedMode"], "fast")
         runtime = self.app.sessions.runtimes[session["id"]]
         bootstrap_job = runtime.jobs.get_nowait()
         self.assertEqual(bootstrap_job["source"], "bootstrap")
@@ -3595,6 +3624,59 @@ class ControlCenterTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_session_speed_http_routes_forward_the_selected_mode(self):
+        token = "test-token-1234567890"
+        app = mock.Mock()
+        app.sessions.start_session.return_value = {
+            "id": "speed-session", "speedMode": "fast",
+        }
+        app.sessions.set_speed.return_value = {"speedMode": "normal"}
+        server = ControlCenterHTTPServer(
+            ("127.0.0.1", 0), ControlCenterHandler, app, token
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            headers = {
+                "Content-Type": "application/json",
+                "X-WKCC-Token": token,
+            }
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/sessions/start",
+                body=json.dumps({
+                    "projectId": "project-1", "color": "blue",
+                    "reasoningEffort": "high", "speedMode": "fast",
+                }),
+                headers=headers,
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 201)
+            self.assertEqual(payload["session"]["speedMode"], "fast")
+            app.sessions.start_session.assert_called_once_with(
+                "project-1", "blue", "high", "fast"
+            )
+
+            connection.request(
+                "POST", "/api/sessions/speed-session/speed",
+                body=json.dumps({"speedMode": "normal"}), headers=headers,
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"speedMode": "normal"})
+            app.sessions.set_speed.assert_called_once_with(
+                "speed-session", "normal"
+            )
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_issue_agent_http_route_defaults_to_high_reasoning(self):
         token = "test-token-1234567890"
         app = mock.Mock()
@@ -3766,6 +3848,7 @@ class ControlCenterTests(unittest.TestCase):
         session = {
             "id": "session1", "provider": "codex", "worktree": str(self.root),
             "color": "blue", "threadId": None, "hasRun": False,
+            "speedMode": "fast",
         }
         event_log = EventLog(self.state_dir, "session1")
         threads = []
@@ -3801,6 +3884,7 @@ class ControlCenterTests(unittest.TestCase):
         child_env = popen.call_args[1]["env"]
         self.assertEqual(command[:3], ["/fake/codex", "exec", "--json"])
         self.assertIn("workspace-write", command)
+        self.assertIn('service_tier="fast"', command)
         self.assertEqual(popen.call_args[1]["encoding"], "utf-8")
         self.assertEqual(popen.call_args[1]["errors"], "replace")
         fake.stdin.write.assert_called_once_with("צבע אותו בכחול 🎨")
@@ -3857,6 +3941,7 @@ class ControlCenterTests(unittest.TestCase):
         session = {
             "id": "session2", "provider": "claude", "worktree": str(self.root),
             "color": "green", "threadId": None, "hasRun": False,
+            "speedMode": "fast",
         }
         event_log = EventLog(self.state_dir, "session2")
         runner = ProviderRunner(session, event_log, lambda value: None, lambda value: None)
@@ -3867,7 +3952,9 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("--session-id", first)
         self.assertNotIn("--resume", first)
         self.assertNotIn("Build it", first)
+        self.assertTrue(json.loads(first[first.index("--settings") + 1])["fastMode"])
         session["hasRun"] = True
+        session["speedMode"] = "normal"
         resumed_process = FakeProcess(['{"type":"result","is_error":false,"result":"Done"}\n'])
         with mock.patch("control_center.shutil.which", return_value="/fake/claude"), mock.patch("control_center.subprocess.Popen", return_value=resumed_process) as popen:
             runner.run("Continue")
@@ -3875,6 +3962,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("--resume", resumed)
         self.assertNotIn("--session-id", resumed)
         self.assertNotIn("Continue", resumed)
+        self.assertFalse(json.loads(resumed[resumed.index("--settings") + 1])["fastMode"])
 
     def test_atomic_json_write_does_not_follow_predictable_temp_symlink(self):
         target = self.root / "config.json"

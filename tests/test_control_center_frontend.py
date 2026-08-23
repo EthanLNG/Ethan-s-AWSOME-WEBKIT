@@ -843,6 +843,47 @@ async function testIssueActionStartsAnUncoloredAgent() {
   assert.match(openSessionSource, /Apply fix to/);
 }
 
+async function testFastModeNoticeIsAcknowledgedOnlyOnce() {
+  let opens = 0;
+  let closes = 0;
+  let saves = 0;
+  const dialog = {
+    showModal() { opens += 1; },
+    close() { closes += 1; },
+  };
+  const error = { textContent: "" };
+  const button = {};
+  const controls = {
+    "#fastModeNoticeDialog": dialog,
+    "#fastModeNoticeError": error,
+    "#fastModeNoticeOk": button,
+  };
+  const ctx = context({
+    state: { settings: { fastModeNoticeSeen: false } },
+    fastModeNoticePromise: null,
+    resolveFastModeNotice: null,
+    $: (selector) => controls[selector],
+    api: async () => {
+      saves += 1;
+      return { fastModeNoticeSeen: true };
+    },
+    setBusy: () => {},
+  });
+  install(ctx, "ensureFastModeNotice", "acknowledgeFastModeNotice");
+
+  const first = ctx.ensureFastModeNotice();
+  const second = ctx.ensureFastModeNotice();
+  assert.equal(first, second, "concurrent fast selections must share one notice");
+  assert.equal(opens, 1);
+  await ctx.acknowledgeFastModeNotice();
+  await first;
+  assert.equal(saves, 1);
+  assert.equal(closes, 1);
+  assert.equal(ctx.state.settings.fastModeNoticeSeen, true);
+  await ctx.ensureFastModeNotice();
+  assert.equal(opens, 1, "acknowledged notice must not reopen");
+}
+
 (async () => {
   await testHomeSelectionPersists();
   await testFinishedSessionsCloseTheirOwnedPreviewWindows();
@@ -858,6 +899,7 @@ async function testIssueActionStartsAnUncoloredAgent() {
   await testExistingProjectOffersAndRequestsWebkitUpdate();
   await testPushFailureBecomesPersistentAgentIssue();
   await testIssueActionStartsAnUncoloredAgent();
+  await testFastModeNoticeIsAcknowledgedOnlyOnce();
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
@@ -866,6 +908,22 @@ async function testIssueActionStartsAnUncoloredAgent() {
 
 
 class ControlCenterFrontendTests(unittest.TestCase):
+    def test_agent_speed_controls_and_persistent_notice_are_wired(self):
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        self.assertIn('id="newAgentSpeed"', markup)
+        self.assertIn('id="chatSpeed"', markup)
+        self.assertIn('id="fastModeNoticeDialog"', markup)
+        self.assertIn('id="fastModeNoticeOk"', markup)
+        self.assertIn("consumes more plan usage", markup)
+        self.assertIn('api("/api/notices/fast-mode"', source)
+        self.assertIn("state.settings.fastModeNoticeSeen", source)
+        self.assertIn('speedMode: $("#newAgentSpeed").value', source)
+        self.assertIn("/speed`,", source)
+        self.assertIn(".agent-setting-controls", styles)
+        self.assertIn(".chat-settings", styles)
+
     def test_registered_project_update_action_is_visible_in_markup(self):
         markup = INDEX_HTML.read_text(encoding="utf-8")
         source = APP_JS.read_text(encoding="utf-8")

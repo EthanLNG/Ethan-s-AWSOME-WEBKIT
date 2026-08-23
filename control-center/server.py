@@ -145,6 +145,8 @@ class Handler(BaseHTTPRequestHandler):
             path = parsed.path
             if path == "/api/preferences":
                 self._json(self.server.app.save_preferences(body))
+            elif path == "/api/notices/fast-mode":
+                self._json(self.server.app.acknowledge_fast_mode_notice())
             elif path == "/api/providers":
                 result = self.server.app.projects.save_providers(body.get("providers"))
                 self._json({"providers": result})
@@ -192,7 +194,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(self.server.app.start_project_seeds(parts[2]), 201)
             elif path == "/api/sessions/start":
                 session = self.server.app.sessions.start_session(
-                    body.get("projectId", ""), body.get("color", ""), body.get("reasoningEffort", "medium")
+                    body.get("projectId", ""), body.get("color", ""),
+                    body.get("reasoningEffort", "medium"), body.get("speedMode", "normal")
                 )
                 self._json({"session": session}, 201)
             elif path.startswith("/api/sessions/"):
@@ -207,6 +210,10 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "reasoning":
                     self._json(self.server.app.sessions.set_reasoning(
                         session_id, body.get("reasoningEffort", "")
+                    ))
+                elif action == "speed":
+                    self._json(self.server.app.sessions.set_speed(
+                        session_id, body.get("speedMode", "")
                     ))
                 elif action == "merge":
                     self._json(self.server.app.sessions.merge(session_id))

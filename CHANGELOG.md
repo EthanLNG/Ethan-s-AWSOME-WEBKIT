@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.8.14 (2026-08-23): Automatic voice-note saves and subscription Fast mode
+
+- Finished and uploaded an active voice recording automatically before saving
+  a feedback point, including saves started directly from the control pill.
+- Configured Codex Fast with the documented ChatGPT feature and login settings,
+  preventing an API key from silently taking over subscription-backed sessions.
+- Restricted Claude Fast to Claude.ai login while making its separately billed
+  extra-usage requirement explicit in the one-time speed notice.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. Fast mode may require you
+to sign in to the selected provider's subscription account.
+
 ## v0.8.13 (2026-08-23): Cloud voice notes and visible merge handoff
 
 - Added an optional OpenAI cloud voice-note mode backed by GPT-4o Transcribe.

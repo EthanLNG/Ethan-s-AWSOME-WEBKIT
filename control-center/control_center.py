@@ -6856,11 +6856,17 @@ class ProviderRunner:
                 for path in self._codex_git_write_dirs():
                     command.extend(["--add-dir", str(path)])
             command.extend(["-c", 'model_reasoning_effort="{}"'.format(reasoning)])
-            command.extend([
-                "-c", 'service_tier="{}"'.format(
-                    "fast" if speed_mode == "fast" else "default"
-                ),
-            ])
+            if speed_mode == "fast":
+                command.extend([
+                    "-c", 'service_tier="fast"',
+                    "-c", "features.fast_mode=true",
+                    "-c", 'forced_login_method="chatgpt"',
+                ])
+            else:
+                command.extend([
+                    "-c", 'service_tier="default"',
+                    "-c", "features.fast_mode=false",
+                ])
             if thread_id:
                 command.extend(["resume", thread_id, "-"])
             else:
@@ -6873,13 +6879,16 @@ class ProviderRunner:
                 thread_id = str(uuid.uuid4())
                 self.session["threadId"] = thread_id
                 self.persist_thread(thread_id)
+            claude_settings = (
+                {"fastMode": True, "forceLoginMethod": "claudeai"}
+                if speed_mode == "fast"
+                else {"fastMode": False}
+            )
             command = [
                 executable, "-p", "--output-format", "stream-json", "--verbose",
                 "--permission-mode", "plan" if self.read_only else "auto",
                 "--effort", reasoning,
-                "--settings", json.dumps(
-                    {"fastMode": speed_mode == "fast"}, separators=(",", ":")
-                ),
+                "--settings", json.dumps(claude_settings, separators=(",", ":")),
             ]
             if self.session.get("hasRun"):
                 command.extend(["--resume", thread_id])

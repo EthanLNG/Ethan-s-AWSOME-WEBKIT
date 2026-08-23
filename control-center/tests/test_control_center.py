@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.13")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.14")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -3885,6 +3885,8 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(command[:3], ["/fake/codex", "exec", "--json"])
         self.assertIn("workspace-write", command)
         self.assertIn('service_tier="fast"', command)
+        self.assertIn("features.fast_mode=true", command)
+        self.assertIn('forced_login_method="chatgpt"', command)
         self.assertEqual(popen.call_args[1]["encoding"], "utf-8")
         self.assertEqual(popen.call_args[1]["errors"], "replace")
         fake.stdin.write.assert_called_once_with("צבע אותו בכחול 🎨")
@@ -3910,8 +3912,12 @@ class ControlCenterTests(unittest.TestCase):
         )
         with mock.patch("control_center.shutil.which", return_value="/fake/codex"), mock.patch(
             "control_center.subprocess.Popen", return_value=fake
-        ):
+        ) as popen:
             runner.run("Check")
+        command = popen.call_args[0][0]
+        self.assertIn('service_tier="default"', command)
+        self.assertIn("features.fast_mode=false", command)
+        self.assertNotIn('forced_login_method="chatgpt"', command)
         texts = [event["text"] for event in event_log.read_after(0)["events"]]
         self.assertEqual(texts, ["Ready"])
 
@@ -3952,7 +3958,9 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("--session-id", first)
         self.assertNotIn("--resume", first)
         self.assertNotIn("Build it", first)
-        self.assertTrue(json.loads(first[first.index("--settings") + 1])["fastMode"])
+        first_settings = json.loads(first[first.index("--settings") + 1])
+        self.assertTrue(first_settings["fastMode"])
+        self.assertEqual(first_settings["forceLoginMethod"], "claudeai")
         session["hasRun"] = True
         session["speedMode"] = "normal"
         resumed_process = FakeProcess(['{"type":"result","is_error":false,"result":"Done"}\n'])
@@ -3962,7 +3970,9 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIn("--resume", resumed)
         self.assertNotIn("--session-id", resumed)
         self.assertNotIn("Continue", resumed)
-        self.assertFalse(json.loads(resumed[resumed.index("--settings") + 1])["fastMode"])
+        resumed_settings = json.loads(resumed[resumed.index("--settings") + 1])
+        self.assertFalse(resumed_settings["fastMode"])
+        self.assertNotIn("forceLoginMethod", resumed_settings)
 
     def test_atomic_json_write_does_not_follow_predictable_temp_symlink(self):
         target = self.root / "config.json"
@@ -4049,7 +4059,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.13",
+            "requiredVersion": "0.8.14",
         })
 
         status = subprocess.run(
@@ -4096,9 +4106,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.13")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.14")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.13")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.14")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -4106,7 +4116,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.13")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.14")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -4164,7 +4174,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.13"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.14"
         )
         self.assertEqual(
             subprocess.run(
@@ -4208,7 +4218,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.13",
+            "requiredVersion": "0.8.14",
         })
 
         active = {
@@ -4237,9 +4247,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.13")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.13")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.13")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.14")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.14")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.14")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()

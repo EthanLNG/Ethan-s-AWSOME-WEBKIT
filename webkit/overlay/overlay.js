@@ -2447,17 +2447,19 @@
     // validation or concurrency check fails.
     async function commit() {
       draft.text = ta.value;
-      if (mic.on || mic.starting || mic.stopping || mic.uploading) {
-        const message = mic.on
-          ? 'Stop the recording before saving this point.'
-          : mic.starting
-            ? 'Wait for microphone permission before saving this point.'
-            : mic.stopping
-              ? 'Wait for the voice note to finish processing.'
-            : 'Wait for the voice note to finish saving.';
-        toast(message, { kind: 'warn' });
+      if (mic.starting) {
+        toast('Wait for microphone permission before saving this point.', { kind: 'warn' });
         return false;
       }
+      if ((mic.on || mic.stopping || mic.uploading) && mic.finishAndWait) {
+        // commit() is shared by Done and the control pill's Send action. Keep
+        // the recorder shutdown here so every save path captures the final
+        // MediaRecorder chunk, waits for its upload, and only then snapshots
+        // the point. Callers must never need to stop a recording by hand.
+        const voiceReady = await mic.finishAndWait();
+        if (!voiceReady) return false;
+      }
+      if (mic.on || mic.starting || mic.stopping || mic.uploading) return false;
       if (!draft.text.trim() && !draft.voiceNote) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
       let pt = pointFromDraft(draft);
       if (pendingEditing) {

@@ -316,6 +316,14 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
             self.source,
         )
 
+    def test_every_feedback_save_finishes_an_active_voice_note_first(self):
+        commit_start = self.source.index("    async function commit()")
+        commit_end = self.source.index("    addRectBtn.addEventListener", commit_start)
+        commit_source = self.source[commit_start:commit_end]
+        self.assertIn("await mic.finishAndWait()", commit_source)
+        self.assertIn("if (!voiceReady) return false", commit_source)
+        self.assertNotIn("Stop the recording before saving this point", self.source)
+
     def test_ready_review_opens_without_a_confirmation_toast(self):
         self.assertIn("function maybeAutoEnterReview()", self.source)
         self.assertIn("S.reviewAutoPending = true;\n        maybeAutoEnterReview();", self.source)

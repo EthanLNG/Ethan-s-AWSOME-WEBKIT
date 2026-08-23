@@ -206,6 +206,9 @@ instead of a single change:
 
 Use `context[]` to find the target: try `context[0].selector` first; if the
 DOM shifted since capture, fall back to the rect + the other context entries.
+`rectSurfaces`, when present, is overlay-only metadata parallel to `rects`: one
+state fingerprint, anchor, and capture scroll per rectangle. Preserve it when
+copying point objects, but ignore it when implementing the requested change.
 The user's `text` is the instruction; the geometry is only there to tell you
 *where*. A non-null `uiState` means the point was drawn inside a dialog or
 popover. Edit the selected elements normally; the overlay reopens those

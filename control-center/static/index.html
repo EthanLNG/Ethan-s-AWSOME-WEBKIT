@@ -15,7 +15,7 @@
     </button>
     <button class="shortcut-guide" id="shortcutGuide" type="button" aria-label="Preview shortcuts; open settings">
       <span><kbd id="guideToggleKey">C</kbd><small>Hide/Show</small></span>
-      <span><kbd id="guideDictateKey">V</kbd><small>Voice</small></span>
+      <span><kbd id="guideDictateKey">Space</kbd><small>Voice</small></span>
       <span><kbd class="option-key">Alt</kbd><small id="guideOptionAction">Draw</small></span>
     </button>
     <div class="system-status" id="systemStatus" aria-live="polite"></div>
@@ -262,7 +262,7 @@
       <button class="dialog-close" id="settingsDialogClose" type="button" aria-label="Close">×</button>
       <p class="eyebrow">Control Center settings</p>
       <h2 id="settingsDialogTitle">Preview shortcuts</h2>
-      <p>These are the only three controls you need on the website. Click either letter shortcut to change it.</p>
+      <p>These are the only three controls you need on the website. Click either shortcut key to change it.</p>
       <div class="hotkey-options">
         <button class="hotkey-picker" type="button" data-hotkey-setting="toggleHotkey">
           <span><b>Open / close feedback</b><small>Click, then press your preferred key</small></span>
@@ -270,14 +270,14 @@
         </button>
         <button class="hotkey-picker" type="button" data-hotkey-setting="dictateHotkey">
           <span><b>Start / stop voice</b><small>Click, then press your preferred key</small></span>
-          <kbd id="settingsDictateKey">V</kbd>
+          <kbd id="settingsDictateKey">Space</kbd>
         </button>
         <div class="hotkey-picker fixed">
           <span><b id="settingsOptionAction">Draw a rectangle</b><small>Hold while dragging on the website</small></span>
           <kbd class="option-key">Alt</kbd>
         </div>
       </div>
-      <p class="capability-note shortcut-note">Shortcuts pause while you type in a text field, so the selected letters remain typable.</p>
+      <p class="capability-note shortcut-note">Open/close pauses while you type. The dictation shortcut starts only from an empty Webkit feedback box, so normal spaces remain typable.</p>
       <div class="settings-section">
         <h2>Agent providers</h2>
         <p>Choose the local agents you want available for new website projects.</p>

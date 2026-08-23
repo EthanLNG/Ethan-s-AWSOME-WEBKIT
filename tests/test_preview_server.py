@@ -707,6 +707,20 @@ class PreviewServerTests(unittest.TestCase):
             "role": "primary",
         }]
         point["rectContexts"] = [context, context]
+        surface = {
+            "targetSelector": ".app-setup",
+            "anchor": {"selector": "#phone-stage", "mode": "sticky"},
+            "scroll": {"x": 0, "y": 5107},
+            "stateChain": [{
+                "selector": "#phone-stage",
+                "attrs": {"data-state": "setup"},
+                "classes": ["is-active"],
+            }],
+        }
+        self.assertTrue(self.module._valid_rect_surface({
+            key: value for key, value in surface.items() if key != "scroll"
+        }))
+        point["rectSurfaces"] = [surface, surface]
         status, _, payload = self.post_json("/__wk/feedback", batch)
         self.assertEqual(status, 200, payload)
 
@@ -718,6 +732,70 @@ class PreviewServerTests(unittest.TestCase):
         self.assertEqual(
             self.module._feedback_schema_error(invalid),
             "feedback point rectangle contexts are invalid",
+        )
+
+        invalid_surface = self.batch("point-3")
+        invalid_surface_point = invalid_surface["points"][0]
+        invalid_surface_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        invalid_surface_point["rects"] = [invalid_surface_point["rect"]]
+        invalid_surface_point["rectSurfaces"] = [{
+            **surface,
+            "stateChain": [{
+                "selector": "#phone-stage",
+                "attrs": {"data-state": "setup"},
+                "classes": ["is-active", "is-active"],
+            }],
+        }]
+        self.assertEqual(
+            self.module._feedback_schema_error(invalid_surface),
+            "feedback point rectangle surfaces are invalid",
+        )
+
+        invalid_class = self.batch("point-class")
+        invalid_class_point = invalid_class["points"][0]
+        invalid_class_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        invalid_class_point["rects"] = [invalid_class_point["rect"]]
+        invalid_class_point["rectSurfaces"] = [{
+            **surface,
+            "stateChain": [{
+                "selector": "#phone-stage",
+                "attrs": {"data-state": "setup"},
+                "classes": ["active state"],
+            }],
+        }]
+        self.assertEqual(
+            self.module._feedback_schema_error(invalid_class),
+            "feedback point rectangle surfaces are invalid",
+        )
+
+        malformed_class = self.batch("point-malformed-class")
+        malformed_class_point = malformed_class["points"][0]
+        malformed_class_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        malformed_class_point["rects"] = [malformed_class_point["rect"]]
+        malformed_class_point["rectSurfaces"] = [{
+            **surface,
+            "stateChain": [{
+                "selector": "#phone-stage",
+                "attrs": {"data-state": "setup"},
+                "classes": [{}],
+            }],
+        }]
+        self.assertEqual(
+            self.module._feedback_schema_error(malformed_class),
+            "feedback point rectangle surfaces are invalid",
+        )
+
+        invalid_scroll = self.batch("point-4")
+        invalid_scroll_point = invalid_scroll["points"][0]
+        invalid_scroll_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        invalid_scroll_point["rects"] = [invalid_scroll_point["rect"]]
+        invalid_scroll_point["rectSurfaces"] = [{
+            **surface,
+            "scroll": {"x": 0, "y": 10000001},
+        }]
+        self.assertEqual(
+            self.module._feedback_schema_error(invalid_scroll),
+            "feedback point rectangle surfaces are invalid",
         )
 
     def test_existing_feedback_rejects_batch_and_round_skew_but_allows_round_two_additions(self):

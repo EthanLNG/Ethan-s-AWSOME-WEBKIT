@@ -47,8 +47,9 @@ overwhelmed would require genuine effort.
 - **Fresh previews:** the local server uses `Cache-Control: no-store` and stamps
   each browser tab with its session color.
 - **Non-blocking feedback:** press **C**, then hold **Alt/Option** while dragging
-  a rectangle. Normal clicks continue to reach the website. Press **V** for
-  dictation. C and V are defaults and can be changed in the Control Center.
+  a rectangle. Normal clicks continue to reach the website. Press **Space** for
+  dictation while the feedback box is empty. C and Space are defaults and can
+  be changed in the Control Center.
 - **Git-backed review:** before/after comparison can target one feedback point
   or the whole page. Accept, delete, and redo actions remain point-specific.
 - **Lettered experiments:** A/B/C variants stay scoped to one section and are

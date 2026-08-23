@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.8.19 (2026-08-24): Reusable Space dictation and state-aware sticky marks
+
+- Made Space start dictation whenever the active Webkit note is empty,
+  including after typed text has been deleted, while preserving ordinary Space
+  input as soon as the note contains content.
+- Replaced the Control Center's remaining hard-coded V labels with Space so its
+  initial paint, settings dialog, preview hint, and persisted defaults agree.
+- Separated rectangle geometry from visual-state validity for sticky and fixed
+  scenes. Each new rectangle records a bounded state fingerprint, follows
+  effective ancestor visibility, and hides when the same pinned box begins
+  showing a different step, slide, screen, or mode.
+- Made sticky-point selection restore the exact captured scroll moment even
+  when the pinned box never moved, with an ancestor-opacity fallback for points
+  created by older Webkit releases.
+
+**Migration:** finish or discard active project sessions, reopen the AWESOME
+WEBKIT desktop launcher once, update the project's Webkit, and start a fresh
+color session.
+
 ## v0.8.18 (2026-08-23): Mixed-version shortcuts and sticky review jumps
 
 - Migrated the legacy injected KeyV dictation default inside the preview server,

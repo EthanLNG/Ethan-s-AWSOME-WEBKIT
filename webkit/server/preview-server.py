@@ -1742,6 +1742,7 @@ _POINT_FIELDS = {
     "id", "number", "page", "createdAt", "rect", "rects", "viewport",
     "scroll", "anchor", "context", "uiState", "abcState", "text",
     "voiceNote", "abcRequest", "status", "revision", "rectContexts",
+    "rectSurfaces",
 }
 
 
@@ -1834,6 +1835,70 @@ def _valid_context(value):
         if not _valid_rect(
             item.get("box"), allow_negative=True, allow_zero_size=True
         ):
+            return False
+    return True
+
+
+def _valid_rect_surface(value):
+    if value is None:
+        return True
+    required = {"targetSelector", "anchor", "stateChain"}
+    allowed = required | {"scroll"}
+    if (
+        not isinstance(value, dict)
+        or not required.issubset(value)
+        or not set(value).issubset(allowed)
+    ):
+        return False
+    if not _bounded_string(value["targetSelector"], 2048, allow_empty=False):
+        return False
+    anchor = value["anchor"]
+    if anchor is not None and (
+        not isinstance(anchor, dict)
+        or set(anchor) != {"selector", "mode"}
+        or not _bounded_string(anchor.get("selector"), 2048, allow_empty=False)
+        or anchor.get("mode") not in ("fixed", "sticky")
+    ):
+        return False
+    state_chain = value["stateChain"]
+    if not isinstance(state_chain, list) or len(state_chain) > 8:
+        return False
+    if "scroll" in value:
+        scroll = value["scroll"]
+        if (
+            not isinstance(scroll, dict)
+            or set(scroll) != {"x", "y"}
+            or not _bounded_number(scroll["x"], -1000000, 10000000)
+            or not _bounded_number(scroll["y"], -1000000, 10000000)
+        ):
+            return False
+    for signal in state_chain:
+        if not isinstance(signal, dict) or set(signal) != {
+            "selector", "attrs", "classes"
+        }:
+            return False
+        if not _bounded_string(signal["selector"], 2048, allow_empty=False):
+            return False
+        attrs = signal["attrs"]
+        if not isinstance(attrs, dict) or len(attrs) > 8:
+            return False
+        if any(
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z_:][A-Za-z0-9_.:-]{0,127}", name)
+            or not _bounded_string(attribute_value, 256)
+            for name, attribute_value in attrs.items()
+        ):
+            return False
+        classes = signal["classes"]
+        if not isinstance(classes, list) or len(classes) > 8:
+            return False
+        if any(
+            not _bounded_string(class_name, 128, allow_empty=False)
+            or re.search(r"[\t\n\f\r ]", class_name)
+            for class_name in classes
+        ):
+            return False
+        if len(classes) != len(set(classes)):
             return False
     return True
 
@@ -2003,6 +2068,15 @@ def _feedback_schema_error(batch):
                 or any(not _valid_context(contexts) for contexts in rect_contexts)
             ):
                 return "feedback point rectangle contexts are invalid"
+        if "rectSurfaces" in point:
+            rect_surfaces = point["rectSurfaces"]
+            rects = point.get("rects") or ([point.get("rect")] if point.get("rect") else [])
+            if (
+                not isinstance(rect_surfaces, list)
+                or len(rect_surfaces) != len(rects)
+                or any(not _valid_rect_surface(surface) for surface in rect_surfaces)
+            ):
+                return "feedback point rectangle surfaces are invalid"
         if "viewport" in point:
             viewport = point["viewport"]
             if (

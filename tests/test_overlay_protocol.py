@@ -37,7 +37,14 @@ class OverlayProtocolTests(unittest.TestCase):
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
             + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
             + "anchorFitScore, anchorCoverageScore, anchorContextScore, "
-            + "reanchorRect, reviewScrollTarget, tabActivityMode, tabPollDelay, "
+            + "reanchorRect, reviewScrollTarget, viewportStateAttributeName, "
+            + "surfaceStateValuesMatch, effectiveStyleChainVisible, sameRectGeometry, "
+            + "surfaceMutationRelevant, surfaceChildListRelevant, pointAnchorMode, "
+            + "preferredSurfaceCandidate, "
+            + "rectUsesLegacyViewportAnchor, "
+            + "persistedRectForDraft, primaryRectIndex, visualSurfaceActive, "
+            + "tabActivityMode, tabPollDelay, keyboardActivationTarget, "
+            + "dictationTargetAllowsActivation, dictationKeyAction, "
             + "MAX_QUEUED_TOMBSTONES };"
         )
         program = "const H = new Function(%s)();\n%s" % (json.dumps(exports), body)
@@ -255,16 +262,88 @@ assert.deepStrictEqual(
   H.reanchorRect(mark, target, { x: 180, y: 150, w: 2000, h: 100 }),
   { x: 190, y: 160, w: 200, h: 80 }
 );
+for (const name of [
+  'data-state', 'data-current-step', 'data-screen-mode', 'aria-hidden', 'aria-selected'
+]) assert.strictEqual(H.viewportStateAttributeName(name), true, name);
+for (const name of ['data-copy', 'data-testid', 'aria-label', 'style']) {
+  assert.strictEqual(H.viewportStateAttributeName(name), false, name);
+}
+const capturedState = {
+  attrs: { 'data-state': 'setup' }, classes: ['is-active'],
+};
+assert.strictEqual(H.surfaceStateValuesMatch(
+  capturedState, (name) => ({ 'data-state': 'setup' })[name], (name) => name === 'is-active'
+), true);
+assert.strictEqual(H.surfaceStateValuesMatch(
+  capturedState, () => 'out', () => true
+), false);
+assert.strictEqual(H.surfaceStateValuesMatch(
+  { attrs: {}, classes: ['active state'] }, () => null, () => {
+    throw new Error('DOMTokenList would reject this token');
+  }
+), false);
+assert.strictEqual(H.effectiveStyleChainVisible([
+  { display: 'block', visibility: 'visible', contentVisibility: 'visible', opacity: '1' },
+  { display: 'block', visibility: 'visible', contentVisibility: 'visible', opacity: '0' },
+]), false);
+assert.strictEqual(H.effectiveStyleChainVisible([
+  { display: 'block', visibility: 'visible', contentVisibility: 'visible', opacity: '0.5' },
+  { display: 'block', visibility: 'visible', contentVisibility: 'visible', opacity: '0.5' },
+]), true);
+assert.strictEqual(H.visualSurfaceActive(
+  true, true, false, 'sticky', false, 7200, 5107, 900
+), false);
+assert.strictEqual(H.visualSurfaceActive(
+  true, true, false, 'sticky', true, 5107, 5107, 900
+), true);
+assert.strictEqual(H.visualSurfaceActive(
+  false, true, true, 'sticky', true, 5107, 5107, 900
+), false);
+// A sticky scene with no explicit data/class state signal is still tied to its
+// capture moment. Fixed and document content remain active while visible.
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'sticky', false, 7200, 5107, 900
+), false);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'sticky', false, 5140, 5107, 900
+), true);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'fixed', false, 7200, 5107, 900
+), true);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'doc', false, 7200, 5107, 900
+), true);
+assert.strictEqual(H.sameRectGeometry(
+  { x: 10, y: 20, w: 30, h: 40 }, { x: 10, y: 20, w: 30, h: 40 }
+), true);
+assert.strictEqual(H.sameRectGeometry(
+  { x: 10, y: 20, w: 30, h: 40 }, { x: 11, y: 20, w: 30, h: 40 }
+), false);
+assert.strictEqual(H.surfaceMutationRelevant('style', false), false);
+assert.strictEqual(H.surfaceMutationRelevant('data-copy', true), false);
+assert.strictEqual(H.surfaceMutationRelevant('data-state', true), true);
+assert.strictEqual(H.pointAnchorMode([], ['sticky'], false), 'sticky');
+assert.strictEqual(H.pointAnchorMode([], ['fixed'], false), 'fixed');
+assert.strictEqual(H.pointAnchorMode([], [], true), 'unknown');
+assert.strictEqual(H.pointAnchorMode([], [], false), 'doc');
+assert.strictEqual(H.rectUsesLegacyViewportAnchor('viewport', null), true);
+assert.strictEqual(H.rectUsesLegacyViewportAnchor('viewport', { anchor: null }), false);
+assert.strictEqual(H.rectUsesLegacyViewportAnchor('doc', null), false);
 """
         )
         self.assertIn("right[1].score - left[1].score", self.source)
         self.assertIn("const MIN_ANCHOR_FIT = 0.08", self.source)
-        self.assertIn("rectContexts: rects.map((rect) => captureContext(rect))", self.source)
+        self.assertIn("sameRectGeometry(rect, draft.rectMetadataRects?.[rectIndex])", self.source)
         self.assertIn("if (contexts.length) contexts[0].role = 'primary'", self.source)
-        self.assertIn("const pendingEditingRects = pendingGeometry", self.source)
+        self.assertIn("const editingDisplayRects = editingGeometry", self.source)
         self.assertIn("x: rect.x + scrollX", self.source)
         self.assertIn("underlayElementsFromPoint", self.source)
         self.assertIn("elementViewportAnchored", self.source)
+        self.assertIn("rectSurfaces,", self.source)
+        self.assertIn("function effectivelyVisible(node)", self.source)
+        self.assertIn("geometry.active[marker.rectIndex] === false", self.source)
+        self.assertIn("surfaceObserver = new MutationObserver((records) =>", self.source)
+        self.assertIn("nodeAffectsTrackedSurface(event.target)", self.source)
 
     def test_pins_track_live_geometry_without_scroll_ghosts(self):
         for fragment in (
@@ -281,6 +360,303 @@ assert.deepStrictEqual(
         pin = re.search(r"\.wk-pin \{(?P<body>.*?)\n\}", self.css, re.S)
         self.assertIsNotNone(pin)
         self.assertNotIn("transition: transform", pin.group("body"))
+
+    def test_surface_tracking_is_targeted_and_can_reactivate_hidden_markers(self):
+        for fragment in (
+            "refreshSurfaceObservation();\n    repositionAll();",
+            "surfaceObserver.observe(node, { attributes: true })",
+            "trackedNodes?.has(target) || remountParents?.has(target)",
+            "if (!target) return unresolvedSurfaceActive(point, surface);",
+            "records.filter(childListAffectsTrackedSurface)",
+            "surfaceChildListRelevant(",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+        self.assertNotIn(
+            "surfaceObserver.observe(document.documentElement, { attributes: true, subtree: true })",
+            self.source,
+        )
+        self.assertNotIn("pointSurfaceVisible(", self.source)
+
+    def test_async_surface_remount_stays_observed_across_remove_and_later_insert(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const parent = {};
+const trackedLeaf = {};
+const unrelated = {};
+const initialTracked = new Set([parent, trackedLeaf]);
+const remountParents = new Set();
+assert.strictEqual(H.surfaceChildListRelevant(
+  parent, [trackedLeaf], initialTracked, remountParents
+), true);
+
+// First rAF refresh sees the selector unresolved. Only the connected parent is
+// retained, and the exact mutation parent remains a bounded remount watch.
+const afterRemovalTracked = new Set([parent]);
+remountParents.add(parent);
+assert.strictEqual(H.surfaceChildListRelevant(
+  parent, [], afterRemovalTracked, remountParents
+), true);
+assert.strictEqual(H.surfaceChildListRelevant(
+  parent, [], new Set(), remountParents
+), true);
+assert.strictEqual(H.surfaceChildListRelevant(
+  unrelated, [], afterRemovalTracked, remountParents
+), false);
+"""
+        )
+        for fragment in (
+            "const connectedTrackedNodes = [...trackedSurfaceNodes]",
+            "if (unresolvedSurface)",
+            "for (const node of connectedTrackedNodes) addTrackedNode(node)",
+            "rememberSurfaceRemountParent(record.target)",
+            "if (surfaceRebindRaf) return",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_initially_unresolved_surface_uses_first_resolved_context_as_remount_watch(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const fallbackContext = {};
+const laterInsertionParent = fallbackContext;
+assert.strictEqual(H.surfaceChildListRelevant(
+  laterInsertionParent, [], new Set([fallbackContext]), new Set()
+), true);
+"""
+        )
+        for fragment in (
+            "const fallbackContexts = Array.isArray(point.rectContexts)",
+            "const fallbackTarget = uniqueElement(context?.selector)",
+            "addTargetChain(fallbackTarget)",
+            "for (const context of contexts)",
+            "const contextTarget = uniqueElement(context.selector)",
+            "target = contextTarget",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_surface_capture_prefers_later_sticky_state_target_over_generic_stage(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const genericStage = {
+  targetSelector: '#scroll-stage',
+  anchor: null,
+  stateChain: [],
+};
+const stickyTarget = {
+  targetSelector: '#sticky-target',
+  anchor: { selector: '#sticky-target', mode: 'sticky' },
+  stateChain: [{ selector: '#sticky-target', attrs: { 'data-state': 'one' }, classes: [] }],
+};
+const statefulDocumentTarget = {
+  targetSelector: '#stateful-document-target',
+  anchor: null,
+  stateChain: [{
+    selector: '#stateful-document-target',
+    attrs: { 'data-state': 'one' },
+    classes: [],
+  }],
+};
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, statefulDocumentTarget, stickyTarget]),
+  stickyTarget
+);
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, statefulDocumentTarget]),
+  statefulDocumentTarget
+);
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, { ...genericStage, targetSelector: '#other' }]),
+  genericStage
+);
+assert.strictEqual(H.preferredSurfaceCandidate([]), null);
+"""
+        )
+        for fragment in (
+            "for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12))",
+            "const selected = preferredSurfaceCandidate(candidates)",
+            "targetSelector: selected.targetSelector",
+            "stateChain: selected.stateChain",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_v0818_missing_selectors_only_reappear_at_the_capture_scroll(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+// v0.8.18 points can reference a selector removed by the agent. Their stored
+// rectangle is allowed at the capture moment, but never follows a sticky scene.
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'sticky', true, 2100, 2100, 900
+), true);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'sticky', true, 3000, 2100, 900
+), false);
+"""
+        )
+        self.assertIn("function unresolvedSurfaceActive(point, surface)", self.source)
+        self.assertIn("if (!selector) return unresolvedSurfaceActive(point, null);", self.source)
+        self.assertIn("surface?.anchor?.mode || point.anchor || 'doc'", self.source)
+        self.assertIn("capturedMode ? [capturedMode] : []", self.source)
+
+    def test_unresolved_document_points_keep_document_geometry_active(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'doc', false, 9000, 1200, 900
+), true);
+"""
+        )
+        self.assertIn("? 'sticky'\n      : 'doc'", self.source)
+
+    def test_rectangle_edits_reuse_capture_metadata_until_geometry_changes(self):
+        for fragment in (
+            "rectContexts: editing ? editingRectContexts.slice()",
+            "rectSurfaces: editing ? editingRectSurfaces.slice()",
+            "rectMetadataRects: editing",
+            "rectContexts.push(draft.rectContexts[rectIndex])",
+            "rectSurfaces.push(draft.rectSurfaces[rectIndex] ?? null)",
+            "captureDraftRectMetadata(S.card.draft, index",
+            "draft.rectContexts[rectIndex] = rectContext",
+            "draft.rectSurfaces[rectIndex] = rectSurface",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_pending_fixed_text_edit_preserves_the_original_capture_frame(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const capturedRect = { x: 20, y: 1100, w: 200, h: 80 };
+const reopenedDisplayRect = { x: 20, y: 2100, w: 200, h: 80 };
+const stored = H.persistedRectForDraft(
+  reopenedDisplayRect,
+  { ...reopenedDisplayRect },
+  capturedRect
+);
+assert.deepStrictEqual(stored, capturedRect);
+assert.strictEqual(stored.y - 1000, 100);
+assert.deepStrictEqual(H.persistedRectForDraft(
+  { ...reopenedDisplayRect, y: 2110 }, reopenedDisplayRect, capturedRect
+), { ...reopenedDisplayRect, y: 2110 });
+"""
+        )
+        for fragment in (
+            "rectPersistedRects: editingSource",
+            "persistedRectForDraft(",
+            "draft.rectPersistedRects?.[rectIndex]",
+            "draft.rectPersistedRects[rectIndex] = null",
+            "if (!sameRectGeometry(S.card.draft.rects[index], S.drag.r0))",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_mixed_document_and_sticky_rectangles_keep_independent_anchor_modes(self):
+        for fragment in (
+            "const anchorModes = rects.map((_rect, rectIndex) =>",
+            "const fixedByRect = anchorModes.map((mode) => mode !== 'doc')",
+            "geometry.fixedByRect[marker.rectIndex]",
+            "editingGeometry.fixedByRect[rectIndex]",
+            "anchorMode: geometry.anchorModes[0]",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+        self.run_node(
+            r"""
+const assert = require('assert');
+const modes = [
+  H.pointAnchorMode([], [], false),
+  H.pointAnchorMode([], ['sticky'], false),
+];
+assert.deepStrictEqual(modes, ['doc', 'sticky']);
+assert.deepStrictEqual(modes.map((mode) => mode !== 'doc'), [false, true]);
+"""
+        )
+
+    def test_queued_fixed_reopen_uses_live_display_and_original_storage_frames(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const queued = {
+  rect: { x: 20, y: 1100, w: 200, h: 80 },
+  scroll: { x: 0, y: 1000 },
+};
+const reopenedAtScroll2000 = { x: 20, y: 2100, w: 200, h: 80 };
+assert.deepStrictEqual(H.persistedRectForDraft(
+  reopenedAtScroll2000,
+  { ...reopenedAtScroll2000 },
+  queued.rect
+), queued.rect);
+"""
+        )
+        for fragment in (
+            "const editingSource = pendingEditing || queuedEditing",
+            "const editingGeometry = editingSource ? correctedPointRects(editingSource)",
+            "rect: { ...editingDisplayRects[editingPrimaryIndex] }",
+            "editingSourceRects.map((rect) => ({ ...rect }))",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_multi_rect_text_edit_preserves_the_original_last_primary_rect(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const first = { x: 10, y: 1100, w: 80, h: 40 };
+const lastPrimary = { x: 200, y: 1200, w: 120, h: 60 };
+const liveDisplayRects = [
+  { x: 10, y: 2100, w: 80, h: 40 },
+  { x: 200, y: 2200, w: 120, h: 60 },
+];
+const index = H.primaryRectIndex([first, lastPrimary], lastPrimary);
+assert.strictEqual(index, 1);
+assert.deepStrictEqual(liveDisplayRects[index], liveDisplayRects[1]);
+assert.deepStrictEqual(H.persistedRectForDraft(
+  liveDisplayRects[index], { ...liveDisplayRects[index] }, lastPrimary
+), lastPrimary);
+assert.strictEqual(H.primaryRectIndex([first, lastPrimary], { x: 999, y: 0, w: 1, h: 1 }), 1);
+assert.strictEqual(H.primaryRectIndex([first, first], first), 1);
+"""
+        )
+        self.assertIn(
+            "primaryRectIndex(editingSourceRects, editingSource.rect)",
+            self.source,
+        )
+        self.assertIn(
+            "const activeRectIndex = primaryRectIndex(rects, draft.rect)",
+            self.source,
+        )
+        self.assertNotIn(
+            "rects.findIndex((rect) => sameRectGeometry(rect, draft.rect))",
+            self.source,
+        )
+
+    def test_null_surface_preserves_legacy_viewport_anchor_fallback(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const point = {
+  anchor: 'viewport',
+  rectSurfaces: [null],
+  rectContexts: [[{ selector: '#removed-target' }]],
+};
+assert.strictEqual(
+  H.rectUsesLegacyViewportAnchor(point.anchor, point.rectSurfaces[0]),
+  true
+);
+assert.strictEqual(H.pointAnchorMode([], [], true), 'unknown');
+"""
+        )
+        self.assertIn(
+            "rectUsesLegacyViewportAnchor(p.anchor, capturedSurface)",
+            self.source,
+        )
 
     def test_review_navigation_recovers_sticky_points_that_left_the_viewport(self):
         self.run_node(
@@ -301,6 +677,10 @@ assert.strictEqual(
 assert.strictEqual(
   H.reviewScrollTarget({ x: 0, y: -30, w: 100, h: 40 }, true, 'fixed', 5000, 900),
   null
+);
+assert.strictEqual(
+  H.reviewScrollTarget({ x: 400, y: 240, w: 100, h: 80 }, true, 'sticky', 7200, 900, 5107),
+  5107
 );
 """
         )
@@ -404,15 +784,19 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         done_end = self.source.index("    // The header doubles", done_start)
         self.assertNotIn("finishAndWait", self.source[done_start:done_end])
 
-    def test_space_dictation_only_claims_a_pristine_webkit_textarea(self):
+    def test_space_dictation_claims_any_empty_webkit_textarea(self):
         self.assertIn("const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'Space'", self.source)
         self.assertGreaterEqual(self.source.count("dictationHotkeyReady()"), 2)
-        self.assertIn("draft.textTouched = true", self.source)
+        self.assertEqual(
+            self.source.count("dictationHotkeyReady() { return ta.value === ''; }"),
+            2,
+        )
+        self.assertNotIn("textTouched", self.source)
         keyboard_start = self.source.index("  // ===== keyboard")
         keyboard_source = self.source[keyboard_start:]
         for fragment in (
             "if (!holder.dictationHotkeyReady || !holder.dictationHotkeyReady()) return",
-            "if (editable && t !== holder.ta) return",
+            "if (!dictationTargetAllowsActivation(t, holder.ta, editable)) return",
             "holder.micBtn.click()",
         ):
             with self.subTest(fragment=fragment):
@@ -421,6 +805,75 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
             keyboard_source.index("if (!holder.dictationHotkeyReady"),
             keyboard_source.index("e.preventDefault()", keyboard_source.index("if (!holder.dictationHotkeyReady")),
         )
+
+    def test_dictation_space_preserves_controls_and_owns_its_key_repeat(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+function element(tagName, attrs = {}, parentElement = null) {
+  return {
+    nodeType: 1,
+    tagName,
+    parentElement,
+    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(attrs, name); },
+    getAttribute(name) { return this.hasAttribute(name) ? attrs[name] : null; },
+  };
+}
+const textarea = element('TEXTAREA');
+const button = element('BUTTON');
+const buttonIcon = element('SPAN', {}, button);
+const link = element('A', { href: '/next' });
+const customButton = element('DIV', { role: 'button' });
+const focusableScene = element('CANVAS', { tabindex: '0' });
+const plainPage = element('DIV');
+const otherInput = element('INPUT');
+
+for (const target of [button, buttonIcon, link, customButton, focusableScene]) {
+  assert.strictEqual(H.keyboardActivationTarget(target), true, target.tagName);
+  assert.strictEqual(H.dictationTargetAllowsActivation(target, textarea, false), false);
+}
+assert.strictEqual(H.keyboardActivationTarget(plainPage), false);
+assert.strictEqual(H.dictationTargetAllowsActivation(plainPage, textarea, false), true);
+assert.strictEqual(H.dictationTargetAllowsActivation(otherInput, textarea, true), false);
+assert.strictEqual(H.dictationTargetAllowsActivation(textarea, textarea, true), true);
+
+for (const holderKind of ['feedback', 'redo']) {
+  const hold = { code: '' };
+  const keydown = { type: 'keydown', code: 'Space', repeat: false };
+  const repeat = { type: 'keydown', code: 'Space', repeat: true };
+  const keyup = { type: 'keyup', code: 'Space', repeat: false };
+
+  let value = 'typed text';
+  assert.strictEqual(
+    H.dictationKeyAction(keydown, 'Space', hold, value === ''),
+    'pass', holderKind + ': nonempty Space must type normally'
+  );
+  assert.strictEqual(hold.code, '');
+
+  value = '';
+  assert.strictEqual(
+    H.dictationKeyAction(keydown, 'Space', hold, value === ''),
+    'activate', holderKind + ': deletion must restore dictation activation'
+  );
+  value = 'speech arrived';
+  assert.strictEqual(
+    H.dictationKeyAction(repeat, 'Space', hold, value === ''),
+    'suppress', holderKind + ': activation repeat must stay consumed'
+  );
+  assert.strictEqual(H.dictationKeyAction(keyup, 'Space', hold, false), 'suppress');
+  assert.strictEqual(hold.code, '');
+  assert.strictEqual(H.dictationKeyAction(repeat, 'Space', hold, false), 'pass');
+}
+"""
+        )
+        keyboard_start = self.source.index("  // ===== keyboard")
+        keyboard_source = self.source[keyboard_start:]
+        self.assertLess(
+            keyboard_source.index("const heldDictationAction = dictationKeyAction("),
+            keyboard_source.index("if (e.repeat) return"),
+        )
+        self.assertIn("window.addEventListener('keyup'", keyboard_source)
+        self.assertIn("window.addEventListener('blur'", keyboard_source)
 
     def test_ready_review_opens_without_a_confirmation_toast(self):
         self.assertIn("function maybeAutoEnterReview()", self.source)
@@ -444,6 +897,8 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertIn("this.onresult?.({ resultIndex: 0, results: [result] })", self.qa_fixture)
         self.assertIn("#sticky-target { position: sticky", self.qa_fixture)
         self.assertIn("<canvas id=\"runtime-canvas\"", self.qa_fixture)
+        self.assertIn('id="sticky-target" data-state="one"', self.qa_fixture)
+        self.assertIn("stickyTarget.dataset.state = progress > 420 ? 'two' : 'one'", self.qa_fixture)
 
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):
         self.run_node(

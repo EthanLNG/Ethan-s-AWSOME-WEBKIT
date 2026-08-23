@@ -441,9 +441,17 @@
     };
   }
 
-  function reviewScrollTarget(box, viewportCoordinates, anchorMode, currentScrollY, viewportHeight) {
+  function reviewScrollTarget(
+    box, viewportCoordinates, anchorMode, currentScrollY, viewportHeight, capturedStickyScrollY
+  ) {
     if (!box || ![box.x, box.y, box.w, box.h, currentScrollY, viewportHeight].every(Number.isFinite) ||
       box.w <= 0 || box.h <= 0 || viewportHeight <= 0) return null;
+    // A sticky scene can keep the exact same viewport box while replacing its
+    // contents as scroll progress advances. Selecting the point must restore
+    // the capture moment even when the stale box is technically still visible.
+    if (viewportCoordinates && anchorMode === 'sticky' && Number.isFinite(capturedStickyScrollY)) {
+      return Math.max(0, capturedStickyScrollY);
+    }
     if (!viewportCoordinates) {
       return Math.max(0, box.y + box.h / 2 - viewportHeight / 2);
     }
@@ -454,6 +462,116 @@
     // so translate their current viewport position back into a document target.
     if (anchorMode === 'fixed') return null;
     return Math.max(0, currentScrollY + box.y + box.h / 2 - viewportHeight / 2);
+  }
+
+  function viewportStateAttributeName(name) {
+    if (typeof name !== 'string') return false;
+    const lower = name.toLowerCase();
+    if (/^aria-(?:current|selected|expanded|pressed|hidden)$/.test(lower)) return true;
+    if (!lower.startsWith('data-')) return false;
+    const stateWords = new Set([
+      'state', 'status', 'step', 'stage', 'slide', 'index', 'current',
+      'active', 'view', 'screen', 'mode',
+    ]);
+    return lower.slice(5).split('-').some((part) => stateWords.has(part));
+  }
+
+  function surfaceStateValuesMatch(signal, readAttribute, hasClass) {
+    if (!signal || typeof readAttribute !== 'function' || typeof hasClass !== 'function') return false;
+    try {
+      for (const [name, value] of Object.entries(signal.attrs || {})) {
+        if (readAttribute(name) !== value) return false;
+      }
+      return (signal.classes || []).every((token) =>
+        typeof token === 'string' && token.length > 0 && !/[\t\n\f\r ]/.test(token) && hasClass(token)
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function effectiveStyleChainVisible(styles) {
+    let cumulativeOpacity = 1;
+    for (const style of styles || []) {
+      if (!style || style.display === 'none' || style.visibility === 'hidden' ||
+        style.visibility === 'collapse' || style.contentVisibility === 'hidden') return false;
+      const opacity = Number.parseFloat(style.opacity);
+      if (Number.isFinite(opacity)) cumulativeOpacity *= opacity;
+      if (cumulativeOpacity <= 0.02) return false;
+    }
+    return true;
+  }
+
+  function sameRectGeometry(left, right) {
+    return !!left && !!right && ['x', 'y', 'w', 'h'].every((key) =>
+      Number.isFinite(left[key]) && Number.isFinite(right[key]) &&
+      Math.abs(left[key] - right[key]) < 0.01
+    );
+  }
+
+  function surfaceMutationRelevant(attributeName, tracked) {
+    if (!tracked || typeof attributeName !== 'string') return false;
+    return ['class', 'style', 'hidden', 'open'].includes(attributeName) ||
+      viewportStateAttributeName(attributeName);
+  }
+
+  function surfaceChildListRelevant(target, removedNodes, trackedNodes, remountParents) {
+    if ((!trackedNodes || !trackedNodes.size) && (!remountParents || !remountParents.size)) {
+      return false;
+    }
+    if (trackedNodes?.has(target) || remountParents?.has(target)) return true;
+    for (const removed of (removedNodes || [])) {
+      if (trackedNodes?.has(removed)) return true;
+    }
+    return false;
+  }
+
+  function preferredSurfaceCandidate(candidates) {
+    const list = Array.isArray(candidates) ? candidates : [];
+    const anchored = list.find((candidate) =>
+      ['fixed', 'sticky'].includes(candidate?.anchor?.mode)
+    );
+    const stateful = list.find((candidate) =>
+      Array.isArray(candidate?.stateChain) && candidate.stateChain.length > 0
+    );
+    return anchored || stateful || list[0] || null;
+  }
+
+  function pointAnchorMode(liveModes, capturedModes, legacyViewportAnchor) {
+    const modes = [...(liveModes || []), ...(capturedModes || [])];
+    if (modes.includes('fixed')) return 'fixed';
+    if (modes.includes('sticky')) return 'sticky';
+    return legacyViewportAnchor ? 'unknown' : 'doc';
+  }
+
+  function rectUsesLegacyViewportAnchor(pointAnchor, surface) {
+    return pointAnchor === 'viewport' && !surface;
+  }
+
+  function persistedRectForDraft(displayRect, metadataRect, persistedRect) {
+    return persistedRect && sameRectGeometry(displayRect, metadataRect)
+      ? persistedRect
+      : displayRect;
+  }
+
+  function primaryRectIndex(rects, primaryRect) {
+    const list = rects || [];
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      if (sameRectGeometry(list[index], primaryRect)) return index;
+    }
+    return Math.max(0, list.length - 1);
+  }
+
+  function visualSurfaceActive(
+    visible, hasStateSignals, stateMatches, anchorMode, reviewing,
+    currentScrollY, capturedScrollY, viewportHeight
+  ) {
+    if (!visible) return false;
+    const nearCapture = [currentScrollY, capturedScrollY, viewportHeight].every(Number.isFinite) &&
+      Math.abs(currentScrollY - capturedScrollY) <= Math.max(24, viewportHeight * 0.05);
+    if (hasStateSignals) return stateMatches || (!!reviewing && nearCapture);
+    if (anchorMode === 'sticky') return nearCapture;
+    return true;
   }
 
   function tabActivityMode(phase) {
@@ -467,6 +585,48 @@
     if (hidden && activity !== 'working') return 0;
     if (hidden) return 5000;
     return overlayMode === 'feedback' ? 2000 : 15000;
+  }
+
+  const KEYBOARD_ACTIVATION_ROLES = new Set([
+    'button', 'link', 'checkbox', 'radio', 'switch', 'menuitem',
+    'menuitemcheckbox', 'menuitemradio', 'option', 'tab', 'treeitem',
+    'slider', 'spinbutton', 'combobox', 'textbox',
+  ]);
+  function keyboardActivationTarget(node) {
+    for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+      const tag = String(current.tagName || '').toUpperCase();
+      const hasAttribute = typeof current.hasAttribute === 'function'
+        ? (name) => current.hasAttribute(name)
+        : () => false;
+      if (tag === 'BUTTON' || tag === 'SUMMARY' ||
+        ((tag === 'A' || tag === 'AREA') && hasAttribute('href')) ||
+        ((tag === 'AUDIO' || tag === 'VIDEO') && hasAttribute('controls')) ||
+        hasAttribute('tabindex')) return true;
+      const role = typeof current.getAttribute === 'function'
+        ? String(current.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0]
+        : '';
+      if (KEYBOARD_ACTIVATION_ROLES.has(role)) return true;
+    }
+    return false;
+  }
+
+  function dictationTargetAllowsActivation(target, holderTextarea, editable) {
+    if (target === holderTextarea) return true;
+    return !editable && !keyboardActivationTarget(target);
+  }
+
+  function dictationKeyAction(event, hotkeyCode, hold, canActivate) {
+    if (!event || event.code !== hotkeyCode || !hold) return 'pass';
+    if (event.type === 'keyup') {
+      if (hold.code !== event.code) return 'pass';
+      hold.code = '';
+      return 'suppress';
+    }
+    if (event.type !== 'keydown') return 'pass';
+    if (event.repeat) return hold.code === event.code ? 'suppress' : 'pass';
+    if (!canActivate) return 'pass';
+    hold.code = event.code;
+    return 'activate';
   }
   // ===== end pure protocol helpers ==========================================
 
@@ -545,8 +705,8 @@
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
   const MIC_TITLE = USES_VOICE_NOTES
-    ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' in a fresh empty note'
-    : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' in a fresh empty note';
+    ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' in an empty note'
+    : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' in an empty note';
   const MIC_ARIA_LABEL = USES_VOICE_NOTES
     ? 'Start or stop recording a voice note'
     : 'Start or stop speech dictation';
@@ -952,6 +1112,11 @@
       (record.attributeName === 'hidden' || record.attributeName === 'open'))) {
       requestAnimationFrame(() => { if (!S.card) renderPins(); });
     }
+    const surfaceChildListRecords = records.filter(childListAffectsTrackedSurface);
+    if (surfaceChildListRecords.length) {
+      for (const record of surfaceChildListRecords) rememberSurfaceRemountParent(record.target);
+      queueSurfaceRebind();
+    }
   }).observe(document.documentElement, {
     childList: true,
     subtree: true,
@@ -1008,7 +1173,7 @@
     ? 'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'
     : 'drag to mark a spot · hold ' + MODIFIER_LABEL + ' to use the page';
   const hintChip = el('div', 'wk-hint', interactionHint + ' · ' + TOGGLE_LABEL +
-    ' to hide · ' + DICTATE_LABEL + ' to dictate in a fresh empty note');
+    ' to hide · ' + DICTATE_LABEL + ' to dictate in an empty note');
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
   sendBtn.hidden = true;
@@ -1165,7 +1330,8 @@
         geometryCache.set(marker.point, geometry);
       }
       const source = geometry.boxes[marker.rectIndex];
-      if (!source || ![source.x, source.y, source.w, source.h].every(Number.isFinite) ||
+      if (geometry.active[marker.rectIndex] === false || !source ||
+        ![source.x, source.y, source.w, source.h].every(Number.isFinite) ||
         source.w <= 0 || source.h <= 0) {
         marker.node.style.visibility = 'hidden';
         continue;
@@ -1177,7 +1343,7 @@
         marker.node.style.width = box.w + 'px';
         marker.node.style.height = box.h + 'px';
       }
-      const placed = place(marker.node, box, geometry.fixed);
+      const placed = place(marker.node, box, geometry.fixedByRect[marker.rectIndex]);
       marker.node.style.visibility = '';
       signature.push(
         Math.round(placed.x * 10) + ':' + Math.round(placed.y * 10) + ':' +
@@ -1233,6 +1399,124 @@
       settlePinMotion(generation);
     }, 80);
   }
+
+  let surfaceObserver = null;
+  let surfaceRebindRaf = 0;
+  const trackedSurfaceNodes = new Set();
+  const surfaceRemountParents = new Set();
+  function rememberSurfaceRemountParent(node) {
+    if (!node || !node.isConnected || isOverlayNode(node) ||
+      (surfaceRemountParents.size >= 64 && !surfaceRemountParents.has(node))) return;
+    surfaceRemountParents.add(node);
+  }
+  function queueSurfaceRebind() {
+    if (surfaceRebindRaf) return;
+    surfaceRebindRaf = requestAnimationFrame(() => {
+      surfaceRebindRaf = 0;
+      refreshSurfaceObservation();
+      notePinMotion();
+    });
+  }
+  function nodeAffectsTrackedSurface(changedNode) {
+    for (let current = changedNode; current && current !== document; current = current.parentElement) {
+      if (trackedSurfaceNodes.has(current)) return true;
+    }
+    return false;
+  }
+  function childListAffectsTrackedSurface(record) {
+    return !!record && record.type === 'childList' && surfaceChildListRelevant(
+      record.target, record.removedNodes, trackedSurfaceNodes, surfaceRemountParents
+    );
+  }
+  function refreshSurfaceObservation() {
+    if (surfaceRebindRaf) {
+      cancelAnimationFrame(surfaceRebindRaf);
+      surfaceRebindRaf = 0;
+    }
+    const connectedTrackedNodes = [...trackedSurfaceNodes].filter((node) =>
+      node.isConnected && !isOverlayNode(node)
+    );
+    trackedSurfaceNodes.clear();
+    if (surfaceObserver) surfaceObserver.disconnect();
+    if (!S.pinEls.length) {
+      surfaceRemountParents.clear();
+      return;
+    }
+    let unresolvedSurface = false;
+
+    const addTrackedNode = (node) => {
+      if (!node || node === document.body || node === document.documentElement ||
+        isOverlayNode(node)) return false;
+      trackedSurfaceNodes.add(node);
+      return true;
+    };
+    const addTargetChain = (target) => {
+      let depth = 0;
+      for (let current = target; current && depth < 48; current = current.parentElement) {
+        if (!addTrackedNode(current)) break;
+        depth += 1;
+      }
+    };
+
+    for (const marker of S.pinEls) {
+      const point = marker.point;
+      const surface = Array.isArray(point.rectSurfaces)
+        ? point.rectSurfaces[marker.rectIndex]
+        : null;
+      if (surface) {
+        const target = uniqueElement(surface.targetSelector);
+        if (target) {
+          addTargetChain(target);
+        } else {
+          unresolvedSurface = true;
+          const fallbackContexts = Array.isArray(point.rectContexts) &&
+            Array.isArray(point.rectContexts[marker.rectIndex])
+            ? point.rectContexts[marker.rectIndex]
+            : (point.context || []);
+          for (const context of fallbackContexts) {
+            const fallbackTarget = uniqueElement(context?.selector);
+            if (!fallbackTarget) continue;
+            addTargetChain(fallbackTarget);
+            break;
+          }
+        }
+        for (const signal of (surface.stateChain || [])) {
+          addTrackedNode(uniqueElement(signal.selector));
+        }
+      } else {
+        const contexts = Array.isArray(point.rectContexts) &&
+          Array.isArray(point.rectContexts[marker.rectIndex])
+          ? point.rectContexts[marker.rectIndex]
+          : (point.context || []);
+        let target = null;
+        for (const context of contexts) {
+          if (!context?.selector) continue;
+          const contextTarget = uniqueElement(context.selector);
+          if (!contextTarget) {
+            unresolvedSurface = true;
+            continue;
+          }
+          target = contextTarget;
+          break;
+        }
+        if (target) addTargetChain(target);
+      }
+    }
+
+    if (unresolvedSurface) {
+      for (const node of connectedTrackedNodes) addTrackedNode(node);
+      for (const node of [...surfaceRemountParents]) {
+        if (!node.isConnected) surfaceRemountParents.delete(node);
+      }
+    } else {
+      surfaceRemountParents.clear();
+    }
+
+    if (!surfaceObserver) return;
+    for (const node of trackedSurfaceNodes) {
+      surfaceObserver.observe(node, { attributes: true });
+    }
+  }
   document.addEventListener('wheel', notePinMotion, { capture: true, passive: true });
   document.addEventListener('touchmove', notePinMotion, { capture: true, passive: true });
   document.addEventListener('scroll', notePinMotion, { capture: true, passive: true });
@@ -1241,6 +1525,16 @@
   if (window.visualViewport) {
     window.visualViewport.addEventListener('scroll', notePinMotion, { passive: true });
     window.visualViewport.addEventListener('resize', notePinMotion, { passive: true });
+  }
+  document.addEventListener('transitionend', (event) => {
+    if (nodeAffectsTrackedSurface(event.target)) notePinMotion();
+  }, true);
+  if (typeof MutationObserver === 'function') {
+    surfaceObserver = new MutationObserver((records) => {
+      if (records.some((record) => surfaceMutationRelevant(
+        record.attributeName || '', trackedSurfaceNodes.has(record.target)
+      ))) notePinMotion();
+    });
   }
 
   // ===== selector builder + context capture ==================================
@@ -1262,6 +1556,7 @@
     } catch (e) { return null; }
   }
   const STATE_CLASS = /^(?:active|inactive|open(?:ed)?|closed|hover|focus(?:ed)?|visible|hidden|show(?:n|ing)?|hide|selected|current|expanded|collapsed|animat|enter|leav|loading|loaded|in-view|is-|has-|js-)/;
+  const SURFACE_STATE_CLASS = /^(?:active|inactive|current|selected|open(?:ed)?|closed|visible|hidden|shown|expanded|collapsed|in-view|is-(?:active|inactive|current|selected|open|closed|visible|hidden|shown|off|on)|has-(?:active|current|selection|open))$/i;
   function stableClasses(elm) {
     const out = [];
     for (const c of elm.classList) {
@@ -1342,6 +1637,149 @@
       if (value) host.style.setProperty('visibility', value, priority);
       else host.style.removeProperty('visibility');
     }
+  }
+
+  function uniqueElement(selector) {
+    if (!selector) return null;
+    try {
+      const matches = document.querySelectorAll(selector);
+      return matches.length === 1 ? matches[0] : null;
+    } catch (e) { return null; }
+  }
+
+  function surfaceStateSignal(node) {
+    if (!node || !node.attributes) return null;
+    const attrs = {};
+    for (const attr of node.attributes) {
+      if (!viewportStateAttributeName(attr.name)) continue;
+      attrs[attr.name] = String(attr.value).slice(0, 256);
+      if (Object.keys(attrs).length >= 8) break;
+    }
+    const classes = node.classList
+      ? [...node.classList].filter((token) =>
+        token.length <= 128 && SURFACE_STATE_CLASS.test(token)
+      ).sort().slice(0, 8)
+      : [];
+    if (!Object.keys(attrs).length && !classes.length) return null;
+    const selector = buildSelector(node);
+    return selector ? { selector, attrs, classes } : null;
+  }
+
+  function captureRectSurface(contexts) {
+    const candidates = [];
+    const seenTargets = new Set();
+    for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12)) {
+      const target = uniqueElement(context?.selector);
+      if (!target || seenTargets.has(target)) continue;
+      seenTargets.add(target);
+      const targetSelector = buildSelector(target);
+      if (!targetSelector) continue;
+      const anchor = elementViewportAnchorInfo(target);
+      const stateChain = [];
+      for (let current = target; current; current = current.parentElement) {
+        const signal = surfaceStateSignal(current);
+        if (signal) stateChain.push(signal);
+        if (!anchor || current === anchor.node || stateChain.length >= 8) break;
+      }
+      const anchorSelector = anchor ? buildSelector(anchor.node) : null;
+      candidates.push({
+        targetSelector,
+        anchor: anchor && anchorSelector ? { selector: anchorSelector, mode: anchor.mode } : null,
+        stateChain,
+      });
+    }
+    const selected = preferredSurfaceCandidate(candidates);
+    if (!selected) return null;
+    return {
+      targetSelector: selected.targetSelector,
+      anchor: selected.anchor,
+      stateChain: selected.stateChain,
+      scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
+    };
+  }
+
+  function captureDraftRectMetadata(draft, rectIndex, rect) {
+    const contexts = captureContext(rect);
+    draft.rectContexts = Array.isArray(draft.rectContexts) ? draft.rectContexts : [];
+    draft.rectSurfaces = Array.isArray(draft.rectSurfaces) ? draft.rectSurfaces : [];
+    draft.rectMetadataRects = Array.isArray(draft.rectMetadataRects)
+      ? draft.rectMetadataRects
+      : [];
+    draft.rectContexts[rectIndex] = contexts;
+    draft.rectSurfaces[rectIndex] = captureRectSurface(contexts);
+    draft.rectMetadataRects[rectIndex] = { ...rect };
+    if (Array.isArray(draft.rectPersistedRects)) draft.rectPersistedRects[rectIndex] = null;
+  }
+
+  function surfaceSignalMatches(signal) {
+    const node = signal && uniqueElement(signal.selector);
+    if (!node) return false;
+    return surfaceStateValuesMatch(
+      signal,
+      (name) => node.getAttribute(name),
+      (token) => node.classList.contains(token)
+    );
+  }
+
+  function effectivelyVisible(node) {
+    if (!node || !node.isConnected || node.getClientRects().length === 0) return false;
+    const styles = [];
+    try {
+      for (let current = node; current && current !== document; current = current.parentElement) {
+        styles.push(getComputedStyle(current));
+      }
+    } catch (e) { return false; }
+    return effectiveStyleChainVisible(styles);
+  }
+
+  function unresolvedSurfaceActive(point, surface) {
+    const capturedScrollY = Number(surface?.scroll?.y ?? point.scroll?.y);
+    const persistedMode = surface?.anchor?.mode || point.anchor || 'doc';
+    const fallbackMode = ['fixed', 'sticky', 'viewport'].includes(persistedMode)
+      ? 'sticky'
+      : 'doc';
+    return visualSurfaceActive(
+      true, false, false, fallbackMode, S.reviewing,
+      scrollY, capturedScrollY, innerHeight
+    );
+  }
+
+  function rectSurfaceActive(point, rectIndex) {
+    const surface = Array.isArray(point.rectSurfaces) ? point.rectSurfaces[rectIndex] : null;
+    if (surface) {
+      const target = uniqueElement(surface.targetSelector);
+      if (!target) return unresolvedSurfaceActive(point, surface);
+      const visible = effectivelyVisible(target);
+      const stateChain = Array.isArray(surface.stateChain) ? surface.stateChain : [];
+      const hasStateSignals = stateChain.length > 0;
+      const stateMatches = hasStateSignals && stateChain.every(surfaceSignalMatches);
+      const anchorMode = surface.anchor?.mode || elementViewportAnchorMode(target) || 'doc';
+      const capturedScrollY = Number(surface.scroll?.y ?? point.scroll?.y);
+      // The agent may intentionally rename a state while implementing the
+      // point. At the exact captured scroll moment, review trusts the live
+      // AFTER/BEFORE surface instead of hiding a correct changed result.
+      return visualSurfaceActive(
+        visible, hasStateSignals, stateMatches, anchorMode, S.reviewing,
+        scrollY, capturedScrollY, innerHeight
+      );
+    }
+
+    // Backward compatibility for points created before rectSurfaces: the
+    // primary captured node is enough to catch the common case where a sticky
+    // screen remains laid out but an ancestor has faded its branch to zero.
+    const contexts = Array.isArray(point.rectContexts) && Array.isArray(point.rectContexts[rectIndex])
+      ? point.rectContexts[rectIndex]
+      : (point.context || []);
+    const selector = contexts[0]?.selector;
+    if (!selector) return unresolvedSurfaceActive(point, null);
+    const target = uniqueElement(selector);
+    if (!target) return unresolvedSurfaceActive(point, null);
+    const anchorMode = elementViewportAnchorMode(target) ||
+      (point.anchor === 'viewport' ? 'fixed' : 'doc');
+    return visualSurfaceActive(
+      effectivelyVisible(target), false, false, anchorMode, S.reviewing,
+      scrollY, Number(point.scroll?.y), innerHeight
+    );
   }
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'HTML', 'BODY']);
 
@@ -1460,19 +1898,22 @@
     return n + 1;
   }
 
-  function elementViewportAnchorMode(node) {
-    let sticky = false;
+  function elementViewportAnchorInfo(node) {
+    let sticky = null;
     try {
       for (let current = node;
         current && current !== document.body && current !== document.documentElement;
         current = current.parentElement) {
         if (isOverlayNode(current)) continue;
         const position = getComputedStyle(current).position;
-        if (position === 'fixed') return 'fixed';
-        if (position === 'sticky') sticky = true;
+        if (position === 'fixed') return { mode: 'fixed', node: current };
+        if (position === 'sticky' && !sticky) sticky = current;
       }
     } catch (e) { /* detached or cross-realm node */ }
-    return sticky ? 'sticky' : null;
+    return sticky ? { mode: 'sticky', node: sticky } : null;
+  }
+  function elementViewportAnchorMode(node) {
+    return elementViewportAnchorInfo(node)?.mode || null;
   }
   function elementViewportAnchored(node) {
     return elementViewportAnchorMode(node) !== null;
@@ -1486,18 +1927,6 @@
       if (!isOverlayNode(node) && elementViewportAnchored(node)) return 'viewport';
     }
     return 'doc';
-  }
-  function pointSurfaceVisible(p) {
-    const sel = p.context && p.context[0] && p.context[0].selector;
-    if (!sel) return true;
-    try {
-      const matches = document.querySelectorAll(sel);
-      if (matches.length !== 1) return true;
-      const node = matches[0];
-      const style = getComputedStyle(node);
-      return node.isConnected && style.display !== 'none' && style.visibility !== 'hidden' &&
-        node.getClientRects().length > 0;
-    } catch (e) { return true; }
   }
   const MIN_ANCHOR_FIT = 0.08;
 
@@ -1530,33 +1959,42 @@
     // Older points could be saved as document anchored because the overlay
     // masked a sticky target during capture. Recover them from their trusted,
     // unique live context instead of preserving the bad classification.
-    const fixed = p.anchor === 'viewport' || resolvedContexts.some((contexts) =>
-      contexts.some((entry) => entry.viewportAnchorMode)
-    );
-    const anchorModes = resolvedContexts.flatMap((contexts) =>
-      contexts.map((entry) => entry.viewportAnchorMode).filter(Boolean)
-    );
-    const anchorMode = anchorModes.includes('fixed')
-      ? 'fixed'
-      : anchorModes.includes('sticky') ? 'sticky' : (fixed ? 'unknown' : 'doc');
+    const anchorModes = rects.map((_rect, rectIndex) => {
+      const liveModes = resolvedContexts[rectIndex]
+        .map((entry) => entry.viewportAnchorMode)
+        .filter(Boolean);
+      const capturedSurface = Array.isArray(p.rectSurfaces) ? p.rectSurfaces[rectIndex] : null;
+      const capturedMode = capturedSurface?.anchor?.mode || null;
+      return pointAnchorMode(
+        liveModes,
+        capturedMode ? [capturedMode] : [],
+        rectUsesLegacyViewportAnchor(p.anchor, capturedSurface)
+      );
+    });
+    const fixedByRect = anchorModes.map((mode) => mode !== 'doc');
     return {
-      fixed,
-      anchorMode,
+      fixedByRect,
+      anchorModes,
+      active: rects.map((_rect, rectIndex) => rectSurfaceActive(p, rectIndex)),
       boxes: rects.map((rect, rectIndex) => {
+        const surface = Array.isArray(p.rectSurfaces) ? p.rectSurfaces[rectIndex] : null;
+        const rectCapturedScroll = surface?.scroll || capturedScroll;
+        const fixed = fixedByRect[rectIndex];
+        const anchorMode = anchorModes[rectIndex];
         for (const entry of resolvedContexts[rectIndex]) {
           const context = entry.context;
           try {
-            if (fixed && p.anchor !== 'viewport' && !entry.viewportAnchorMode) continue;
+            if (fixed && anchorMode !== 'unknown' && !entry.viewportAnchorMode) continue;
             const live = entry.node.getBoundingClientRect();
             const capturedBox = fixed ? {
-              x: context.box.x - capturedScroll.x,
-              y: context.box.y - capturedScroll.y,
+              x: context.box.x - rectCapturedScroll.x,
+              y: context.box.y - rectCapturedScroll.y,
               w: context.box.w,
               h: context.box.h,
             } : context.box;
             const sourceRect = fixed ? {
-              x: rect.x - capturedScroll.x,
-              y: rect.y - capturedScroll.y,
+              x: rect.x - rectCapturedScroll.x,
+              y: rect.y - rectCapturedScroll.y,
               w: rect.w,
               h: rect.h,
             } : rect;
@@ -1570,8 +2008,8 @@
           } catch (e) { /* try the next resolved context */ }
         }
         return fixed ? {
-          x: rect.x - capturedScroll.x,
-          y: rect.y - capturedScroll.y,
+          x: rect.x - rectCapturedScroll.x,
+          y: rect.y - rectCapturedScroll.y,
           w: rect.w,
           h: rect.h,
         } : { ...rect };
@@ -1582,33 +2020,70 @@
   // → {box, fixed:true} in viewport coords for viewport-anchored points, else null
   function pinBox(p) {
     const geometry = correctedPointRects(p);
-    if (!geometry.fixed) return null;
-    return { box: geometry.boxes[0], fixed: true, anchorMode: geometry.anchorMode };
+    if (!geometry.fixedByRect[0]) return null;
+    return {
+      box: geometry.boxes[0], fixed: true, anchorMode: geometry.anchorModes[0],
+      active: geometry.active[0] !== false,
+    };
   }
   function pointFromDraft(draft) {
     const existing = draft.editPoint ||
       (draft.editId ? S.points.find((p) => p.id === draft.editId) : null);
     const rects = draft.rects || [draft.rect];
+    const storedRects = [];
+    const rectContexts = [];
+    const rectSurfaces = [];
+    rects.forEach((rect, rectIndex) => {
+      const canReuse = sameRectGeometry(rect, draft.rectMetadataRects?.[rectIndex]) &&
+        Array.isArray(draft.rectContexts?.[rectIndex]) &&
+        Array.isArray(draft.rectSurfaces) && rectIndex < draft.rectSurfaces.length;
+      storedRects.push(canReuse
+        ? persistedRectForDraft(
+          rect, draft.rectMetadataRects[rectIndex], draft.rectPersistedRects?.[rectIndex]
+        )
+        : rect
+      );
+      if (canReuse) {
+        rectContexts.push(draft.rectContexts[rectIndex]);
+        rectSurfaces.push(draft.rectSurfaces[rectIndex] ?? null);
+        return;
+      }
+      const contexts = captureContext(rect);
+      rectContexts.push(contexts);
+      rectSurfaces.push(captureRectSurface(contexts));
+    });
+    const activeRectIndex = primaryRectIndex(rects, draft.rect);
+    const viewport = draft.viewport || existing?.viewport ||
+      { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 };
+    const capturedScroll = draft.scroll || existing?.scroll ||
+      { x: Math.round(scrollX), y: Math.round(scrollY) };
     return {
       id: existing ? existing.id : newPointId(),
       number: existing ? existing.number : nextNumber(),
       page: logicalPath(),
       createdAt: existing ? existing.createdAt : nowISO(),
       rect: {
-        x: Math.round(draft.rect.x), y: Math.round(draft.rect.y),
-        w: Math.round(draft.rect.w), h: Math.round(draft.rect.h),
+        x: Math.round(storedRects[activeRectIndex].x),
+        y: Math.round(storedRects[activeRectIndex].y),
+        w: Math.round(storedRects[activeRectIndex].w),
+        h: Math.round(storedRects[activeRectIndex].h),
       },
-      rects: rects.map((rect) => ({
+      rects: storedRects.map((rect) => ({
         x: Math.round(rect.x), y: Math.round(rect.y),
         w: Math.round(rect.w), h: Math.round(rect.h),
       })),
-      rectContexts: rects.map((rect) => captureContext(rect)),
-      viewport: { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 },
-      scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
+      rectContexts,
+      rectSurfaces,
+      viewport: { ...viewport },
+      scroll: { ...capturedScroll },
       anchor: existing ? (existing.anchor || 'doc') : (draft.anchor || 'doc'),
-      context: captureContext(draft.rect),
-      uiState: captureUiState(),
-      abcState: snapshotAbc(),
+      context: rectContexts[activeRectIndex] || captureContext(draft.rect),
+      uiState: draft.uiState !== undefined
+        ? draft.uiState
+        : (existing?.uiState !== undefined ? existing.uiState : captureUiState()),
+      abcState: draft.abcState !== undefined
+        ? draft.abcState
+        : (existing?.abcState !== undefined ? existing.abcState : snapshotAbc()),
       text: draft.text.trim(),
       voiceNote: draft.voiceNote || null,
       abcRequest: abcRequestFromDraft(draft),
@@ -1654,7 +2129,6 @@
     if (S.reviewing) {
       S.reviewList.forEach((p, i) => {
         if (p.page !== page) return;
-        if (!pointSurfaceVisible(p)) return;
         const v = S.verdicts[p.id];
         (p.rects || [p.rect]).forEach((_box, rectIndex) => {
           const els = addPin(p, rectIndex,
@@ -1672,7 +2146,7 @@
       : [];
     const submittedIds = new Set(submitted.map((point) => point.id));
     for (const p of submitted) {
-      if (p.page !== page || !pointSurfaceVisible(p)) continue;
+      if (p.page !== page) continue;
       (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'submitted', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ pendingPoint: p });
@@ -1680,12 +2154,12 @@
     }
     for (const p of S.points) {
       if (submittedIds.has(p.id) || p.page !== page) continue;
-      if (!pointSurfaceVisible(p)) continue;
       (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
       }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit'));
     }
+    refreshSurfaceObservation();
     repositionAll();
     updateHint();
   }
@@ -1743,14 +2217,52 @@
       if (!(d.w >= 8 && d.h >= 8)) return;   // a click is not a rect
       const anchor = detectAnchor(d.x + d.w / 2, d.y + d.h / 2);   // viewport center
       const rect = { x: d.x + scrollX, y: d.y + scrollY, w: d.w, h: d.h };
+      const rectContext = captureContext(rect);
+      const rectSurface = captureRectSurface(rectContext);
       if (S.addRectDraft) {
         const draft = S.addRectDraft;
         S.addRectDraft = null;
-        draft.rects = (draft.rects || [draft.rect]).concat([rect]);
+        const previousRects = draft.rects || [draft.rect];
+        const source = draft.editPoint ||
+          (draft.editId ? S.points.find((point) => point.id === draft.editId) : null);
+        if (!Array.isArray(draft.rectContexts)) {
+          draft.rectContexts = previousRects.map((_box, index) =>
+            source?.rectContexts?.[index] || (index === 0 ? source?.context || [] : [])
+          );
+        }
+        if (!Array.isArray(draft.rectSurfaces)) {
+          draft.rectSurfaces = previousRects.map((_box, index) =>
+            source?.rectSurfaces?.[index] ?? null
+          );
+        }
+        if (!Array.isArray(draft.rectMetadataRects)) {
+          draft.rectMetadataRects = previousRects.map((box) => ({ ...box }));
+        }
+        if (!Array.isArray(draft.rectPersistedRects)) {
+          const sourceRects = source ? (source.rects || [source.rect]) : [];
+          draft.rectPersistedRects = previousRects.map((_box, index) =>
+            sourceRects[index] ? { ...sourceRects[index] } : null
+          );
+        }
+        draft.rects = previousRects.concat([rect]);
         draft.rect = rect;
+        const rectIndex = draft.rects.length - 1;
+        draft.rectContexts[rectIndex] = rectContext;
+        draft.rectSurfaces[rectIndex] = rectSurface;
+        draft.rectMetadataRects[rectIndex] = { ...rect };
+        draft.rectPersistedRects[rectIndex] = null;
         openCard({ draft, editId: draft.editId });
       } else {
-        openCard({ rect, anchor });
+        openCard({
+          rect,
+          anchor,
+          rectContext,
+          rectSurface,
+          viewport: { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 },
+          scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
+          uiState: captureUiState(),
+          abcState: snapshotAbc(),
+        });
       }
     });
     drawLayer.addEventListener('pointercancel', () => { if (S.drag?.kind === 'rubber') S.drag.cancel(); });
@@ -1786,6 +2298,14 @@
         if (!S.card) return;
         if (S.card.draft.rects.length === 1) { S.card.cancel(); return; }
         S.card.draft.rects.splice(index, 1);
+        if (Array.isArray(S.card.draft.rectContexts)) S.card.draft.rectContexts.splice(index, 1);
+        if (Array.isArray(S.card.draft.rectSurfaces)) S.card.draft.rectSurfaces.splice(index, 1);
+        if (Array.isArray(S.card.draft.rectMetadataRects)) {
+          S.card.draft.rectMetadataRects.splice(index, 1);
+        }
+        if (Array.isArray(S.card.draft.rectPersistedRects)) {
+          S.card.draft.rectPersistedRects.splice(index, 1);
+        }
         S.card.draft.rect = S.card.draft.rects[S.card.draft.rects.length - 1];
         buildFrozen(); positionFrozen(); positionCard(); S.card.saveDraft();
       });
@@ -1825,7 +2345,14 @@
         S.card.draft.rect = S.card.draft.rects[index];
         positionFrozen(); positionCard(); S.card.saveDraft();
       });
-      frozen.addEventListener('pointerup', () => { if (S.drag?.kind === 'frozen') S.drag = null; });
+      frozen.addEventListener('pointerup', () => {
+        if (S.drag?.kind !== 'frozen' || S.drag.index !== index || !S.card) return;
+        if (!sameRectGeometry(S.card.draft.rects[index], S.drag.r0)) {
+          captureDraftRectMetadata(S.card.draft, index, S.card.draft.rects[index]);
+        }
+        S.drag = null;
+        S.card.saveDraft();
+      });
       frozen.addEventListener('pointercancel', () => { if (S.drag?.kind === 'frozen') S.drag.cancel(); });
       frozenEls.push(frozen);
       wrap.appendChild(frozen);
@@ -2053,7 +2580,7 @@
       arm() {
         if (!userOn) {
           btn.classList.add('armed');
-          btn.title = 'Click (or press ' + DICTATE_LABEL + ' in a fresh empty note) to resume dictation';
+          btn.title = 'Click (or press ' + DICTATE_LABEL + ' in an empty note) to resume dictation';
         }
       },
       get on() { return userOn; },
@@ -2426,28 +2953,55 @@
     const queuedEditing = !pendingEditing && init.editId
       ? S.points.find((p) => p.id === init.editId)
       : null;
-    const pendingGeometry = pendingEditing ? correctedPointRects(pendingEditing) : null;
-    const pendingEditingRects = pendingGeometry
-      ? pendingGeometry.boxes.map((rect) => pendingGeometry.fixed ? {
+    const editingSource = pendingEditing || queuedEditing;
+    const editingSourceRects = editingSource ? (editingSource.rects || [editingSource.rect]) : null;
+    const editingPrimaryIndex = editingSource
+      ? primaryRectIndex(editingSourceRects, editingSource.rect)
+      : 0;
+    const editingGeometry = editingSource ? correctedPointRects(editingSource) : null;
+    const editingDisplayRects = editingGeometry
+      ? editingGeometry.boxes.map((rect, rectIndex) => editingGeometry.fixedByRect[rectIndex] ? {
         x: rect.x + scrollX,
         y: rect.y + scrollY,
         w: rect.w,
         h: rect.h,
       } : { ...rect })
       : null;
-    const editing = pendingEditing ? {
-      ...pendingEditing,
-      rect: { ...pendingEditingRects[0] },
-      rects: pendingEditingRects,
-    } : queuedEditing;
+    const editing = editingSource ? {
+      ...editingSource,
+      rect: { ...editingDisplayRects[editingPrimaryIndex] },
+      rects: editingDisplayRects,
+    } : null;
     const originalVoiceNote = editing && editing.voiceNote ? editing.voiceNote : null;
+    const editingRects = editing ? (editing.rects || [editing.rect]) : null;
+    const editingRectContexts = editing && Array.isArray(editing.rectContexts) &&
+      editing.rectContexts.length === editingRects.length
+      ? editing.rectContexts
+      : (editing ? editingRects.map(() => editing.context || []) : null);
+    const editingRectSurfaces = editing && Array.isArray(editing.rectSurfaces) &&
+      editing.rectSurfaces.length === editingRects.length
+      ? editing.rectSurfaces
+      : (editing ? editingRects.map(() => null) : null);
     const draft = init.draft || {
       page: logicalPath(),
       rect: editing ? { ...editing.rect } : init.rect,
-      rects: editing ? (editing.rects || [editing.rect]).map((rect) => ({ ...rect })) : [init.rect],
+      rects: editing ? editingRects.map((rect) => ({ ...rect })) : [init.rect],
+      rectContexts: editing ? editingRectContexts.slice() : [init.rectContext || []],
+      rectSurfaces: editing ? editingRectSurfaces.slice() : [init.rectSurface || null],
+      rectMetadataRects: editing
+        ? editingRects.map((rect) => ({ ...rect }))
+        : [{ ...init.rect }],
+      rectPersistedRects: editingSource
+        ? editingSourceRects.map((rect) => ({ ...rect }))
+        : [null],
+      viewport: editing?.viewport || init.viewport ||
+        { w: innerWidth, h: innerHeight, dpr: window.devicePixelRatio || 1 },
+      scroll: editing?.scroll || init.scroll ||
+        { x: Math.round(scrollX), y: Math.round(scrollY) },
+      uiState: editing?.uiState !== undefined ? editing.uiState : init.uiState,
+      abcState: editing?.abcState !== undefined ? editing.abcState : init.abcState,
       anchor: editing ? (editing.anchor || 'doc') : (init.anchor || 'doc'),
       text: editing ? editing.text : '',
-      textTouched: !!(editing && editing.text),
       caret: { start: (editing ? editing.text.length : 0), end: (editing ? editing.text.length : 0) },
       abc: editing && editing.abcRequest
         ? {
@@ -2465,11 +3019,6 @@
       editSource: pendingEditing ? 'pending' : (queuedEditing ? 'queued' : null),
       editPoint: pendingEditing ? { ...pendingEditing } : null,
     };
-    // Old saved drafts predate textTouched. A nonempty draft has necessarily
-    // moved past the pristine state, while a truly empty draft may still use
-    // Space once to begin dictation.
-    if (typeof draft.textTouched !== 'boolean') draft.textTouched = !!draft.text;
-    if (draft.text) draft.textTouched = true;
     let cardOwner = null;
     let doneBusy = false;
 
@@ -2571,17 +3120,7 @@
       ghost.style.height = ta.style.height;
       positionCard();
     }
-    ta.addEventListener('beforeinput', () => {
-      draft.textTouched = true;
-      saveDraft();
-    });
-    ta.addEventListener('input', (event) => {
-      // beforeinput covers normal editing. This trusted-input fallback also
-      // covers browser actions that omit it without treating speech insertion
-      // (our synthetic input event) as manual typing.
-      if (event.isTrusted) draft.textTouched = true;
-      autoGrow(); syncGhost(); saveDraft();
-    });
+    ta.addEventListener('input', () => { autoGrow(); syncGhost(); saveDraft(); });
     ta.addEventListener('scroll', () => { ghost.scrollTop = ta.scrollTop; });
     for (const evt of ['keyup', 'click', 'select']) {
       ta.addEventListener(evt, () => { syncGhost(); saveDraft(); });
@@ -2852,7 +3391,7 @@
     // micBtn is exposed so the dictate/record hotkey drives the same handler.
     cardOwner = {
       node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft,
-      dictationHotkeyReady() { return ta.value === '' && !draft.textTouched; },
+      dictationHotkeyReady() { return ta.value === ''; },
     };
     S.card = cardOwner;
     paintAbc();
@@ -3316,6 +3855,7 @@
     updateBar();
     const va = pinBox(pt);
     const box = va ? va.box : correctedRect(pt);
+    const capturedStickyScrollY = Number(pt.rectSurfaces?.[0]?.scroll?.y ?? pt.scroll?.y);
     if (!opts.noScroll) {
       // instant, not smooth: the flash should land where the eye already is, and
       // smooth scrolls never finish in a backgrounded tab (the jump idiom the
@@ -3324,7 +3864,8 @@
       // once that scene passes, bring them back instead of treating them as a
       // permanently visible fixed control.
       const target = reviewScrollTarget(
-        box, !!va, va ? va.anchorMode : 'doc', scrollY, innerHeight
+        box, !!va, va ? va.anchorMode : 'doc', scrollY, innerHeight,
+        capturedStickyScrollY
       );
       if (target !== null) {
         window.scrollTo({ top: target, behavior: 'instant' });
@@ -3332,7 +3873,8 @@
           const settled = pinBox(pt);
           const settledBox = settled ? settled.box : correctedRect(pt);
           const retry = reviewScrollTarget(
-            settledBox, !!settled, settled ? settled.anchorMode : 'doc', scrollY, innerHeight
+            settledBox, !!settled, settled ? settled.anchorMode : 'doc', scrollY, innerHeight,
+            capturedStickyScrollY
           );
           if (retry !== null && Math.abs(retry - scrollY) > 1) {
             window.scrollTo({ top: retry, behavior: 'instant' });
@@ -4137,11 +4679,6 @@
     ta.setAttribute('aria-label', 'Redo instructions for point ' + pt.number);
     ta.placeholder = 'e.g. closer, but make it half the size…';
     ta.value = (existing && existing.redoText) || '';
-    let textTouched = ta.value !== '';
-    ta.addEventListener('beforeinput', () => { textTouched = true; });
-    ta.addEventListener('input', (event) => {
-      if (event.isTrusted) textTouched = true;
-    });
     const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
     let redoVoiceNote = originalRedoVoiceNote;
     const existingRedoAbc = existing && existing.redoAbcRequest;
@@ -4259,7 +4796,7 @@
     });
     miniOwner = {
       node, ta, micBtn, mic, target, close: cancelMini, cancel: cancelMini,
-      dictationHotkeyReady() { return ta.value === '' && !textTouched; },
+      dictationHotkeyReady() { return ta.value === ''; },
     };
     S.mini = miniOwner;
     ta.focus();
@@ -4307,12 +4844,21 @@
   // ===== keyboard ============================================================
   // Capture phase so the shortcuts win even inside the host page's own key
   // handling; composedPath()[0] sees through shadow retargeting.
+  const dictationKeyHold = { code: '' };
   window.addEventListener('keydown', (e) => {
     const t = e.composedPath ? e.composedPath()[0] : e.target;
     // t can be window/document for programmatic dispatch - contains() would throw
     const isNode = t instanceof Node;
     const editable = isNode && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
       t.tagName === 'SELECT' || t.isContentEditable);
+    const heldDictationAction = dictationKeyAction(
+      e, HOTKEY_DICTATE, dictationKeyHold, false
+    );
+    if (heldDictationAction === 'suppress') {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.repeat) return;
 
     // THE toggle - deliberately the only one. Matched by CODE so a Hebrew (or
@@ -4330,16 +4876,17 @@
       return;
     }
 
-    // Dictation toggle. Space is a shortcut only for the active Webkit note
-    // while that note is pristine and empty. The first manual edit permanently
-    // gives Space back to normal typing, even if the user later deletes it all.
+    // Dictation toggle. Space belongs to dictation only while the active Webkit
+    // note is empty. As soon as content exists it is an ordinary typed space;
+    // deleting the content makes the empty-note shortcut available again.
     // Other editable fields always win, and modifiers keep browser shortcuts.
     if (e.code === HOTKEY_DICTATE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
       if (S.mode !== 'feedback') return;     // overlay hidden: don't dictate into an invisible card
       const holder = S.mini || S.card;      // the redo mini-input wins while open
       if (!holder || !holder.micBtn || holder.micBtn.hidden) return;
       if (!holder.dictationHotkeyReady || !holder.dictationHotkeyReady()) return;
-      if (editable && t !== holder.ta) return;
+      if (!dictationTargetAllowsActivation(t, holder.ta, editable)) return;
+      if (dictationKeyAction(e, HOTKEY_DICTATE, dictationKeyHold, true) !== 'activate') return;
       e.preventDefault();
       e.stopPropagation();
       holder.micBtn.click();                // reuse the button's own start/stop path
@@ -4382,6 +4929,12 @@
       }
     }
   }, true);
+  window.addEventListener('keyup', (event) => {
+    if (dictationKeyAction(event, HOTKEY_DICTATE, dictationKeyHold, false) !== 'suppress') return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
+  window.addEventListener('blur', () => { dictationKeyHold.code = ''; });
 
   // ===== boot ================================================================
   // flush pending debounced writes when the tab goes away mid-edit

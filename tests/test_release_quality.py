@@ -113,6 +113,21 @@ class ReleaseQualityTests(unittest.TestCase):
         self.assertIsNotNone(heading)
         self.assertEqual(heading.group(1), version)
 
+    def test_readme_hotkey_defaults_match_release_config(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        config = json.loads(
+            (ROOT / "webkit" / "webkit.config.template.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(config["hotkeys"]["toggle"], "KeyC")
+        self.assertEqual(config["hotkeys"]["dictate"], "Space")
+        self.assertIn("Press **Space** for\n  dictation", readme)
+        self.assertIn("C and Space are defaults", readme)
+        self.assertNotIn("Press **V** for", readme)
+        self.assertNotIn("C and V are defaults", readme)
+
     def test_control_center_phone_header_and_muted_text_meet_release_contract(self):
         styles = (ROOT / "control-center" / "static" / "styles.css").read_text(
             encoding="utf-8"

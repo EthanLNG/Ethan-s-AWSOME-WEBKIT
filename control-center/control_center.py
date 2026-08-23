@@ -9515,11 +9515,15 @@ optional GitHub push, and lifecycle cleanup after your ready signal.
         with self.lock:
             return self._discard(session_id, confirmation)
 
-    def dismiss_merged(self, session_id):
+    def dismiss_merged(self, session_id, confirmation):
         with self.lock:
             session = self._get_session(session_id)
             if session.get("status") != "merged":
                 raise ControlCenterError("Only a merged session can be dismissed.", 409)
+            if confirmation != session_id:
+                raise ControlCenterError(
+                    "Merged session dismissal was not explicitly confirmed.", 409
+                )
 
             def remove(state):
                 state["sessions"] = [

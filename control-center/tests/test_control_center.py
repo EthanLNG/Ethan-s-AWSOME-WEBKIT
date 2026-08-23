@@ -301,7 +301,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.15")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.16")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2633,14 +2633,36 @@ class ControlCenterTests(unittest.TestCase):
             {"id": "active-card", "projectId": "project", "status": "active"},
         ]))
         EventLog(self.state_dir, "merged-card").append("system", "merged")
-        result = self.app.sessions.dismiss_merged("merged-card")
+        with self.assertRaisesRegex(ControlCenterError, "explicitly confirmed"):
+            self.app.sessions.dismiss_merged("merged-card", None)
+        self.assertIn(
+            "merged-card", {item["id"] for item in self.app.store.read()["sessions"]}
+        )
+        result = self.app.sessions.dismiss_merged("merged-card", "merged-card")
         self.assertEqual(result, {"dismissed": True})
         self.assertNotIn(
             "merged-card", {item["id"] for item in self.app.store.read()["sessions"]}
         )
         self.assertFalse((self.state_dir / "logs" / "merged-card.jsonl").exists())
         with self.assertRaisesRegex(ControlCenterError, "Only a merged session"):
-            self.app.sessions.dismiss_merged("active-card")
+            self.app.sessions.dismiss_merged("active-card", "active-card")
+
+    def test_merged_session_survives_startup_recovery_until_dismissed(self):
+        session = {
+            "id": "merged-after-restart",
+            "projectId": "project",
+            "provider": "codex",
+            "color": "blue",
+            "status": "merged",
+            "updatedAt": "2026-08-23T10:16:04Z",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("sessions", []).append(session)
+        )
+
+        self.assertTrue(self.app.sessions.recover())
+        recovered = self.app.sessions._get_session("merged-after-restart")
+        self.assertEqual(recovered["status"], "merged")
 
     def test_interaction_setting_rejects_unknown_mode(self):
         with self.assertRaisesRegex(Exception, "normal website clicks or immediate rectangle drawing"):
@@ -4059,7 +4081,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.15",
+            "requiredVersion": "0.8.16",
         })
 
         status = subprocess.run(
@@ -4106,9 +4128,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.15")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.16")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.15")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.16")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -4116,7 +4138,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.15")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.16")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -4174,7 +4196,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.15"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.16"
         )
         self.assertEqual(
             subprocess.run(
@@ -4218,7 +4240,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.15",
+            "requiredVersion": "0.8.16",
         })
 
         active = {
@@ -4247,9 +4269,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.15")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.15")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.15")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.16")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.16")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.16")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()

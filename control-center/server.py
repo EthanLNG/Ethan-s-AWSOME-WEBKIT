@@ -251,7 +251,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "discard":
                     self._json(self.server.app.sessions.discard(session_id, body.get("confirmation")))
                 elif action == "dismiss":
-                    self._json(self.server.app.sessions.dismiss_merged(session_id))
+                    self._json(self.server.app.sessions.dismiss_merged(
+                        session_id, body.get("confirmation")
+                    ))
                 else:
                     raise ControlCenterError("Session action not found.", 404)
             elif path == "/api/shutdown":

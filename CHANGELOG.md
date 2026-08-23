@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.16 (2026-08-23): Durable completed-session cards
+
+- Required the exact session ID before a merged card can be dismissed, so a
+  stale or mismatched Control Center client cannot clear completed work.
+- Added restart-recovery coverage that keeps merged records available until
+  the user clicks their green completed card.
+
 ## v0.8.15 (2026-08-23): Version-locked Control Center upgrades
 
 - Snapshotted the Control Center frontend when its server starts so an older

@@ -680,7 +680,9 @@ async function dismissMergedSession(session, row) {
   row.classList.add("popping");
   try {
     await Promise.all([
-      api(`/api/sessions/${session.id}/dismiss`, { method: "POST", body: {} }),
+      api(`/api/sessions/${session.id}/dismiss`, {
+        method: "POST", body: { confirmation: session.id },
+      }),
       new Promise((resolve) => window.setTimeout(resolve, 180)),
     ]);
     await refreshProjects();

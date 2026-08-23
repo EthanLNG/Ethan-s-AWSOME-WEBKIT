@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,7 +16,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(process.argv[1], "utf8");
+const source = fs.readFileSync(process.argv[2], "utf8");
 
 function extractFunction(name) {
   const plain = `function ${name}(`;
@@ -958,14 +959,17 @@ class ControlCenterFrontendTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for front-end regression tests")
     def test_async_state_and_drop_regressions(self):
-        result = subprocess.run(
-            [shutil.which("node"), "-e", NODE_HARNESS, str(APP_JS)],
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            timeout=30,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as raw:
+            harness = Path(raw) / "control-center-frontend-harness.js"
+            harness.write_text(NODE_HARNESS, encoding="utf-8")
+            result = subprocess.run(
+                [shutil.which("node"), str(harness), str(APP_JS)],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

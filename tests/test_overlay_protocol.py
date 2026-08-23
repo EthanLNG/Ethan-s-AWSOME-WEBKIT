@@ -36,7 +36,8 @@ class OverlayProtocolTests(unittest.TestCase):
             + "queuedPointKey, queuedTombstoneKey, validQueuedPoint, "
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
             + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
-            + "anchorFitScore, reanchorRect, tabActivityMode, tabPollDelay, "
+            + "anchorFitScore, anchorCoverageScore, anchorContextScore, "
+            + "reanchorRect, tabActivityMode, tabPollDelay, "
             + "MAX_QUEUED_TOMBSTONES };"
         )
         program = "const H = new Function(%s)();\n%s" % (json.dumps(exports), body)
@@ -238,6 +239,14 @@ const target = { x: 90, y: 90, w: 230, h: 100 };
 const background = { x: 0, y: 0, w: 1920, h: 1080 };
 assert(H.anchorFitScore(mark, target) > H.anchorFitScore(mark, background));
 assert(H.anchorFitScore(mark, background) < 0.08);
+const tinyMark = { x: 1004, y: 5391, w: 23, h: 30 };
+const stickyScene = { x: 0, y: 5058, w: 1920, h: 958 };
+const pageShell = { x: 0, y: 0, w: 1920, h: 17026 };
+const viewport = { w: 1920, h: 902 };
+assert(H.anchorFitScore(tinyMark, stickyScene) < 0.08);
+assert.strictEqual(H.anchorCoverageScore(tinyMark, stickyScene), 1);
+assert(H.anchorContextScore(tinyMark, stickyScene, viewport) >= 0.75);
+assert.strictEqual(H.anchorContextScore(tinyMark, pageShell, viewport), 0);
 assert.deepStrictEqual(
   H.reanchorRect(mark, target, { x: 180, y: 150, w: 460, h: 200 }),
   { x: 200, y: 170, w: 400, h: 160 }
@@ -254,6 +263,24 @@ assert.deepStrictEqual(
         self.assertIn("if (contexts.length) contexts[0].role = 'primary'", self.source)
         self.assertIn("const pendingEditingRects = pendingGeometry", self.source)
         self.assertIn("x: rect.x + scrollX", self.source)
+        self.assertIn("underlayElementsFromPoint", self.source)
+        self.assertIn("elementViewportAnchored", self.source)
+
+    def test_pins_track_live_geometry_without_scroll_ghosts(self):
+        for fragment in (
+            "const geometryCache = new Map()",
+            "marker.node.style.visibility = 'hidden'",
+            "S.pinEls.push({ node: rect, point, rectIndex, kind: 'rect' })",
+            "document.addEventListener('scroll', notePinMotion, { capture: true, passive: true })",
+            "window.visualViewport.addEventListener('scroll', notePinMotion",
+            "pinLayer.classList.remove('wk-motion')",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+        self.assertIn(".wk-pins.wk-motion", self.css)
+        pin = re.search(r"\.wk-pin \{(?P<body>.*?)\n\}", self.css, re.S)
+        self.assertIsNotNone(pin)
+        self.assertNotIn("transition: transform", pin.group("body"))
 
     def test_tab_title_tracks_work_and_background_review_ready_state(self):
         self.run_node(
@@ -324,6 +351,51 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertIn("if (!voiceReady) return false", commit_source)
         self.assertNotIn("Stop the recording before saving this point", self.source)
 
+    def test_speech_done_waits_for_final_recognition_result_once(self):
+        speech_start = self.source.index("  function makeMic(")
+        speech_end = self.source.index("  // Voice-note mode", speech_start)
+        speech_source = self.source[speech_start:speech_end]
+        for fragment in (
+            "let finishCycle = null",
+            "activeRec.onresult",
+            "activeRec.onend",
+            "finishAndWait",
+            "finishCycle.rec === activeRec",
+            "activeRec.stop()",
+            "setTimeout(() => settleFinish(activeRec, true), 3000)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, speech_source)
+
+        commit_start = self.source.index("    async function commit()")
+        commit_end = self.source.index("    addRectBtn.addEventListener", commit_start)
+        commit_source = self.source[commit_start:commit_end]
+        self.assertLess(
+            commit_source.index("await mic.finishAndWait()"),
+            commit_source.index("draft.text = ta.value", commit_source.index("await mic.finishAndWait()")),
+        )
+        done_start = self.source.index("    doneBtn.addEventListener('click'")
+        done_end = self.source.index("    // The header doubles", done_start)
+        self.assertNotIn("finishAndWait", self.source[done_start:done_end])
+
+    def test_space_dictation_only_claims_a_pristine_webkit_textarea(self):
+        self.assertIn("const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'Space'", self.source)
+        self.assertGreaterEqual(self.source.count("dictationHotkeyReady()"), 2)
+        self.assertIn("draft.textTouched = true", self.source)
+        keyboard_start = self.source.index("  // ===== keyboard")
+        keyboard_source = self.source[keyboard_start:]
+        for fragment in (
+            "if (!holder.dictationHotkeyReady || !holder.dictationHotkeyReady()) return",
+            "if (editable && t !== holder.ta) return",
+            "holder.micBtn.click()",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, keyboard_source)
+        self.assertLess(
+            keyboard_source.index("if (!holder.dictationHotkeyReady"),
+            keyboard_source.index("e.preventDefault()", keyboard_source.index("if (!holder.dictationHotkeyReady")),
+        )
+
     def test_ready_review_opens_without_a_confirmation_toast(self):
         self.assertIn("function maybeAutoEnterReview()", self.source)
         self.assertIn("S.reviewAutoPending = true;\n        maybeAutoEnterReview();", self.source)
@@ -342,6 +414,10 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertIn("pageSpaceKeydowns: 0", self.qa_fixture)
         self.assertIn("window.addEventListener('keydown'", self.qa_fixture)
         self.assertIn("event.code !== 'Space'", self.qa_fixture)
+        self.assertIn("class TestSpeechRecognition", self.qa_fixture)
+        self.assertIn("this.onresult?.({ resultIndex: 0, results: [result] })", self.qa_fixture)
+        self.assertIn("#sticky-target { position: sticky", self.qa_fixture)
+        self.assertIn("<canvas id=\"runtime-canvas\"", self.qa_fixture)
 
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):
         self.run_node(
@@ -703,7 +779,7 @@ assert.deepStrictEqual(
         self.assertIn(".wk-mini {\n    left: 8px;\n    right: 8px;", self.css)
         self.assertIn(".wk-hint {\n    max-width: calc(100vw - 32px);", self.css)
         self.assertIn("max-width: min(280px, 35vw);\n  overflow-x: auto;", self.css)
-        self.assertIn("x: box.x - 12, y: box.y - 12, w: 24, h: 24", self.source)
+        self.assertIn("x: source.x - 12, y: source.y - 12, w: 24, h: 24", self.source)
         self.assertIn("pin.setAttribute('aria-label'", self.source)
 
     def test_swap_cache_and_async_work_are_bound_to_active_review(self):
@@ -722,6 +798,34 @@ assert.deepStrictEqual(
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
         self.assertGreaterEqual(self.source.count("requireCurrentSwap(context);"), 7)
+
+    def test_point_before_fails_closed_for_runtime_owned_content(self):
+        gate_start = self.source.index("  const UNSAFE_SWAP_TAGS")
+        gate_end = self.source.index("  // The doodles are drawn", gate_start)
+        gate = self.source[gate_start:gate_end]
+        for fragment in (
+            "'CANVAS'", "'VIDEO'", "'IFRAME'", "'IMG'",
+            "current.shadowRoot", "currentKids.length !== historicalKids.length",
+            "style.animationName", "getComputedStyle(current, '::before').content",
+            "this element owns a versioned asset",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, gate)
+        apply_start = self.source.index("  async function applySwap")
+        apply_end = self.source.index("  function restoreSwap", apply_start)
+        apply_source = self.source[apply_start:apply_end]
+        self.assertLess(
+            apply_source.index("pointSwapUnsafeReason(t.live, t.incoming)"),
+            apply_source.index("styledBeforeNode(t.sel, t.incoming, context, t.live)"),
+        )
+        styled_start = self.source.index("  async function styledBeforeNode")
+        styled_end = self.source.index("  // Keep the eye", styled_start)
+        styled_source = self.source[styled_start:styled_end]
+        self.assertLess(
+            styled_source.index("carryState(live, source)"),
+            styled_source.index("copyComputedTree(source, node)"),
+        )
+        self.assertIn("navSide('before');", self.source)
 
 
 if __name__ == "__main__":

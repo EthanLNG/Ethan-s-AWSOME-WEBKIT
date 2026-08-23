@@ -99,10 +99,11 @@ session context and do not perform controller-owned lifecycle actions.
 
 
 DEFAULT_SETTINGS = {
+    "defaultsVersion": 2,
     "dictationMode": "speech",
     "interactionMode": "browse-default",
     "toggleHotkey": "KeyC",
-    "dictateHotkey": "KeyV",
+    "dictateHotkey": "Space",
     "fastModeNoticeSeen": False,
 }
 
@@ -321,6 +322,13 @@ end run"""
 
 def normalized_settings(value):
     value = value if isinstance(value, dict) else {}
+    defaults_version = value.get("defaultsVersion", 1)
+    if (
+        not isinstance(defaults_version, int)
+        or isinstance(defaults_version, bool)
+        or defaults_version < 1
+    ):
+        defaults_version = 1
     dictation_mode = value.get("dictationMode", DEFAULT_SETTINGS["dictationMode"])
     interaction_mode = value.get("interactionMode", DEFAULT_SETTINGS["interactionMode"])
     toggle_hotkey = value.get("toggleHotkey", DEFAULT_SETTINGS["toggleHotkey"])
@@ -328,11 +336,20 @@ def normalized_settings(value):
     fast_mode_notice_seen = value.get(
         "fastModeNoticeSeen", DEFAULT_SETTINGS["fastModeNoticeSeen"]
     )
+    if (
+        defaults_version < DEFAULT_SETTINGS["defaultsVersion"]
+        and dictate_hotkey == "KeyV"
+    ):
+        dictate_hotkey = DEFAULT_SETTINGS["dictateHotkey"]
     toggle_hotkey = toggle_hotkey if valid_hotkey(toggle_hotkey) else "KeyC"
-    dictate_hotkey = dictate_hotkey if valid_hotkey(dictate_hotkey) else "KeyV"
+    dictate_hotkey = (
+        dictate_hotkey if valid_hotkey(dictate_hotkey)
+        else DEFAULT_SETTINGS["dictateHotkey"]
+    )
     if dictate_hotkey == toggle_hotkey:
-        dictate_hotkey = "KeyC" if toggle_hotkey == "KeyV" else "KeyV"
+        dictate_hotkey = "KeyV" if toggle_hotkey == "Space" else "Space"
     return {
+        "defaultsVersion": max(defaults_version, DEFAULT_SETTINGS["defaultsVersion"]),
         "dictationMode": dictation_mode
         if dictation_mode in ("speech", "voice-note", "cloud-voice-note")
         else "speech",
@@ -10021,6 +10038,10 @@ class ControlCenter:
         if not isinstance(fast_mode_notice_seen, bool):
             raise ControlCenterError("Fast mode notice state must be true or false.")
         saved = {
+            "defaultsVersion": max(
+                current.get("defaultsVersion", DEFAULT_SETTINGS["defaultsVersion"]),
+                DEFAULT_SETTINGS["defaultsVersion"],
+            ),
             "dictationMode": dictation_mode,
             "interactionMode": interaction_mode,
             "toggleHotkey": toggle_hotkey,

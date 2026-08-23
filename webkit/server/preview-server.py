@@ -1399,7 +1399,7 @@ def _transform_csp_meta_tags(html, nonce, trusted_types_policy):
     return html
 
 # Optional per-project hotkey overrides: {"hotkeys": {"toggle": "Backquote",
-# "dictate": "KeyV"}}. Values are KeyboardEvent.code strings (layout-independent
+# "dictate": "Space"}}. Values are KeyboardEvent.code strings (layout-independent
 # - this matters on a Hebrew site, where e.key differs per layout); the overlay
 # carries the same two defaults, so an absent config block changes nothing.
 # Anything that isn't a bare alphanumeric code is dropped rather than escaped:
@@ -1414,7 +1414,7 @@ _HOTKEY_RESERVED = {
     "AltLeft", "AltRight", "ControlLeft", "ControlRight", "Escape",
     "MetaLeft", "MetaRight", "ShiftLeft", "ShiftRight",
 }
-for _name, _default in (("toggle", "KeyC"), ("dictate", "KeyV")):
+for _name, _default in (("toggle", "KeyC"), ("dictate", "Space")):
     _value = os.environ.get("WK_HOTKEY_{}".format(_name.upper()), _HOTKEYS.get(_name, _default))
     if (
         not isinstance(_value, str)
@@ -1424,7 +1424,9 @@ for _name, _default in (("toggle", "KeyC"), ("dictate", "KeyV")):
         _value = _default
     _HOTKEY_VALUES[_name] = _value
 if _HOTKEY_VALUES["dictate"] == _HOTKEY_VALUES["toggle"]:
-    _HOTKEY_VALUES["dictate"] = "KeyC" if _HOTKEY_VALUES["toggle"] == "KeyV" else "KeyV"
+    _HOTKEY_VALUES["dictate"] = (
+        "KeyV" if _HOTKEY_VALUES["toggle"] == "Space" else "Space"
+    )
 _HOTKEY_ATTRS = "".join(
     ' data-wk-hotkey-{}="{}"'.format(name, _HOTKEY_VALUES[name])
     for name in ("toggle", "dictate")

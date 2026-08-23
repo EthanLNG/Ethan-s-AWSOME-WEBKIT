@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8.17 (2026-08-23): Reliable dictation and faithful review geometry
+
+- Made Space the one-time dictation shortcut for a pristine empty feedback
+  note, while preserving normal Space typing after the first manual edit.
+- Finished active Chrome speech recognition before saving and waited for its
+  final transcript so Done never silently ignores a recording.
+- Hardened feedback anchors across sticky, fixed, nested-scroll, and animated
+  scenes, including recovery for points saved with an older wrong anchor.
+- Prevented markers from flashing at stale or top-left positions while a page
+  is actively moving, and recomputed their geometry from the live target.
+- Made point-scope BEFORE fall back to the complete historical page whenever
+  canvas, generated markup, versioned assets, or other runtime content cannot
+  be reproduced faithfully by an in-place DOM swap.
+
+**Migration:** finish or discard any active project session, click the project's
+Webkit update button, and start a fresh color session. Existing KeyV defaults
+migrate to Space once; an explicitly selected KeyV remains available.
+
 ## v0.8.16 (2026-08-23): Durable completed-session cards
 
 - Required the exact session ID before a merged card can be dismissed, so a

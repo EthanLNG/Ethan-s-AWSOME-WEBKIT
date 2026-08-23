@@ -10,6 +10,9 @@
     main { width: min(880px, calc(100% - 40px)); margin: 40px auto; }
     button { margin: 0 8px 12px 0; padding: 10px 14px; }
     #target { min-height: 260px; margin-top: 20px; padding: 40px; border: 3px solid; background: white; }
+    #scroll-stage { height: 1700px; margin-top: 80px; padding-top: 180px; border-top: 2px dashed #777; }
+    #sticky-target { position: sticky; top: 80px; min-height: 260px; padding: 40px; border: 3px solid #2563eb; background: #dbeafe; }
+    #runtime-canvas { display: block; width: 320px; height: 120px; margin-top: 20px; background: #111827; }
     dialog { width: min(480px, calc(100% - 40px)); padding: 32px; }
   </style>
 </head>
@@ -32,6 +35,13 @@
     <section id="target">
       <h2>Rectangle target</h2>
       <p>Draw a feedback rectangle here to open the voice-note editor.</p>
+    </section>
+    <section id="scroll-stage">
+      <div id="sticky-target">
+        <h2>Sticky scroll target</h2>
+        <p>Markers drawn here must stay attached and never flash at the top left.</p>
+        <canvas id="runtime-canvas" width="640" height="240"></canvas>
+      </div>
     </section>
   </main>
   <dialog id="test-modal">
@@ -66,6 +76,8 @@
         reviewRoundOffset: 0,
         stateOverrideResponses: 0,
         pageSpaceKeydowns: 0,
+        speechStarts: 0,
+        speechStops: 0,
         resolvePermission: null,
         rejectPermission: null,
         releaseUpload: null,
@@ -90,6 +102,8 @@
         stateOutput.dataset.reviewRoundOffset = String(qa.reviewRoundOffset);
         stateOutput.dataset.stateOverrideResponses = String(qa.stateOverrideResponses);
         stateOutput.dataset.pageSpaceKeydowns = String(qa.pageSpaceKeydowns);
+        stateOutput.dataset.speechStarts = String(qa.speechStarts);
+        stateOutput.dataset.speechStops = String(qa.speechStops);
         stateOutput.dataset.permissionPending = String(!!qa.resolvePermission);
         stateOutput.dataset.uploadPending = String(!!qa.releaseUpload);
         const overlayRoot = document.querySelector('[data-wk-host]')?.shadowRoot;
@@ -110,9 +124,17 @@
           `review-nav:${qa.reviewNavigationHits}/${qa.reviewNavigationRequests}`,
           `round-offset:${qa.reviewRoundOffset}`,
           `page-space:${qa.pageSpaceKeydowns}`,
+          `speech:${qa.speechStops}/${qa.speechStarts}`,
         ].join(' ');
       };
       paintState();
+      const qaCanvas = document.getElementById('runtime-canvas');
+      const qaContext = qaCanvas.getContext('2d');
+      qaContext.fillStyle = '#2563eb';
+      qaContext.fillRect(0, 0, qaCanvas.width, qaCanvas.height);
+      qaContext.fillStyle = '#ffffff';
+      qaContext.font = '700 56px system-ui';
+      qaContext.fillText('runtime canvas', 80, 145);
       window.addEventListener('keydown', (event) => {
         if (event.code !== 'Space') return;
         qa.pageSpaceKeydowns += 1;
@@ -236,6 +258,34 @@
         }
       }
       window.MediaRecorder = TestMediaRecorder;
+      class TestSpeechRecognition {
+        constructor() {
+          this.continuous = false;
+          this.interimResults = false;
+          this.lang = 'en-US';
+          this.active = false;
+        }
+        start() {
+          if (this.active) throw new DOMException('Recognition is already active', 'InvalidStateError');
+          this.active = true;
+          qa.speechStarts += 1;
+          paintState();
+        }
+        stop() {
+          if (!this.active) throw new DOMException('Recognition is inactive', 'InvalidStateError');
+          this.active = false;
+          qa.speechStops += 1;
+          paintState();
+          setTimeout(() => {
+            const result = [{ transcript: 'browser qa dictation' }];
+            result.isFinal = true;
+            this.onresult?.({ resultIndex: 0, results: [result] });
+            this.onend?.();
+            paintState();
+          }, 25);
+        }
+      }
+      window.webkitSpeechRecognition = TestSpeechRecognition;
       const nativeFetch = window.fetch.bind(window);
       window.fetch = (input, init) => {
         const url = String(input);

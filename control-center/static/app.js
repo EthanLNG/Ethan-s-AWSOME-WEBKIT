@@ -40,10 +40,11 @@ function controlCenterToken() {
 const CONTROL_CENTER_TOKEN = controlCenterToken();
 
 const DEFAULT_SETTINGS = {
+  defaultsVersion: 2,
   dictationMode: "speech",
   interactionMode: "browse-default",
   toggleHotkey: "KeyC",
-  dictateHotkey: "KeyV",
+  dictateHotkey: "Space",
   fastModeNoticeSeen: false,
 };
 const RESERVED_HOTKEYS = new Set([
@@ -93,7 +94,7 @@ const state = {
   settingsSaveInFlight: false,
   chatTurn: null,
 };
-let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "KeyV" };
+let hotkeyDraft = { toggleHotkey: "KeyC", dictateHotkey: "Space" };
 let hotkeyCapture = null;
 let projectsRefreshPromise = null;
 let projectsRefreshQueued = false;
@@ -281,7 +282,7 @@ function hotkeyLabel(code) {
 
 function renderShortcutGuide() {
   $("#guideToggleKey").textContent = hotkeyLabel(state.settings.toggleHotkey || "KeyC");
-  $("#guideDictateKey").textContent = hotkeyLabel(state.settings.dictateHotkey || "KeyV");
+  $("#guideDictateKey").textContent = hotkeyLabel(state.settings.dictateHotkey || "Space");
   const optionAction = state.settings.interactionMode === "draw-default" ? "Click" : "Draw";
   $("#guideOptionAction").textContent = optionAction;
   const optionLabel = state.system.platform === "darwin" ? "⌥" : "Alt";
@@ -419,7 +420,7 @@ function openSettings() {
     : "Connect GitHub to Codex or Claude Code, or run gh auth login. Existing GitHub remotes are detected automatically.";
   hotkeyDraft = {
     toggleHotkey: state.settings.toggleHotkey || "KeyC",
-    dictateHotkey: state.settings.dictateHotkey || "KeyV",
+    dictateHotkey: state.settings.dictateHotkey || "Space",
   };
   hotkeyCapture = null;
   $("#settingsDialogClose").disabled = state.settingsSaveInFlight;

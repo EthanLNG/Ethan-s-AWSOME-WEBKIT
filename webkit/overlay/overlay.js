@@ -401,6 +401,26 @@
     return union > 0 ? intersection / union : 0;
   }
 
+  function anchorCoverageScore(rect, box) {
+    if (!rect || !box || rect.w <= 0 || rect.h <= 0 || box.w <= 0 || box.h <= 0) return 0;
+    const overlapWidth = Math.min(rect.x + rect.w, box.x + box.w) - Math.max(rect.x, box.x);
+    const overlapHeight = Math.min(rect.y + rect.h, box.y + box.h) - Math.max(rect.y, box.y);
+    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+    return (overlapWidth * overlapHeight) / (rect.w * rect.h);
+  }
+
+  function anchorContextScore(rect, box, viewport) {
+    const fit = anchorFitScore(rect, box);
+    if (fit >= 0.08) return fit;
+    const coverage = anchorCoverageScore(rect, box);
+    if (coverage < 0.75) return 0;
+    const viewportWidth = Number(viewport && viewport.w);
+    const viewportHeight = Number(viewport && viewport.h);
+    if (!(viewportWidth > 0 && viewportHeight > 0)) return 0;
+    const maxSceneArea = viewportWidth * viewportHeight * 2;
+    return box.w * box.h <= maxSceneArea ? coverage : 0;
+  }
+
   function reanchorRect(rect, capturedBox, liveBox) {
     if (!rect || !capturedBox || !liveBox || capturedBox.w <= 0 || capturedBox.h <= 0) return rect;
     const scaleX = liveBox.w / capturedBox.w;
@@ -497,7 +517,7 @@
   // (the browser eats the combo), hence a single bare key. The server injects
   // overrides from the config's `hotkeys` block; these are the defaults.
   const HOTKEY_TOGGLE = DS.wkHotkeyToggle || 'KeyC';
-  const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'KeyV';
+  const HOTKEY_DICTATE = DS.wkHotkeyDictate || 'Space';
   const KEY_LABELS = {
     Backquote: '`', Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']',
     Backslash: '\\', Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/',
@@ -510,8 +530,8 @@
   const TOGGLE_LABEL = keyLabel(HOTKEY_TOGGLE);
   const DICTATE_LABEL = keyLabel(HOTKEY_DICTATE);
   const MIC_TITLE = USES_VOICE_NOTES
-    ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' outside a text field'
-    : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' outside a text field';
+    ? 'Record a voice note for the agent - or press ' + DICTATE_LABEL + ' in a fresh empty note'
+    : 'Dictate (Chrome speech-to-text) - or press ' + DICTATE_LABEL + ' in a fresh empty note';
   const MIC_ARIA_LABEL = USES_VOICE_NOTES
     ? 'Start or stop recording a voice note'
     : 'Start or stop speech dictation';
@@ -704,7 +724,7 @@
     offeredReview: '',          // batchId:round already auto-entered or queued
     reviewAutoPending: false,   // ready review waiting for an open editor to close
     bootReview: null,           // ?wk-review target during boot - owns automatic entry
-    pinEls: [],                 // [{node, box}] for the rAF repositioner
+    pinEls: [],                 // [{node, point, rectIndex, kind}] for live positioning
     altHeld: false,
   };
   function reservedPointNumbers() {
@@ -973,7 +993,7 @@
     ? 'hold ' + MODIFIER_LABEL + ' + drag to mark a spot'
     : 'drag to mark a spot · hold ' + MODIFIER_LABEL + ' to use the page';
   const hintChip = el('div', 'wk-hint', interactionHint + ' · ' + TOGGLE_LABEL +
-    ' to hide · ' + DICTATE_LABEL + ' to dictate (outside text fields)');
+    ' to hide · ' + DICTATE_LABEL + ' to dictate in a fresh empty note');
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
   sendBtn.hidden = true;
@@ -1117,14 +1137,96 @@
     const x = fixed ? box.x : box.x - scrollX;
     const y = fixed ? box.y : box.y - scrollY;
     node.style.transform = 'translate(' + x + 'px,' + y + 'px)';
+    return { x, y };
   }
   function repositionAll() {
     posRaf = 0;
-    for (const p of S.pinEls) place(p.node, p.box, p.fixed);
+    const geometryCache = new Map();
+    const signature = [];
+    for (const marker of S.pinEls) {
+      let geometry = geometryCache.get(marker.point);
+      if (!geometry) {
+        geometry = correctedPointRects(marker.point);
+        geometryCache.set(marker.point, geometry);
+      }
+      const source = geometry.boxes[marker.rectIndex];
+      if (!source || ![source.x, source.y, source.w, source.h].every(Number.isFinite) ||
+        source.w <= 0 || source.h <= 0) {
+        marker.node.style.visibility = 'hidden';
+        continue;
+      }
+      const box = marker.kind === 'pin'
+        ? { x: source.x - 12, y: source.y - 12, w: 24, h: 24 }
+        : source;
+      if (marker.kind === 'rect') {
+        marker.node.style.width = box.w + 'px';
+        marker.node.style.height = box.h + 'px';
+      }
+      const placed = place(marker.node, box, geometry.fixed);
+      marker.node.style.visibility = '';
+      signature.push(
+        Math.round(placed.x * 10) + ':' + Math.round(placed.y * 10) + ':' +
+        Math.round(box.w * 10) + ':' + Math.round(box.h * 10)
+      );
+    }
     if (S.card) positionFrozen(), positionCard();
+    return signature.join('|');
   }
-  window.addEventListener('scroll', schedulePos, { passive: true });
-  window.addEventListener('resize', () => { renderPins(); schedulePos(); });
+
+  // Moving sites often keep animating their scene for several frames after the
+  // browser's final scroll event. Hide markers during motion, continuously
+  // recompute their live anchors, and reveal only after the geometry settles.
+  // This trades a brief absence for never flashing a marker over unrelated UI.
+  let pinMotionTimer = 0;
+  let pinSettleRaf = 0;
+  let pinMotionGeneration = 0;
+  function settlePinMotion(generation) {
+    let lastSignature = '';
+    let stableFrames = 0;
+    let frames = 0;
+    const settle = () => {
+      if (generation !== pinMotionGeneration) return;
+      const nextSignature = repositionAll();
+      stableFrames = nextSignature === lastSignature ? stableFrames + 1 : 0;
+      lastSignature = nextSignature;
+      frames += 1;
+      if (stableFrames >= 2 || frames >= 60) {
+        pinSettleRaf = 0;
+        pinLayer.classList.remove('wk-motion');
+        return;
+      }
+      pinSettleRaf = requestAnimationFrame(settle);
+    };
+    if (posRaf) {
+      cancelAnimationFrame(posRaf);
+      posRaf = 0;
+    }
+    pinSettleRaf = requestAnimationFrame(settle);
+  }
+  function notePinMotion() {
+    pinMotionGeneration += 1;
+    const generation = pinMotionGeneration;
+    pinLayer.classList.add('wk-motion');
+    if (pinSettleRaf) {
+      cancelAnimationFrame(pinSettleRaf);
+      pinSettleRaf = 0;
+    }
+    if (pinMotionTimer) clearTimeout(pinMotionTimer);
+    schedulePos();
+    pinMotionTimer = setTimeout(() => {
+      pinMotionTimer = 0;
+      settlePinMotion(generation);
+    }, 80);
+  }
+  document.addEventListener('wheel', notePinMotion, { capture: true, passive: true });
+  document.addEventListener('touchmove', notePinMotion, { capture: true, passive: true });
+  document.addEventListener('scroll', notePinMotion, { capture: true, passive: true });
+  window.addEventListener('scroll', notePinMotion, { passive: true });
+  window.addEventListener('resize', () => { renderPins(); notePinMotion(); });
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('scroll', notePinMotion, { passive: true });
+    window.visualViewport.addEventListener('resize', notePinMotion, { passive: true });
+  }
 
   // ===== selector builder + context capture ==================================
   function machineId(id) {
@@ -1210,30 +1312,43 @@
   }
 
   function isOverlayNode(elm) {
-    return elm === host || elm.classList && elm.classList.contains('abc-switch');
+    return elm === host || elm && elm.getRootNode && elm.getRootNode() === root ||
+      elm && elm.classList && elm.classList.contains('abc-switch');
+  }
+  function underlayElementsFromPoint(x, y) {
+    const value = host.style.getPropertyValue('visibility');
+    const priority = host.style.getPropertyPriority('visibility');
+    host.style.setProperty('visibility', 'hidden', 'important');
+    try {
+      return [...document.elementsFromPoint(x, y)];
+    } catch (e) {
+      return [];
+    } finally {
+      if (value) host.style.setProperty('visibility', value, priority);
+      else host.style.removeProperty('visibility');
+    }
   }
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'HTML', 'BODY']);
 
   // rectDoc = {x,y,w,h} in document coords → context[] (≤12, ranked by overlap)
   function captureContext(rectDoc) {
     const vx = rectDoc.x - scrollX, vy = rectDoc.y - scrollY;
+    const viewport = { w: innerWidth, h: innerHeight };
     const rankedElements = new Map();
     function consider(elm) {
       if (!elm || rankedElements.has(elm) || SKIP_TAGS.has(elm.tagName) || isOverlayNode(elm)) return;
       const b = elm.getBoundingClientRect();
       const box = { x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height };
-      const score = anchorFitScore(rectDoc, box);
+      const score = anchorContextScore(rectDoc, box, viewport);
       if (score > 0) rankedElements.set(elm, { box, score, order: rankedElements.size });
     }
-    // 1) elementsFromPoint over a 3×3 grid - fast, respects stacking, and our
-    //    host is pointer-events:none so it self-excludes.
+    // 1) elementsFromPoint over a 3x3 grid. The overlay is temporarily hidden
+    //    because its armed draw surface otherwise masks the page under the mark.
     for (const fx of [0.12, 0.5, 0.88]) {
       for (const fy of [0.12, 0.5, 0.88]) {
         const px = vx + rectDoc.w * fx, py = vy + rectDoc.h * fy;
         if (px < 0 || py < 0 || px >= innerWidth || py >= innerHeight) continue;
-        try {
-          for (const elm of document.elementsFromPoint(px, py)) consider(elm);
-        } catch (e) { /* ignore */ }
+        for (const elm of underlayElementsFromPoint(px, py)) consider(elm);
       }
     }
     // 2) bbox scan fallback - the rect may sit partly outside the viewport
@@ -1330,20 +1445,26 @@
     return n + 1;
   }
 
-  // A rect drawn over a position:fixed/sticky ancestor is anchored to the viewport,
-  // not the document: it must render fixed-to-viewport (no scroll translate) or it
-  // drifts onto unrelated content the moment the user scrolls. detectAnchor runs at
-  // capture; pinBox recomputes the live viewport box (tracks a sticky element that
-  // is/ isn't currently stuck) at render time.
-  function detectAnchor(vx, vy) {
+  function elementViewportAnchored(node) {
     try {
-      for (let n = document.elementFromPoint(vx, vy);
-        n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
-        if (isOverlayNode(n)) continue;
-        const pos = getComputedStyle(n).position;
-        if (pos === 'fixed' || pos === 'sticky') return 'viewport';
+      for (let current = node;
+        current && current !== document.body && current !== document.documentElement;
+        current = current.parentElement) {
+        if (isOverlayNode(current)) continue;
+        const position = getComputedStyle(current).position;
+        if (position === 'fixed' || position === 'sticky') return true;
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) { /* detached or cross-realm node */ }
+    return false;
+  }
+
+  // A rect drawn over a position:fixed/sticky ancestor is anchored to the viewport,
+  // not the document. Probe through the armed draw layer so the page element, not
+  // the overlay host, determines the anchor.
+  function detectAnchor(vx, vy) {
+    for (const node of underlayElementsFromPoint(vx, vy)) {
+      if (!isOverlayNode(node) && elementViewportAnchored(node)) return 'viewport';
+    }
     return 'doc';
   }
   function pointSurfaceVisible(p) {
@@ -1362,21 +1483,44 @@
 
   function correctedPointRects(p) {
     const rects = p.rects || [p.rect];
-    const fixed = p.anchor === 'viewport';
     const capturedScroll = p.scroll || { x: 0, y: 0 };
+    const capturedViewport = {
+      w: Number(p.viewport && p.viewport.w) || innerWidth,
+      h: Number(p.viewport && p.viewport.h) || innerHeight,
+    };
+    const resolvedContexts = rects.map((rect, rectIndex) => {
+      const contexts = Array.isArray(p.rectContexts) && Array.isArray(p.rectContexts[rectIndex])
+        ? p.rectContexts[rectIndex]
+        : (p.context || []);
+      const resolved = [];
+      for (const context of contexts) {
+        if (!context || !context.selector || !context.box ||
+          anchorContextScore(rect, context.box, capturedViewport) < MIN_ANCHOR_FIT) continue;
+        try {
+          const matches = document.querySelectorAll(context.selector);
+          if (matches.length === 1) resolved.push({
+            context,
+            node: matches[0],
+            viewportAnchored: elementViewportAnchored(matches[0]),
+          });
+        } catch (e) { /* try the next captured context */ }
+      }
+      return resolved;
+    });
+    // Older points could be saved as document anchored because the overlay
+    // masked a sticky target during capture. Recover them from their trusted,
+    // unique live context instead of preserving the bad classification.
+    const fixed = p.anchor === 'viewport' || resolvedContexts.some((contexts) =>
+      contexts.some((entry) => entry.viewportAnchored)
+    );
     return {
       fixed,
       boxes: rects.map((rect, rectIndex) => {
-        const contexts = Array.isArray(p.rectContexts) && Array.isArray(p.rectContexts[rectIndex])
-          ? p.rectContexts[rectIndex]
-          : (p.context || []);
-        for (const context of contexts) {
-          if (!context || !context.selector || !context.box ||
-            anchorFitScore(rect, context.box) < MIN_ANCHOR_FIT) continue;
+        for (const entry of resolvedContexts[rectIndex]) {
+          const context = entry.context;
           try {
-            const matches = document.querySelectorAll(context.selector);
-            if (matches.length !== 1) continue;
-            const live = matches[0].getBoundingClientRect();
+            if (fixed && p.anchor !== 'viewport' && !entry.viewportAnchored) continue;
+            const live = entry.node.getBoundingClientRect();
             const capturedBox = fixed ? {
               x: context.box.x - capturedScroll.x,
               y: context.box.y - capturedScroll.y,
@@ -1396,7 +1540,7 @@
               w: live.width, h: live.height,
             };
             return reanchorRect(sourceRect, capturedBox, liveBox);
-          } catch (e) { /* try the next captured context */ }
+          } catch (e) { /* try the next resolved context */ }
         }
         return fixed ? {
           x: rect.x - capturedScroll.x,
@@ -1410,8 +1554,9 @@
 
   // → {box, fixed:true} in viewport coords for viewport-anchored points, else null
   function pinBox(p) {
-    if (p.anchor !== 'viewport') return null;
-    return { box: correctedPointRects(p).boxes[0], fixed: true };
+    const geometry = correctedPointRects(p);
+    if (!geometry.fixed) return null;
+    return { box: geometry.boxes[0], fixed: true };
   }
   function pointFromDraft(draft) {
     const existing = draft.editPoint ||
@@ -1457,39 +1602,37 @@
 
   // ===== pins layer ==========================================================
   // Unsent points → ink pins; review points → accent pins. Both live in a
-  // pointer-events:none layer (pins re-enable themselves) and are translated by
-  // the rAF engine - no per-scroll layout reads.
+  // pointer-events:none layer and resolve their live target geometry on every
+  // coalesced positioning frame.
   function renderPins() {
     pinLayer.textContent = '';
     S.pinEls = [];
     S.curPinEls = null;   // never flash a node that just got detached
     const page = logicalPath();
-    const addPin = (num, box, cls, onClick, title, fixed) => {
+    const addPin = (point, rectIndex, cls, onClick, title) => {
       const rect = el('div', 'wk-pin-rect ' + cls);
-      rect.style.width = box.w + 'px';
-      rect.style.height = box.h + 'px';
-      const pin = el('button', 'wk-pin ' + cls, String(num));
+      rect.style.visibility = 'hidden';
+      const pin = el('button', 'wk-pin ' + cls, String(point.number));
+      pin.style.visibility = 'hidden';
       pin.type = 'button';
       pin.title = title || '';
-      pin.setAttribute('aria-label', title || ('Feedback point ' + num));
+      pin.setAttribute('aria-label', title || ('Feedback point ' + point.number));
       pin.addEventListener('click', onClick);
       pinLayer.appendChild(rect);
       pinLayer.appendChild(pin);
-      S.pinEls.push({ node: rect, box, fixed: !!fixed });
-      S.pinEls.push({ node: pin, box: { x: box.x - 12, y: box.y - 12, w: 24, h: 24 }, fixed: !!fixed });
+      S.pinEls.push({ node: rect, point, rectIndex, kind: 'rect' });
+      S.pinEls.push({ node: pin, point, rectIndex, kind: 'pin' });
       return { rect, pin };
     };
     if (S.reviewing) {
       S.reviewList.forEach((p, i) => {
         if (p.page !== page) return;
         if (!pointSurfaceVisible(p)) return;
-        const geometry = correctedPointRects(p);
-        const boxes = geometry.boxes;
         const v = S.verdicts[p.id];
-        boxes.forEach((box, rectIndex) => {
-          const els = addPin(p.number, box,
+        (p.rects || [p.rect]).forEach((_box, rectIndex) => {
+          const els = addPin(p, rectIndex,
             'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
-            () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''), geometry.fixed);
+            () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''));
           if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
         });
       });
@@ -1503,20 +1646,18 @@
     const submittedIds = new Set(submitted.map((point) => point.id));
     for (const p of submitted) {
       if (p.page !== page || !pointSurfaceVisible(p)) continue;
-      const geometry = correctedPointRects(p);
-      geometry.boxes.forEach((box) => addPin(p.number, box, 'submitted', () => {
+      (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'submitted', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ pendingPoint: p });
-      }, 'added point ' + p.number + ' is saved and waiting - click to edit', geometry.fixed));
+      }, 'added point ' + p.number + ' is saved and waiting - click to edit'));
     }
     for (const p of S.points) {
       if (submittedIds.has(p.id) || p.page !== page) continue;
       if (!pointSurfaceVisible(p)) continue;
-      const geometry = correctedPointRects(p);
-      geometry.boxes.forEach((box) => addPin(p.number, box, 'queued', () => {
+      (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
-      }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit', geometry.fixed));
+      }, S.reviewing ? 'queued point ' + p.number + ' is saved and waiting - click to edit' : 'click to edit'));
     }
     repositionAll();
     updateHint();
@@ -1687,21 +1828,38 @@
     if (!SRClass) {
       btn.hidden = true;
       langSelect.hidden = true;
-      return { stop() {}, arm() {}, get on() { return false; } };
+      return {
+        stop() {}, arm() {}, finishAndWait() { return Promise.resolve(true); },
+        get on() { return false; }, get starting() { return false; },
+        get stopping() { return false; }, get uploading() { return false; },
+      };
     }
     let rec = null, userOn = false, netFails = 0, restartT = 0, interim = '';
     let languageRestart = false;
+    let finishCycle = null;
 
     function paint() {
       btn.classList.toggle('on', userOn);
       btn.classList.remove('armed');
       btn.setAttribute('aria-pressed', String(userOn));
     }
-    function failSynchronousStart(error) {
+    function settleFinish(activeRec, ready) {
+      if (!finishCycle || finishCycle.rec !== activeRec) return;
+      const cycle = finishCycle;
+      finishCycle = null;
+      clearTimeout(cycle.timer);
+      if (rec === activeRec) rec = null;
+      interim = '';
+      onText && onText('');
+      if (liveMic === self) liveMic = null;
+      cycle.resolve(ready);
+    }
+    function failSynchronousStart(error, activeRec) {
       userOn = false;
       languageRestart = false;
       clearTimeout(restartT);
-      rec = null;
+      if (!activeRec || rec === activeRec) rec = null;
+      if (activeRec) settleFinish(activeRec, false);
       interim = '';
       onText && onText('');
       if (liveMic === self) liveMic = null;
@@ -1712,18 +1870,22 @@
         { kind: 'error' });
     }
     function start() {
+      if (!userOn || finishCycle) return;
+      let activeRec;
       try {
-        rec = new SRClass();
+        activeRec = new SRClass();
+        rec = activeRec;
       } catch (error) {
         failSynchronousStart(error);
         return;
       }
-      rec.continuous = true;
-      rec.interimResults = true;
+      activeRec.continuous = true;
+      activeRec.interimResults = true;
       // The Web Speech API sends this BCP 47 tag to the recognition service
       // when the request starts. This is what makes the UI selector functional.
-      rec.lang = langSelect.value;
-      rec.onresult = (e) => {
+      activeRec.lang = langSelect.value;
+      activeRec.onresult = (e) => {
+        if (rec !== activeRec && (!finishCycle || finishCycle.rec !== activeRec)) return;
         let fin = '';
         interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -1737,7 +1899,10 @@
         }
         onText && onText(interim);
       };
-      rec.onerror = (e) => {
+      activeRec.onerror = (e) => {
+        const finishing = finishCycle && finishCycle.rec === activeRec;
+        if (rec !== activeRec && !finishing) return;
+        if (finishing && (e.error === 'aborted' || e.error === 'no-speech')) return;
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           userOn = false;
           paint();                // drop the red 'on' pulse - dictation is dead
@@ -1764,9 +1929,16 @@
           btn.title = 'Dictation stopped (' + e.error + ') - click to retry';
         }
       };
-      rec.onend = () => {
+      activeRec.onend = () => {
+        const wasCurrent = rec === activeRec;
+        if (wasCurrent) rec = null;
         interim = '';
         onText && onText('');
+        if (finishCycle && finishCycle.rec === activeRec) {
+          settleFinish(activeRec, true);
+          return;
+        }
+        if (!wasCurrent) return;
         if (languageRestart) {
           languageRestart = false;
           if (userOn) restartT = setTimeout(start, 0);
@@ -1774,33 +1946,61 @@
         }
         // Chrome ends recognition on every silence - quietly re-arm unless the
         // user toggled off or errors made restarting pointless.
-        if (userOn) restartT = setTimeout(() => { try { rec && start(); } catch (e) { /* ok */ } }, 250);
+        if (userOn) restartT = setTimeout(start, 250);
+        else if (liveMic === self) liveMic = null;
       };
       try {
-        rec.start();
+        activeRec.start();
       } catch (error) {
-        failSynchronousStart(error);
+        failSynchronousStart(error, activeRec);
       }
     }
     function stop() {
       userOn = false;
       languageRestart = false;
       clearTimeout(restartT);
-      try { rec && rec.stop(); } catch (e) { /* ok */ }
+      const activeRec = rec;
       rec = null;
+      try { activeRec && activeRec.stop(); } catch (e) { /* ok */ }
+      if (activeRec) settleFinish(activeRec, false);
       interim = '';
       onText && onText('');
       if (liveMic === self) liveMic = null;
       paint();
     }
+    function finishAndWait() {
+      if (finishCycle) return finishCycle.promise;
+      userOn = false;
+      languageRestart = false;
+      clearTimeout(restartT);
+      paint();
+      const activeRec = rec;
+      if (!activeRec) {
+        if (liveMic === self) liveMic = null;
+        return Promise.resolve(true);
+      }
+      let resolveCycle;
+      const promise = new Promise((resolve) => { resolveCycle = resolve; });
+      finishCycle = { rec: activeRec, promise, resolve: resolveCycle, timer: 0 };
+      // Final SpeechRecognition results are delivered before onend. Keep the
+      // exact instance alive until then so Done cannot snapshot stale text.
+      finishCycle.timer = setTimeout(() => settleFinish(activeRec, true), 3000);
+      try {
+        activeRec.stop();
+      } catch (error) {
+        settleFinish(activeRec, true);
+      }
+      return promise;
+    }
     btn.addEventListener('click', () => {
-      if (userOn) { stop(); return; }
+      if (userOn) { finishAndWait(); return; }
+      if (finishCycle) return;
       if (liveMic && liveMic !== self) liveMic.stop();   // one live recognition at a time
       liveMic = self;
       userOn = true;
       netFails = 0;
       btn.classList.remove('error');
-      btn.title = 'Dictating - click, or press ' + DICTATE_LABEL + ' outside a text field, to stop';
+      btn.title = 'Dictating - click to stop';
       paint();
       start();
       ta.focus();
@@ -1820,15 +2020,19 @@
     });
     const self = {
       stop,
+      finishAndWait,
       // after a reload we can't auto-start (browser gesture rule) - show the
       // armed look so the user knows one click resumes dictation
       arm() {
         if (!userOn) {
           btn.classList.add('armed');
-          btn.title = 'Click (or press ' + DICTATE_LABEL + ' outside a text field) to resume dictation';
+          btn.title = 'Click (or press ' + DICTATE_LABEL + ' in a fresh empty note) to resume dictation';
         }
       },
       get on() { return userOn; },
+      get starting() { return false; },
+      get stopping() { return !!finishCycle; },
+      get uploading() { return false; },
     };
     return self;
   }
@@ -2216,6 +2420,7 @@
       rects: editing ? (editing.rects || [editing.rect]).map((rect) => ({ ...rect })) : [init.rect],
       anchor: editing ? (editing.anchor || 'doc') : (init.anchor || 'doc'),
       text: editing ? editing.text : '',
+      textTouched: !!(editing && editing.text),
       caret: { start: (editing ? editing.text.length : 0), end: (editing ? editing.text.length : 0) },
       abc: editing && editing.abcRequest
         ? {
@@ -2233,6 +2438,11 @@
       editSource: pendingEditing ? 'pending' : (queuedEditing ? 'queued' : null),
       editPoint: pendingEditing ? { ...pendingEditing } : null,
     };
+    // Old saved drafts predate textTouched. A nonempty draft has necessarily
+    // moved past the pristine state, while a truly empty draft may still use
+    // Space once to begin dictation.
+    if (typeof draft.textTouched !== 'boolean') draft.textTouched = !!draft.text;
+    if (draft.text) draft.textTouched = true;
     let cardOwner = null;
     let doneBusy = false;
 
@@ -2334,7 +2544,17 @@
       ghost.style.height = ta.style.height;
       positionCard();
     }
-    ta.addEventListener('input', () => { autoGrow(); syncGhost(); saveDraft(); });
+    ta.addEventListener('beforeinput', () => {
+      draft.textTouched = true;
+      saveDraft();
+    });
+    ta.addEventListener('input', (event) => {
+      // beforeinput covers normal editing. This trusted-input fallback also
+      // covers browser actions that omit it without treating speech insertion
+      // (our synthetic input event) as manual typing.
+      if (event.isTrusted) draft.textTouched = true;
+      autoGrow(); syncGhost(); saveDraft();
+    });
     ta.addEventListener('scroll', () => { ghost.scrollTop = ta.scrollTop; });
     for (const evt of ['keyup', 'click', 'select']) {
       ta.addEventListener(evt, () => { syncGhost(); saveDraft(); });
@@ -2460,6 +2680,10 @@
         if (!voiceReady) return false;
       }
       if (mic.on || mic.starting || mic.stopping || mic.uploading) return false;
+      if (!cardOwner || S.card !== cardOwner || !node.isConnected) return false;
+      // SpeechRecognition can deliver its final result immediately before
+      // onend. Snapshot again after finishAndWait so that last phrase is saved.
+      draft.text = ta.value;
       if (!draft.text.trim() && !draft.voiceNote) { ta.focus(); node.classList.remove('attn'); void node.offsetWidth; node.classList.add('attn'); return false; }
       let pt = pointFromDraft(draft);
       if (pendingEditing) {
@@ -2550,12 +2774,6 @@
       doneBusy = true;
       doneBtn.disabled = true;
       try {
-        let voiceReady = true;
-        if (mic.on && mic.finishAndWait) voiceReady = await mic.finishAndWait();
-        else if ((mic.stopping || mic.uploading) && mic.finishAndWait) {
-          voiceReady = await mic.finishAndWait();
-        }
-        if (voiceReady === false || S.card !== cardOwner || !node.isConnected) return;
         if (!(await commit())) return;
       } finally {
         doneBusy = false;
@@ -2605,7 +2823,10 @@
     });
 
     // micBtn is exposed so the dictate/record hotkey drives the same handler.
-    cardOwner = { node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft };
+    cardOwner = {
+      node, ta, micBtn, draft, mic, saveDraft, commit, cancel: cancelDraft,
+      dictationHotkeyReady() { return ta.value === '' && !draft.textTouched; },
+    };
     S.card = cardOwner;
     paintAbc();
     autoGrow();
@@ -3203,6 +3424,63 @@
     for (let i = 0; i < a.length; i++) carryState(a[i], b[i]);
   }
 
+  // Point-scope BEFORE is an optimization, not a different definition of
+  // correctness. A detached DOM clone cannot reproduce runtime-owned pixels,
+  // generated trees, historical URL resolution, shadow DOM, pseudo-elements,
+  // or active animation. Refuse the optimization whenever either side is not a
+  // plain, structurally identical DOM subtree. The caller then loads the full
+  // historical page, where the original scripts and asset paths run normally.
+  const UNSAFE_SWAP_TAGS = new Set([
+    'CANVAS', 'VIDEO', 'AUDIO', 'IFRAME', 'OBJECT', 'EMBED', 'SCRIPT',
+    'IMG', 'PICTURE', 'SOURCE',
+  ]);
+  const UNSAFE_SWAP_URL_ATTRS = ['src', 'srcset', 'poster', 'data', 'xlink:href'];
+  function pointSwapUnsafeReason(live, incoming) {
+    if (!live || !incoming) return 'comparison container is missing';
+    const queue = [[live, incoming]];
+    while (queue.length) {
+      const [current, historical] = queue.pop();
+      if (current.tagName !== historical.tagName) return 'the page generates different markup at runtime';
+      if (UNSAFE_SWAP_TAGS.has(current.tagName)) return 'this element is rendered by the browser or page runtime';
+      if (current.tagName.includes('-') || historical.tagName.includes('-') ||
+        current.shadowRoot || historical.shadowRoot) return 'this element uses a runtime component';
+      for (const attr of UNSAFE_SWAP_URL_ATTRS) {
+        if (current.hasAttribute(attr) || historical.hasAttribute(attr)) {
+          return 'this element owns a versioned asset';
+        }
+      }
+      const currentHref = current.getAttribute('href');
+      const historicalHref = historical.getAttribute('href');
+      if ((currentHref && !currentHref.startsWith('#')) ||
+        (historicalHref && !historicalHref.startsWith('#'))) {
+        return 'this element owns a versioned asset';
+      }
+      if (/url\s*\(/i.test(current.getAttribute('style') || '') ||
+        /url\s*\(/i.test(historical.getAttribute('style') || '')) {
+        return 'this element owns a versioned asset';
+      }
+      try {
+        const style = getComputedStyle(current);
+        const before = getComputedStyle(current, '::before').content;
+        const after = getComputedStyle(current, '::after').content;
+        if ((style.animationName && style.animationName !== 'none') ||
+          !['none', 'normal', ''].includes(before) || !['none', 'normal', ''].includes(after) ||
+          [style.backgroundImage, style.maskImage, style.listStyleImage].some(
+            (value) => value && value !== 'none' && /url\s*\(/i.test(value)
+          )) return 'this element depends on runtime styling';
+      } catch (e) {
+        return 'this element runtime could not be verified';
+      }
+      const currentKids = current.children;
+      const historicalKids = historical.children;
+      if (currentKids.length !== historicalKids.length) {
+        return 'the page generates different markup at runtime';
+      }
+      for (let i = 0; i < currentKids.length; i++) queue.push([currentKids[i], historicalKids[i]]);
+    }
+    return '';
+  }
+
   // The doodles are drawn by a load-time pass over `.rough` groups; if the host
   // page exposes it as a callable, re-run it on the swapped subtree so line art
   // isn't left as raw un-warped geometry (or nothing at all).
@@ -3244,7 +3522,7 @@
     for (let i = 0; i < sourceKids.length; i++) copyComputedTree(sourceKids[i], targetKids[i]);
   }
 
-  async function styledBeforeNode(sel, fallback, context) {
+  async function styledBeforeNode(sel, fallback, context, live) {
     const frame = document.createElement('iframe');
     frame.setAttribute('aria-hidden', 'true');
     frame.setAttribute('sandbox', 'allow-same-origin');
@@ -3261,6 +3539,7 @@
       requireCurrentSwap(context);
       let source = null;
       try { source = frame.contentDocument.querySelector(sel); } catch (e) { /* fallback below */ }
+      if (source) carryState(live, source);
       const node = document.importNode(source || fallback, true);
       if (source) copyComputedTree(source, node);
       requireCurrentSwap(context);
@@ -3308,8 +3587,14 @@
     requireCurrentSwap(context);
     const t = resolveSwapTarget(pt, doc);
     if (!t) throw new Error('no container shared by both versions');
+    const unsafeReason = pointSwapUnsafeReason(t.live, t.incoming);
+    if (unsafeReason) {
+      const error = new Error(unsafeReason);
+      error.wkFullBefore = true;
+      throw error;
+    }
     const reanchor = anchorViewport(pt, context);
-    const node = await styledBeforeNode(t.sel, t.incoming, context);
+    const node = await styledBeforeNode(t.sel, t.incoming, context, t.live);
     requireCurrentSwap(context);
     if (!t.live.isConnected) throw new Error('live comparison container changed');
     carryState(t.live, node);
@@ -3389,8 +3674,10 @@
     }).catch((e) => {
       if (e.wkStaleSwap) return;
       restoreSwap();
-      toast('In-place BEFORE not possible here (' + e.message + ') - loading the snapshot page.',
-        { kind: 'warn' });
+      if (!e.wkFullBefore) {
+        toast('In-place BEFORE not possible here (' + e.message + ') - loading the snapshot page.',
+          { kind: 'warn' });
+      }
       navSide('before');
     }).finally(() => { swapBusy = false; drainSwapQueue(); });
   }
@@ -3805,6 +4092,11 @@
     ta.setAttribute('aria-label', 'Redo instructions for point ' + pt.number);
     ta.placeholder = 'e.g. closer, but make it half the size…';
     ta.value = (existing && existing.redoText) || '';
+    let textTouched = ta.value !== '';
+    ta.addEventListener('beforeinput', () => { textTouched = true; });
+    ta.addEventListener('input', (event) => {
+      if (event.isTrusted) textTouched = true;
+    });
     const originalRedoVoiceNote = (existing && existing.redoVoiceNote) || null;
     let redoVoiceNote = originalRedoVoiceNote;
     const existingRedoAbc = existing && existing.redoAbcRequest;
@@ -3920,7 +4212,10 @@
         if (S.mini === miniOwner && node.isConnected) save.disabled = false;
       }
     });
-    miniOwner = { node, ta, micBtn, target, close: cancelMini, cancel: cancelMini };
+    miniOwner = {
+      node, ta, micBtn, mic, target, close: cancelMini, cancel: cancelMini,
+      dictationHotkeyReady() { return ta.value === '' && !textTouched; },
+    };
     S.mini = miniOwner;
     ta.focus();
   }
@@ -3990,22 +4285,16 @@
       return;
     }
 
-    // Dictation toggle. The modifier guard is load-bearing: Cmd+V must stay
-    // paste, Ctrl+V too. Any editable field also wins unconditionally, so V is
-    // always typable in notes (even an empty note or while the mic is running).
-    // The nearby mic button remains the explicit start/stop control while typing.
+    // Dictation toggle. Space is a shortcut only for the active Webkit note
+    // while that note is pristine and empty. The first manual edit permanently
+    // gives Space back to normal typing, even if the user later deletes it all.
+    // Other editable fields always win, and modifiers keep browser shortcuts.
     if (e.code === HOTKEY_DICTATE && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-      if (editable) return;
-      if (liveMic && liveMic.on) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (liveMic.finishAndWait) liveMic.finishAndWait();
-        else liveMic.stop();
-        return;
-      }
       if (S.mode !== 'feedback') return;     // overlay hidden: don't dictate into an invisible card
       const holder = S.mini || S.card;      // the redo mini-input wins while open
       if (!holder || !holder.micBtn || holder.micBtn.hidden) return;
+      if (!holder.dictationHotkeyReady || !holder.dictationHotkeyReady()) return;
+      if (editable && t !== holder.ta) return;
       e.preventDefault();
       e.stopPropagation();
       holder.micBtn.click();                // reuse the button's own start/stop path

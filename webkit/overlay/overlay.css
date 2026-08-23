@@ -122,6 +122,9 @@ input:focus-visible {
   z-index: 2;
   overflow: hidden;
 }
+.wk-pins.wk-motion {
+  visibility: hidden;
+}
 .wk-pin-rect {
   position: absolute;
   left: 0;
@@ -163,7 +166,7 @@ input:focus-visible {
   cursor: pointer;
   pointer-events: auto;      /* the layer is inert; pins opt back in */
   box-shadow: var(--wk-shadow-soft);
-  transition: transform var(--wk-ease), background var(--wk-ease), color var(--wk-ease);
+  transition: background var(--wk-ease), color var(--wk-ease);
   will-change: transform;
 }
 .wk-pin:hover { z-index: 3; }

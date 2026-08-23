@@ -125,6 +125,12 @@ class PreviewServerTests(unittest.TestCase):
             "POST", "/__wk/transition", json.dumps(value).encode("utf-8"), headers
         )
 
+    def test_default_dictation_hotkey_is_space(self):
+        self.assertEqual(
+            self.module._HOTKEY_VALUES,
+            {"toggle": "KeyC", "dictate": "Space"},
+        )
+
     @staticmethod
     def batch(point_id="point-1"):
         return {
@@ -1905,7 +1911,7 @@ class PreviewServerTests(unittest.TestCase):
             'DATA-WK-MODE="after" DATA-WK-DICTATION-MODE="speech" '
             'DATA-WK-INTERACTION-MODE="browse-default" '
             'DATA-WK-BEFORE-PREFIX="" DATA-WK-HOTKEY-TOGGLE="KeyC" '
-            'DATA-WK-HOTKEY-DICTATE="KeyV"></sCrIpT></BODY></HTML>'
+            'DATA-WK-HOTKEY-DICTATE="Space"></sCrIpT></BODY></HTML>'
         ).format(
             nonce="a" * 32,
             color=self.module.SLUG,

@@ -471,23 +471,99 @@
     if (!lower.startsWith('data-')) return false;
     const stateWords = new Set([
       'state', 'status', 'step', 'stage', 'slide', 'index', 'current',
-      'active', 'view', 'screen', 'mode',
+      'active', 'view', 'screen', 'scene', 'mode',
     ]);
     return lower.slice(5).split('-').some((part) => stateWords.has(part));
   }
 
-  function surfaceStateValuesMatch(signal, readAttribute, hasClass) {
-    if (!signal || typeof readAttribute !== 'function' || typeof hasClass !== 'function') return false;
-    try {
-      for (const [name, value] of Object.entries(signal.attrs || {})) {
-        if (readAttribute(name) !== value) return false;
-      }
-      return (signal.classes || []).every((token) =>
-        typeof token === 'string' && token.length > 0 && !/[\t\n\f\r ]/.test(token) && hasClass(token)
-      );
-    } catch (error) {
-      return false;
+  function surfaceStateAttributeCapturable(name, value) {
+    if (!viewportStateAttributeName(name)) return false;
+    const lower = String(name).toLowerCase();
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (lower === 'aria-current') return !!normalized && normalized !== 'false';
+    if (lower === 'aria-hidden') return normalized === 'false';
+    if (/^aria-(?:selected|expanded)$/.test(lower)) return normalized === 'true';
+    if (lower === 'aria-pressed') return normalized === 'true' || normalized === 'mixed';
+    return true;
+  }
+
+  function surfaceStateClassCapturable(token) {
+    return typeof token === 'string' && token.length <= 128 &&
+      /^(?:active|current|selected|open(?:ed)?|visible|shown|expanded|in-view|is-(?:active|current|selected|open|visible|shown|expanded|on)|has-(?:active|current|selection|open))$/i
+        .test(token);
+  }
+
+  function surfaceStateMatchStatus(signal, readAttribute, hasClass) {
+    if (!signal || typeof readAttribute !== 'function' || typeof hasClass !== 'function') {
+      return 'unknown';
     }
+    try {
+      let matched = false;
+      let unresolved = false;
+      for (const [name, value] of Object.entries(signal.attrs || {})) {
+        // Negative ARIA states describe an inactive or hidden descendant, not
+        // the visible scene that owns a mark. Older captures could persist
+        // these values and then disappear as soon as an entrance animation
+        // completed, so treat them as non-evidence in both old and new points.
+        if (!surfaceStateAttributeCapturable(name, value)) {
+          continue;
+        }
+        const current = readAttribute(name);
+        // A removed attribute is ambiguous after an agent edit. A different
+        // value on a still-resolved owner is a definite visual-state change.
+        if (current === null || current === undefined) {
+          unresolved = true;
+          continue;
+        }
+        if (current !== value) return 'mismatch';
+        matched = true;
+      }
+      for (const token of (signal.classes || [])) {
+        if (typeof token !== 'string' || !token || /[\t\n\f\r ]/.test(token)) return 'mismatch';
+        if (!surfaceStateClassCapturable(token)) {
+          continue;
+        }
+        if (!hasClass(token)) return 'mismatch';
+        matched = true;
+      }
+      return unresolved ? 'unknown' : (matched ? 'match' : 'unknown');
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  function surfaceStateValuesMatch(signal, readAttribute, hasClass) {
+    return surfaceStateMatchStatus(signal, readAttribute, hasClass) === 'match';
+  }
+
+  function surfaceStateSignalHasActivation(signal) {
+    if (!signal) return false;
+    if ((signal.classes || []).some(surfaceStateClassCapturable)) return true;
+    for (const [name, value] of Object.entries(signal.attrs || {})) {
+      const lower = String(name).toLowerCase();
+      const normalized = String(value).trim().toLowerCase();
+      if (lower.startsWith('aria-') && surfaceStateAttributeCapturable(lower, normalized)) {
+        return true;
+      }
+      if (/^data-(?:active|current|selected|visible|open)$/.test(lower) &&
+        /^(?:1|true|active|current|selected|visible|open|on)$/.test(normalized)) return true;
+    }
+    return false;
+  }
+
+  function surfaceStateSignalHasEvidence(signal) {
+    if (!signal) return false;
+    if ((signal.classes || []).some(surfaceStateClassCapturable)) return true;
+    return Object.entries(signal.attrs || {}).some(([name, value]) =>
+      surfaceStateAttributeCapturable(name, value)
+    );
+  }
+
+  function aggregateSurfaceStateStatus(statuses) {
+    const list = Array.isArray(statuses) ? statuses : [];
+    if (list.includes('mismatch')) return 'mismatch';
+    if (list.includes('unknown')) return 'unknown';
+    return list.length && list.every((status) => status === 'match') ? 'match' : 'unknown';
   }
 
   function effectiveStyleChainVisible(styles) {
@@ -526,15 +602,74 @@
     return false;
   }
 
+  function surfaceCandidateSpatialScore(rect, box) {
+    const coverage = anchorCoverageScore(rect, box);
+    if (coverage < 0.5) return 0;
+    const rectArea = Number(rect?.w) * Number(rect?.h);
+    const boxArea = Number(box?.w) * Number(box?.h);
+    if (!(rectArea > 0) || !(boxArea > 0)) return 0;
+    // A full-screen layer can cover the mark perfectly while being a terrible
+    // semantic target. Reward coverage, but prefer the tightest visual surface.
+    return coverage / Math.sqrt(Math.max(1, boxArea / rectArea));
+  }
+
   function preferredSurfaceCandidate(candidates) {
     const list = Array.isArray(candidates) ? candidates : [];
-    const anchored = list.find((candidate) =>
-      ['fixed', 'sticky'].includes(candidate?.anchor?.mode)
-    );
-    const stateful = list.find((candidate) =>
-      Array.isArray(candidate?.stateChain) && candidate.stateChain.length > 0
-    );
-    return anchored || stateful || list[0] || null;
+    const primary = list[0] || null;
+    if (!primary) return null;
+    const score = (candidate) => {
+      const value = Number(candidate?.spatialScore);
+      return Number.isFinite(value) ? value : 1;
+    };
+    const minimumRelatedScore = Math.max(0.015, score(primary) * 0.65);
+    const lifecycle = list.filter((candidate) => {
+      const ownsState = Array.isArray(candidate?.stateChain) && candidate.stateChain.length > 0;
+      const ownsAnchor = ['fixed', 'sticky'].includes(candidate?.anchor?.mode);
+      const isVisualSurface = ['canvas', 'video', 'svg'].includes(candidate?.visualKind);
+      if (candidate?.inactiveBoundary === true) return false;
+      if (!ownsState && !ownsAnchor && !isVisualSurface) return false;
+      // A pointer-transparent icon nested in an ordinary control is strongly
+      // related in the DOM but does not own a rectangle drawn over the control.
+      // Stateless visual surfaces must materially cover the captured mark.
+      if (isVisualSurface && !ownsState && !ownsAnchor && score(candidate) <= 0) return false;
+      if (candidate?.stronglyRelatedToPrimary === true) return true;
+      return candidate?.relatedToPrimary === true && score(candidate) >= minimumRelatedScore;
+    }).sort((left, right) => {
+      // Positive state ownership is stronger evidence than proximity alone.
+      // Without this ordering, a pre-rendered inactive sibling canvas can win
+      // simply because its box happens to fit the mark more tightly.
+      const byActivation = Number(right?.hasPositiveActivation === true) -
+        Number(left?.hasPositiveActivation === true);
+      if (byActivation) return byActivation;
+      const byViewportOwnership = Number(['fixed', 'sticky'].includes(right?.anchor?.mode)) -
+        Number(['fixed', 'sticky'].includes(left?.anchor?.mode));
+      if (byViewportOwnership) return byViewportOwnership;
+      const byStateOwnership = Number((right?.stateChain || []).length > 0) -
+        Number((left?.stateChain || []).length > 0);
+      if (byStateOwnership) return byStateOwnership;
+      const byStrongRelation = Number(right?.stronglyRelatedToPrimary === true) -
+        Number(left?.stronglyRelatedToPrimary === true);
+      if (byStrongRelation) return byStrongRelation;
+      const byScore = score(right) - score(left);
+      if (byScore) return byScore;
+      return 0;
+    });
+    return lifecycle[0] || primary;
+  }
+
+  function rankedCaptureEntries(entries, limit = 12, visualReserve = 4) {
+    const max = Number.isInteger(limit) && limit > 0 ? limit : 12;
+    const reserve = Number.isInteger(visualReserve) && visualReserve > 0 ? visualReserve : 0;
+    const rank = (left, right) =>
+      Number(right?.[1]?.hits || 0) - Number(left?.[1]?.hits || 0) ||
+      Number(right?.[1]?.score || 0) - Number(left?.[1]?.score || 0) ||
+      Number(left?.[1]?.order || 0) - Number(right?.[1]?.order || 0);
+    const hits = (entries || []).filter((entry) => entry?.[1]?.sourcePriority === 0).sort(rank);
+    const visuals = (entries || []).filter((entry) => entry?.[1]?.sourcePriority !== 0).sort(rank);
+    if (!hits.length) return visuals.slice(0, max);
+    const reservedVisuals = Math.min(reserve, visuals.length, Math.max(0, max - 1));
+    const selectedHits = hits.slice(0, max - reservedVisuals);
+    return selectedHits.concat(visuals.slice(0, max - selectedHits.length));
   }
 
   function pointAnchorMode(liveModes, capturedModes, legacyViewportAnchor) {
@@ -546,6 +681,62 @@
 
   function rectUsesLegacyViewportAnchor(pointAnchor, surface) {
     return pointAnchor === 'viewport' && !surface;
+  }
+
+  function surfaceUsesSeparatedGeometry(surface) {
+    return !!surface && Object.prototype.hasOwnProperty.call(surface, 'geometrySelector');
+  }
+
+  function resolvedRectAnchorMode(liveModes, capturedSurface, pointAnchor) {
+    if (capturedSurface) {
+      const capturedMode = capturedSurface?.anchor?.mode;
+      if (['fixed', 'sticky'].includes(capturedMode)) return capturedMode;
+      // v0.8.20 surfaces explicitly persist their geometry role, so a null
+      // anchor is authoritative. Older surfaces did not have that role and
+      // still need the live sticky recovery used when they were captured.
+      if (surfaceUsesSeparatedGeometry(capturedSurface)) return 'doc';
+      return pointAnchorMode(
+        liveModes, [], rectUsesLegacyViewportAnchor(pointAnchor, null)
+      );
+    }
+    return pointAnchorMode([], liveModes, rectUsesLegacyViewportAnchor(pointAnchor, null));
+  }
+
+  function firstUnderlayAnchorMode(nodes, isIgnored, isAnchored) {
+    if (typeof isIgnored !== 'function' || typeof isAnchored !== 'function') return 'doc';
+    for (const node of (nodes || [])) {
+      if (isIgnored(node)) continue;
+      return isAnchored(node) ? 'viewport' : 'doc';
+    }
+    return 'doc';
+  }
+
+  function surfaceGeometryEntryAllowed(entry, surface, anchorMode, withinAnchor) {
+    if (!surface) return true;
+    const selector = entry?.context?.selector;
+    const geometrySelector = surface.geometrySelector || surface.targetSelector;
+    if (anchorMode === 'doc') {
+      return selector === geometrySelector || selector === surface.targetSelector ||
+        !entry?.viewportAnchorMode;
+    }
+    return withinAnchor === true;
+  }
+
+  function surfaceGeometryEntryPriority(entry, surface) {
+    const selector = entry?.context?.selector;
+    if (selector === (surface?.geometrySelector || surface?.targetSelector)) return 0;
+    if (selector === surface?.targetSelector) return 1;
+    if (selector === surface?.anchor?.selector) return 2;
+    return 3;
+  }
+
+  function capturedSurfaceGeometrySelector(primary, selected, selectedAnchor) {
+    if (!primary || !selected) return null;
+    return !selectedAnchor && selected !== primary &&
+      ['canvas', 'video', 'svg'].includes(selected.visualKind) &&
+      Number(selected.spatialScore) > 0
+      ? selected.targetSelector
+      : primary.targetSelector;
   }
 
   function persistedRectForDraft(displayRect, metadataRect, persistedRect) {
@@ -568,7 +759,8 @@
   ) {
     if (!visible) return false;
     const nearCapture = [currentScrollY, capturedScrollY, viewportHeight].every(Number.isFinite) &&
-      Math.abs(currentScrollY - capturedScrollY) <= Math.max(24, viewportHeight * 0.05);
+      Math.abs(currentScrollY - capturedScrollY) <=
+        Math.max(64, Math.min(240, viewportHeight * 0.2));
     if (hasStateSignals) return stateMatches || (!!reviewing && nearCapture);
     if (anchorMode === 'sticky') return nearCapture;
     return true;
@@ -1295,6 +1487,7 @@
       // overlay hidden = the page is the user's again: its own abc switcher is
       // now the only control there is, so un-park it
       restorePageAbc();
+      refreshSurfaceObservation();
     }
     schedulePoll(true);
   }
@@ -1400,9 +1593,18 @@
     }, 80);
   }
 
+  function scheduleSurfacePosition() {
+    // Surface state and transforms can change continuously on animation-heavy
+    // pages. Keep geometry live without putting every marker into the global
+    // scroll-hiding state. schedulePos coalesces any amount of churn to one rAF.
+    if (S.mode !== 'feedback' || !S.pinEls.length) return;
+    schedulePos();
+  }
+
   let surfaceObserver = null;
   let surfaceRebindRaf = 0;
   const trackedSurfaceNodes = new Set();
+  const trackedSurfaceAttributeSets = new Map();
   const surfaceRemountParents = new Set();
   function rememberSurfaceRemountParent(node) {
     if (!node || !node.isConnected || isOverlayNode(node) ||
@@ -1414,7 +1616,7 @@
     surfaceRebindRaf = requestAnimationFrame(() => {
       surfaceRebindRaf = 0;
       refreshSurfaceObservation();
-      notePinMotion();
+      scheduleSurfacePosition();
     });
   }
   function nodeAffectsTrackedSurface(changedNode) {
@@ -1433,27 +1635,44 @@
       cancelAnimationFrame(surfaceRebindRaf);
       surfaceRebindRaf = 0;
     }
+    if (surfaceObserver) surfaceObserver.disconnect();
+    if (S.mode !== 'feedback') {
+      trackedSurfaceNodes.clear();
+      trackedSurfaceAttributeSets.clear();
+      surfaceRemountParents.clear();
+      return;
+    }
     const connectedTrackedNodes = [...trackedSurfaceNodes].filter((node) =>
       node.isConnected && !isOverlayNode(node)
     );
     trackedSurfaceNodes.clear();
-    if (surfaceObserver) surfaceObserver.disconnect();
+    trackedSurfaceAttributeSets.clear();
     if (!S.pinEls.length) {
       surfaceRemountParents.clear();
       return;
     }
     let unresolvedSurface = false;
 
-    const addTrackedNode = (node) => {
+    const addTrackedNode = (node, attributeNames = []) => {
       if (!node || node === document.body || node === document.documentElement ||
         isOverlayNode(node)) return false;
       trackedSurfaceNodes.add(node);
+      let attributes = trackedSurfaceAttributeSets.get(node);
+      if (!attributes) {
+        attributes = new Set(['class', 'hidden', 'open']);
+        trackedSurfaceAttributeSets.set(node, attributes);
+      }
+      for (const name of attributeNames) {
+        if (typeof name === 'string' && name.length <= 128) attributes.add(name);
+      }
       return true;
     };
     const addTargetChain = (target) => {
       let depth = 0;
-      for (let current = target; current && depth < 48; current = current.parentElement) {
-        if (!addTrackedNode(current)) break;
+      for (let current = target; current && depth < 24; current = current.parentElement) {
+        // Inline transforms are frequently rewritten every animation frame.
+        // Observe style only on exact role owners, never on every ancestor.
+        if (!addTrackedNode(current, depth === 0 ? ['style'] : [])) break;
         depth += 1;
       }
     };
@@ -1480,8 +1699,15 @@
             break;
           }
         }
+        const anchorTarget = uniqueElement(surface.anchor?.selector);
+        if (surface.anchor && !anchorTarget) unresolvedSurface = true;
+        if (anchorTarget) addTrackedNode(anchorTarget, ['style']);
+        const geometryTarget = uniqueElement(surface.geometrySelector);
+        if (geometryTarget) addTrackedNode(geometryTarget, ['style']);
         for (const signal of (surface.stateChain || [])) {
-          addTrackedNode(uniqueElement(signal.selector));
+          addTrackedNode(
+            uniqueElement(signal.selector), ['style', ...Object.keys(signal.attrs || {})]
+          );
         }
       } else {
         const contexts = Array.isArray(point.rectContexts) &&
@@ -1514,7 +1740,8 @@
 
     if (!surfaceObserver) return;
     for (const node of trackedSurfaceNodes) {
-      surfaceObserver.observe(node, { attributes: true });
+      const attributeFilter = [...(trackedSurfaceAttributeSets.get(node) || [])];
+      surfaceObserver.observe(node, { attributes: true, attributeFilter });
     }
   }
   document.addEventListener('wheel', notePinMotion, { capture: true, passive: true });
@@ -1527,13 +1754,22 @@
     window.visualViewport.addEventListener('resize', notePinMotion, { passive: true });
   }
   document.addEventListener('transitionend', (event) => {
-    if (nodeAffectsTrackedSurface(event.target)) notePinMotion();
+    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
+  }, true);
+  document.addEventListener('transitioncancel', (event) => {
+    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
+  }, true);
+  document.addEventListener('animationend', (event) => {
+    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
+  }, true);
+  document.addEventListener('animationcancel', (event) => {
+    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
   }, true);
   if (typeof MutationObserver === 'function') {
     surfaceObserver = new MutationObserver((records) => {
       if (records.some((record) => surfaceMutationRelevant(
         record.attributeName || '', trackedSurfaceNodes.has(record.target)
-      ))) notePinMotion();
+      ))) scheduleSurfacePosition();
     });
   }
 
@@ -1556,7 +1792,23 @@
     } catch (e) { return null; }
   }
   const STATE_CLASS = /^(?:active|inactive|open(?:ed)?|closed|hover|focus(?:ed)?|visible|hidden|show(?:n|ing)?|hide|selected|current|expanded|collapsed|animat|enter|leav|loading|loaded|in-view|is-|has-|js-)/;
-  const SURFACE_STATE_CLASS = /^(?:active|inactive|current|selected|open(?:ed)?|closed|visible|hidden|shown|expanded|collapsed|in-view|is-(?:active|inactive|current|selected|open|closed|visible|hidden|shown|off|on)|has-(?:active|current|selection|open))$/i;
+  const SURFACE_ACTIVE_SELECTOR = [
+    '[aria-current]:not([aria-current="false"])', '[aria-selected="true"]',
+    '[aria-expanded="true"]', '[aria-pressed="true"]', '[aria-pressed="mixed"]',
+    '[aria-hidden="false"]',
+    '.active', '.current', '.selected', '.open', '.opened', '.visible', '.shown',
+    '.expanded', '.in-view', '.is-active', '.is-current', '.is-selected', '.is-open',
+    '.is-visible', '.is-expanded', '.is-on', '.has-active', '.has-current',
+    '.has-selection', '.has-open',
+  ].join(',');
+  const SURFACE_VISUAL_SELECTOR = [
+    '[data-state]', '[data-status]', '[data-step]', '[data-stage]', '[data-slide]',
+    '[data-index]', '[data-current]', '[data-active]', '[data-view]', '[data-screen]',
+    '[data-scene]', '[data-mode]',
+  ].join(',');
+  const SURFACE_VISUAL_SELECTORS = [
+    SURFACE_ACTIVE_SELECTOR, SURFACE_VISUAL_SELECTOR, 'canvas,video,svg',
+  ];
   function stableClasses(elm) {
     const out = [];
     for (const c of elm.classList) {
@@ -1647,17 +1899,43 @@
     } catch (e) { return null; }
   }
 
+  function surfaceNodesRelated(first, second) {
+    if (!first || !second) return false;
+    if (first === second || first.contains(second) || second.contains(first)) return true;
+    const genericScope = /^(?:app|root|main|page|content|container|wrapper|layout|site)$/i;
+    const meaningfulScope = (node) => {
+      const id = usableId(node);
+      if (id && !genericScope.test(id)) return true;
+      return stableClasses(node).some((token) => !genericScope.test(token));
+    };
+    const ancestors = new Map();
+    let depth = 1;
+    for (let current = first.parentElement; current && depth <= 6; current = current.parentElement) {
+      if (current === document.body || current === document.documentElement) break;
+      ancestors.set(current, depth);
+      depth += 1;
+    }
+    depth = 1;
+    for (let current = second.parentElement; current && depth <= 6; current = current.parentElement) {
+      if (current === document.body || current === document.documentElement) break;
+      const firstDepth = ancestors.get(current);
+      if (firstDepth && firstDepth + depth <= 6 && meaningfulScope(current)) return true;
+      depth += 1;
+    }
+    return false;
+  }
+
   function surfaceStateSignal(node) {
     if (!node || !node.attributes) return null;
     const attrs = {};
     for (const attr of node.attributes) {
-      if (!viewportStateAttributeName(attr.name)) continue;
+      if (!surfaceStateAttributeCapturable(attr.name, attr.value)) continue;
       attrs[attr.name] = String(attr.value).slice(0, 256);
       if (Object.keys(attrs).length >= 8) break;
     }
     const classes = node.classList
       ? [...node.classList].filter((token) =>
-        token.length <= 128 && SURFACE_STATE_CLASS.test(token)
+        surfaceStateClassCapturable(token)
       ).sort().slice(0, 8)
       : [];
     if (!Object.keys(attrs).length && !classes.length) return null;
@@ -1665,7 +1943,24 @@
     return selector ? { selector, attrs, classes } : null;
   }
 
-  function captureRectSurface(contexts) {
+  function surfaceHasInactiveBoundary(node) {
+    let depth = 0;
+    for (let current = node;
+      current && current !== document.body && current !== document.documentElement && depth < 12;
+      current = current.parentElement, depth += 1) {
+      const attr = (name) => String(current.getAttribute(name) || '').trim().toLowerCase();
+      // aria-hidden only removes a node from the accessibility tree. Decorative
+      // SVG and canvas scenes are often painted while aria-hidden remains true.
+      if (attr('aria-selected') === 'false') return true;
+      if ([...current.classList].some((token) =>
+        /^(?:inactive|hidden|closed|collapsed|is-(?:inactive|hidden|closed|collapsed|off))$/i
+          .test(token)
+      )) return true;
+    }
+    return false;
+  }
+
+  function captureRectSurface(contexts, rect) {
     const candidates = [];
     const seenTargets = new Set();
     for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12)) {
@@ -1676,23 +1971,52 @@
       if (!targetSelector) continue;
       const anchor = elementViewportAnchorInfo(target);
       const stateChain = [];
-      for (let current = target; current; current = current.parentElement) {
+      let depth = 0;
+      for (let current = target; current && depth < 12; current = current.parentElement) {
         const signal = surfaceStateSignal(current);
-        if (signal) stateChain.push(signal);
-        if (!anchor || current === anchor.node || stateChain.length >= 8) break;
+        if (signal) {
+          stateChain.push(signal);
+          if (stateChain.length >= 3) break;
+        }
+        if (anchor && current === anchor.node) break;
+        if (!anchor && depth >= 5) break;
+        depth += 1;
       }
       const anchorSelector = anchor ? buildSelector(anchor.node) : null;
+      const hasPositiveActivation = stateChain.some(surfaceStateSignalHasActivation);
       candidates.push({
+        node: target,
+        anchorNode: anchor?.node || null,
         targetSelector,
+        visualKind: String(context?.tag || '').toLowerCase(),
+        // A positive live state on the candidate wins over weak inactive hints
+        // inherited from a custom widget ancestor.
+        inactiveBoundary: !hasPositiveActivation && surfaceHasInactiveBoundary(target),
+        hasPositiveActivation,
         anchor: anchor && anchorSelector ? { selector: anchorSelector, mode: anchor.mode } : null,
         stateChain,
+        spatialScore: surfaceCandidateSpatialScore(rect, context?.box),
       });
+    }
+    const primary = candidates[0] || null;
+    if (!primary) return null;
+    for (const candidate of candidates) {
+      candidate.relatedToPrimary = surfaceNodesRelated(primary.node, candidate.node);
+      candidate.stronglyRelatedToPrimary = primary.node === candidate.node ||
+        primary.node.contains(candidate.node) || candidate.node.contains(primary.node);
     }
     const selected = preferredSurfaceCandidate(candidates);
     if (!selected) return null;
+    let selectedAnchor = selected.anchor;
+    if (!selectedAnchor && primary.anchor && primary.anchorNode &&
+      primary.anchorNode.contains(selected.node)) selectedAnchor = primary.anchor;
     return {
+      // Geometry, lifecycle, and viewport anchoring have separate owners. This
+      // prevents an unrelated fullscreen sticky layer from hijacking a normal
+      // document rectangle while still tracking pointer-transparent scenes.
+      geometrySelector: capturedSurfaceGeometrySelector(primary, selected, selectedAnchor),
       targetSelector: selected.targetSelector,
-      anchor: selected.anchor,
+      anchor: selectedAnchor,
       stateChain: selected.stateChain,
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
     };
@@ -1706,15 +2030,15 @@
       ? draft.rectMetadataRects
       : [];
     draft.rectContexts[rectIndex] = contexts;
-    draft.rectSurfaces[rectIndex] = captureRectSurface(contexts);
+    draft.rectSurfaces[rectIndex] = captureRectSurface(contexts, rect);
     draft.rectMetadataRects[rectIndex] = { ...rect };
     if (Array.isArray(draft.rectPersistedRects)) draft.rectPersistedRects[rectIndex] = null;
   }
 
-  function surfaceSignalMatches(signal) {
+  function surfaceSignalMatchStatus(signal) {
     const node = signal && uniqueElement(signal.selector);
-    if (!node) return false;
-    return surfaceStateValuesMatch(
+    if (!node) return 'unknown';
+    return surfaceStateMatchStatus(
       signal,
       (name) => node.getAttribute(name),
       (token) => node.classList.contains(token)
@@ -1732,34 +2056,63 @@
     return effectiveStyleChainVisible(styles);
   }
 
-  function unresolvedSurfaceActive(point, surface) {
+  function currentReviewPointMatches(point) {
+    return !!point && S.reviewing && S.reviewList[S.cursor]?.id === point.id;
+  }
+
+  function unresolvedSurfaceActive(point, surface, reviewing = currentReviewPointMatches(point)) {
     const capturedScrollY = Number(surface?.scroll?.y ?? point.scroll?.y);
     const persistedMode = surface?.anchor?.mode || point.anchor || 'doc';
     const fallbackMode = ['fixed', 'sticky', 'viewport'].includes(persistedMode)
       ? 'sticky'
       : 'doc';
     return visualSurfaceActive(
-      true, false, false, fallbackMode, S.reviewing,
+      true, false, false, fallbackMode, reviewing,
       scrollY, capturedScrollY, innerHeight
     );
   }
 
   function rectSurfaceActive(point, rectIndex) {
+    const reviewFallback = currentReviewPointMatches(point);
     const surface = Array.isArray(point.rectSurfaces) ? point.rectSurfaces[rectIndex] : null;
     if (surface) {
+      const separatedGeometry = surfaceUsesSeparatedGeometry(surface);
       const target = uniqueElement(surface.targetSelector);
-      if (!target) return unresolvedSurfaceActive(point, surface);
+      if (!target) {
+        if (!separatedGeometry) return unresolvedSurfaceActive(point, surface, reviewFallback);
+        return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;
+      }
       const visible = effectivelyVisible(target);
       const stateChain = Array.isArray(surface.stateChain) ? surface.stateChain : [];
-      const hasStateSignals = stateChain.length > 0;
-      const stateMatches = hasStateSignals && stateChain.every(surfaceSignalMatches);
-      const anchorMode = surface.anchor?.mode || elementViewportAnchorMode(target) || 'doc';
+      // Old points may contain only negative ARIA values or inactive class
+      // names. They describe a descendant's incidental state, not lifecycle
+      // evidence. Exclude them from both matching and signal-count decisions.
+      const stateSignals = stateChain.filter(surfaceStateSignalHasEvidence);
+      const stateStatuses = stateSignals.map(surfaceSignalMatchStatus);
+      const stateStatus = aggregateSurfaceStateStatus(stateStatuses);
+      const hasStateSignals = stateSignals.length > 0;
+      const stateMatches = stateStatus === 'match';
+      let anchorMode = elementViewportAnchorMode(target) || 'doc';
+      if (surface.anchor) {
+        if (!separatedGeometry) {
+          anchorMode = surface.anchor.mode;
+        } else {
+          const anchor = uniqueElement(surface.anchor.selector);
+          const anchorValid = !!anchor && effectivelyVisible(anchor) &&
+            (anchor === target || anchor.contains(target)) &&
+            elementViewportAnchorMode(anchor) === surface.anchor.mode;
+          if (!anchorValid) {
+            return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;
+          }
+          anchorMode = surface.anchor.mode;
+        }
+      }
       const capturedScrollY = Number(surface.scroll?.y ?? point.scroll?.y);
       // The agent may intentionally rename a state while implementing the
       // point. At the exact captured scroll moment, review trusts the live
       // AFTER/BEFORE surface instead of hiding a correct changed result.
       return visualSurfaceActive(
-        visible, hasStateSignals, stateMatches, anchorMode, S.reviewing,
+        visible, hasStateSignals, stateMatches, anchorMode, reviewFallback,
         scrollY, capturedScrollY, innerHeight
       );
     }
@@ -1777,7 +2130,7 @@
     const anchorMode = elementViewportAnchorMode(target) ||
       (point.anchor === 'viewport' ? 'fixed' : 'doc');
     return visualSurfaceActive(
-      effectivelyVisible(target), false, false, anchorMode, S.reviewing,
+      effectivelyVisible(target), false, false, anchorMode, reviewFallback,
       scrollY, Number(point.scroll?.y), innerHeight
     );
   }
@@ -1788,30 +2141,65 @@
     const vx = rectDoc.x - scrollX, vy = rectDoc.y - scrollY;
     const viewport = { w: innerWidth, h: innerHeight };
     const rankedElements = new Map();
-    function consider(elm) {
-      if (!elm || rankedElements.has(elm) || SKIP_TAGS.has(elm.tagName) || isOverlayNode(elm)) return;
+    function consider(elm, requireEffectiveVisibility = false, sourcePriority = 0) {
+      if (!elm || SKIP_TAGS.has(elm.tagName) || isOverlayNode(elm)) return;
+      const existing = rankedElements.get(elm);
+      if (existing) {
+        if (sourcePriority === 0) existing.hits += 1;
+        return;
+      }
       const b = elm.getBoundingClientRect();
       const box = { x: b.left + scrollX, y: b.top + scrollY, w: b.width, h: b.height };
       const score = anchorContextScore(rectDoc, box, viewport);
-      if (score > 0) rankedElements.set(elm, { box, score, order: rankedElements.size });
+      if (score <= 0 || (requireEffectiveVisibility && !effectivelyVisible(elm))) return;
+      rankedElements.set(elm, {
+        box, score, sourcePriority, hits: sourcePriority === 0 ? 1 : 0,
+        order: rankedElements.size,
+      });
     }
     // 1) elementsFromPoint over a 3x3 grid. The overlay is temporarily hidden
     //    because its armed draw surface otherwise masks the page under the mark.
-    for (const fx of [0.12, 0.5, 0.88]) {
-      for (const fy of [0.12, 0.5, 0.88]) {
+    for (const fx of [0.5, 0.12, 0.88]) {
+      for (const fy of [0.5, 0.12, 0.88]) {
         const px = vx + rectDoc.w * fx, py = vy + rectDoc.h * fy;
         if (px < 0 || py < 0 || px >= innerWidth || py >= innerHeight) continue;
-        for (const elm of underlayElementsFromPoint(px, py)) consider(elm);
+        for (const elm of underlayElementsFromPoint(px, py)) consider(elm, true, 0);
       }
     }
-    // 2) bbox scan fallback - the rect may sit partly outside the viewport
+    // 2) Pointer-events:none is common for canvas, SVG, and decorative sticky
+    //    scenes, so hit testing can see only a generic wrapper behind the real
+    //    visual state. Add a bounded set of visible state-bearing surfaces even
+    //    when ordinary hit candidates exist. This work runs only when a mark is
+    //    captured, never in the animation loop.
+    if (document.body) {
+      try {
+        // Explicit active markers go first, so thousands of inert indexed rows
+        // cannot crowd out the one currently visible pointerless scene.
+        for (const selector of SURFACE_VISUAL_SELECTORS) {
+          let scanned = 0;
+          for (const elm of document.body.querySelectorAll(selector)) {
+            if (scanned >= 2048) break;
+            scanned += 1;
+            consider(elm, true, 1);
+          }
+        }
+      } catch (e) { /* an older selector engine keeps the hit-test candidates */ }
+    }
+    // 3) bbox scan fallback - the rect may sit partly outside the viewport
     //    where elementsFromPoint can't see.
     if (rankedElements.size === 0 && document.body) {
-      for (const elm of document.body.querySelectorAll('*')) consider(elm);
+      let scanned = 0;
+      for (const elm of document.body.querySelectorAll('*')) {
+        if (scanned >= 4096) break;
+        scanned += 1;
+        consider(elm, true, 0);
+      }
     }
-    const ranked = [...rankedElements.entries()].sort((left, right) =>
-      right[1].score - left[1].score || left[1].order - right[1].order
-    ).slice(0, 12);
+    // Keep the strongest hit-test target first for geometry, while reserving
+    // room for pointer-transparent visual surfaces. A deeply layered scene can
+    // easily yield more than twelve hit ancestors before its active SVG or
+    // canvas state appears in DOM order.
+    const ranked = rankedCaptureEntries([...rankedElements.entries()], 12, 4);
     const contexts = ranked.map(([elm, geometry]) => {
       return {
         selector: buildSelector(elm),
@@ -1923,12 +2311,29 @@
   // not the document. Probe through the armed draw layer so the page element, not
   // the overlay host, determines the anchor.
   function detectAnchor(vx, vy) {
-    for (const node of underlayElementsFromPoint(vx, vy)) {
-      if (!isOverlayNode(node) && elementViewportAnchored(node)) return 'viewport';
-    }
-    return 'doc';
+    return firstUnderlayAnchorMode(
+      underlayElementsFromPoint(vx, vy),
+      (node) => isOverlayNode(node) || SKIP_TAGS.has(node?.tagName),
+      elementViewportAnchored
+    );
   }
   const MIN_ANCHOR_FIT = 0.08;
+
+  function orderedSurfaceGeometryEntries(entries, surface, anchorMode) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (!surface) return list;
+    const anchorSelector = surface.anchor?.selector || '';
+    const anchorEntry = list.find((entry) => entry.context?.selector === anchorSelector);
+    const anchorNode = anchorEntry?.node || uniqueElement(anchorSelector);
+    const eligible = list.filter((entry) => {
+      const withinAnchor = !!anchorNode &&
+        (entry.node === anchorNode || anchorNode.contains(entry.node));
+      return surfaceGeometryEntryAllowed(entry, surface, anchorMode, withinAnchor);
+    });
+    return eligible.sort((left, right) =>
+      surfaceGeometryEntryPriority(left, surface) - surfaceGeometryEntryPriority(right, surface)
+    );
+  }
 
   function correctedPointRects(p) {
     const rects = p.rects || [p.rect];
@@ -1964,12 +2369,7 @@
         .map((entry) => entry.viewportAnchorMode)
         .filter(Boolean);
       const capturedSurface = Array.isArray(p.rectSurfaces) ? p.rectSurfaces[rectIndex] : null;
-      const capturedMode = capturedSurface?.anchor?.mode || null;
-      return pointAnchorMode(
-        liveModes,
-        capturedMode ? [capturedMode] : [],
-        rectUsesLegacyViewportAnchor(p.anchor, capturedSurface)
-      );
+      return resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor);
     });
     const fixedByRect = anchorModes.map((mode) => mode !== 'doc');
     return {
@@ -1981,7 +2381,10 @@
         const rectCapturedScroll = surface?.scroll || capturedScroll;
         const fixed = fixedByRect[rectIndex];
         const anchorMode = anchorModes[rectIndex];
-        for (const entry of resolvedContexts[rectIndex]) {
+        const geometryEntries = orderedSurfaceGeometryEntries(
+          resolvedContexts[rectIndex], surface, anchorMode
+        );
+        for (const entry of geometryEntries) {
           const context = entry.context;
           try {
             if (fixed && anchorMode !== 'unknown' && !entry.viewportAnchorMode) continue;
@@ -2020,10 +2423,11 @@
   // → {box, fixed:true} in viewport coords for viewport-anchored points, else null
   function pinBox(p) {
     const geometry = correctedPointRects(p);
-    if (!geometry.fixedByRect[0]) return null;
+    const rectIndex = primaryRectIndex(p.rects || [p.rect], p.rect);
+    if (!geometry.fixedByRect[rectIndex]) return null;
     return {
-      box: geometry.boxes[0], fixed: true, anchorMode: geometry.anchorModes[0],
-      active: geometry.active[0] !== false,
+      box: geometry.boxes[rectIndex], fixed: true, anchorMode: geometry.anchorModes[rectIndex],
+      active: geometry.active[rectIndex] !== false,
     };
   }
   function pointFromDraft(draft) {
@@ -2050,7 +2454,7 @@
       }
       const contexts = captureContext(rect);
       rectContexts.push(contexts);
-      rectSurfaces.push(captureRectSurface(contexts));
+      rectSurfaces.push(captureRectSurface(contexts, rect));
     });
     const activeRectIndex = primaryRectIndex(rects, draft.rect);
     const viewport = draft.viewport || existing?.viewport ||
@@ -2130,11 +2534,12 @@
       S.reviewList.forEach((p, i) => {
         if (p.page !== page) return;
         const v = S.verdicts[p.id];
+        const primaryIndex = primaryRectIndex(p.rects || [p.rect], p.rect);
         (p.rects || [p.rect]).forEach((_box, rectIndex) => {
           const els = addPin(p, rectIndex,
             'review' + (v ? ' verdicted v-' + v.verdict : '') + (i === S.cursor ? ' current' : ''),
             () => jumpTo(i), 'point ' + p.number + (v ? ' - ' + v.verdict : ''));
-          if (i === S.cursor && rectIndex === 0) { S.curPinEls = els; }
+          if (i === S.cursor && rectIndex === primaryIndex) { S.curPinEls = els; }
         });
       });
     }
@@ -2168,7 +2573,8 @@
   // backgrounds and page shells are intentionally ignored, leaving the exact
   // document coordinates the user drew instead of introducing false drift.
   function correctedRect(p) {
-    return correctedPointRects(p).boxes[0];
+    const rectIndex = primaryRectIndex(p.rects || [p.rect], p.rect);
+    return correctedPointRects(p).boxes[rectIndex];
   }
 
   // ===== draw layer ==========================================================
@@ -2218,7 +2624,7 @@
       const anchor = detectAnchor(d.x + d.w / 2, d.y + d.h / 2);   // viewport center
       const rect = { x: d.x + scrollX, y: d.y + scrollY, w: d.w, h: d.h };
       const rectContext = captureContext(rect);
-      const rectSurface = captureRectSurface(rectContext);
+      const rectSurface = captureRectSurface(rectContext, rect);
       if (S.addRectDraft) {
         const draft = S.addRectDraft;
         S.addRectDraft = null;
@@ -3855,7 +4261,10 @@
     updateBar();
     const va = pinBox(pt);
     const box = va ? va.box : correctedRect(pt);
-    const capturedStickyScrollY = Number(pt.rectSurfaces?.[0]?.scroll?.y ?? pt.scroll?.y);
+    const primaryIndex = primaryRectIndex(pt.rects || [pt.rect], pt.rect);
+    const capturedStickyScrollY = Number(
+      pt.rectSurfaces?.[primaryIndex]?.scroll?.y ?? pt.scroll?.y
+    );
     if (!opts.noScroll) {
       // instant, not smooth: the flash should land where the eye already is, and
       // smooth scrolls never finish in a backgrounded tab (the jump idiom the

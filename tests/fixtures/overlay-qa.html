@@ -12,11 +12,11 @@
     #target { min-height: 260px; margin-top: 20px; padding: 40px; border: 3px solid; background: white; }
     #scroll-stage { height: 1700px; margin-top: 80px; padding-top: 180px; border-top: 2px dashed #777; }
     #sticky-target { position: sticky; top: 80px; min-height: 260px; padding: 40px; border: 3px solid #2563eb; background: #dbeafe; }
-    .sticky-pane { transition: opacity 120ms linear; }
+    .sticky-pane { transition: opacity 120ms linear; pointer-events: none; }
     .sticky-pane-two { position: absolute; inset: 40px; opacity: 0; pointer-events: none; }
     #sticky-target[data-state="two"] .sticky-pane-one { opacity: 0; pointer-events: none; }
-    #sticky-target[data-state="two"] .sticky-pane-two { opacity: 1; pointer-events: auto; }
-    #runtime-canvas { display: block; width: 320px; height: 120px; margin-top: 20px; background: #111827; }
+    #sticky-target[data-state="two"] .sticky-pane-two { opacity: 1; pointer-events: none; }
+    #runtime-canvas, #runtime-canvas-two { display: block; width: 320px; height: 120px; margin-top: 20px; background: #111827; }
     dialog { width: min(480px, calc(100% - 40px)); padding: 32px; }
   </style>
 </head>
@@ -35,6 +35,7 @@
     <button id="next-review-point" type="button">Next review point</button>
     <button id="bump-review-round" type="button">Bump review round</button>
     <button id="clear-review-round" type="button">Clear review override</button>
+    <button id="start-surface-churn" type="button">Start surface churn</button>
     <output id="qa-state" aria-label="QA state"></output>
     <section id="target">
       <h2>Rectangle target</h2>
@@ -42,14 +43,15 @@
     </section>
     <section id="scroll-stage">
       <div id="sticky-target" data-state="one">
-        <div class="sticky-pane sticky-pane-one">
+        <div class="sticky-pane sticky-pane-one is-active" aria-hidden="true" aria-selected="true">
           <h2>Sticky scroll target, state one</h2>
           <p>Markers drawn here must hide when this pinned box begins showing state two.</p>
           <canvas id="runtime-canvas" width="640" height="240"></canvas>
         </div>
-        <div class="sticky-pane sticky-pane-two">
+        <div class="sticky-pane sticky-pane-two" aria-selected="false">
           <h2>Sticky scroll target, state two</h2>
           <p>The box has not moved, but this is no longer the marked visual state.</p>
+          <canvas id="runtime-canvas-two" width="640" height="240"></canvas>
         </div>
       </div>
     </section>
@@ -88,6 +90,8 @@
         pageSpaceKeydowns: 0,
         speechStarts: 0,
         speechStops: 0,
+        surfaceChurnFrames: 0,
+        surfaceChurnRaf: 0,
         resolvePermission: null,
         rejectPermission: null,
         releaseUpload: null,
@@ -114,6 +118,8 @@
         stateOutput.dataset.pageSpaceKeydowns = String(qa.pageSpaceKeydowns);
         stateOutput.dataset.speechStarts = String(qa.speechStarts);
         stateOutput.dataset.speechStops = String(qa.speechStops);
+        stateOutput.dataset.surfaceChurnFrames = String(qa.surfaceChurnFrames);
+        stateOutput.dataset.surfaceChurnActive = String(!!qa.surfaceChurnRaf);
         stateOutput.dataset.permissionPending = String(!!qa.resolvePermission);
         stateOutput.dataset.uploadPending = String(!!qa.releaseUpload);
         const overlayRoot = document.querySelector('[data-wk-host]')?.shadowRoot;
@@ -135,6 +141,7 @@
           `round-offset:${qa.reviewRoundOffset}`,
           `page-space:${qa.pageSpaceKeydowns}`,
           `speech:${qa.speechStops}/${qa.speechStarts}`,
+          `surface-churn:${qa.surfaceChurnFrames}`,
         ].join(' ');
       };
       paintState();
@@ -145,14 +152,50 @@
       qaContext.fillStyle = '#ffffff';
       qaContext.font = '700 56px system-ui';
       qaContext.fillText('runtime canvas', 80, 145);
+      const qaCanvasTwo = document.getElementById('runtime-canvas-two');
+      const qaContextTwo = qaCanvasTwo.getContext('2d');
+      qaContextTwo.fillStyle = '#991b1b';
+      qaContextTwo.fillRect(0, 0, qaCanvasTwo.width, qaCanvasTwo.height);
+      qaContextTwo.fillStyle = '#ffffff';
+      qaContextTwo.font = '700 56px system-ui';
+      qaContextTwo.fillText('inactive canvas', 72, 145);
       const stickyStage = document.getElementById('scroll-stage');
       const stickyTarget = document.getElementById('sticky-target');
       const updateStickyState = () => {
         const progress = Math.max(0, -stickyStage.getBoundingClientRect().top);
-        stickyTarget.dataset.state = progress > 420 ? 'two' : 'one';
+        const second = progress > 420;
+        stickyTarget.dataset.state = second ? 'two' : 'one';
+        document.querySelector('.sticky-pane-one').setAttribute('aria-selected', String(!second));
+        document.querySelector('.sticky-pane-two').setAttribute('aria-selected', String(second));
+        document.querySelector('.sticky-pane-one').classList.toggle('is-active', !second);
+        document.querySelector('.sticky-pane-two').classList.toggle('is-active', second);
       };
       window.addEventListener('scroll', updateStickyState, { passive: true });
       updateStickyState();
+      qa.stopSurfaceChurn = () => {
+        if (qa.surfaceChurnRaf) cancelAnimationFrame(qa.surfaceChurnRaf);
+        qa.surfaceChurnRaf = 0;
+        paintState();
+      };
+      qa.startSurfaceChurn = (frameCount = 240) => {
+        qa.stopSurfaceChurn();
+        let remaining = Math.max(1, Number(frameCount) || 240);
+        const animate = () => {
+          qa.surfaceChurnFrames += 1;
+          stickyTarget.style.setProperty('--qa-surface-frame', String(qa.surfaceChurnFrames));
+          remaining -= 1;
+          if (remaining > 0) qa.surfaceChurnRaf = requestAnimationFrame(animate);
+          else {
+            qa.surfaceChurnRaf = 0;
+            paintState();
+          }
+        };
+        qa.surfaceChurnRaf = requestAnimationFrame(animate);
+        paintState();
+      };
+      document.getElementById('start-surface-churn').addEventListener('click', () => {
+        qa.startSurfaceChurn();
+      });
       window.addEventListener('keydown', (event) => {
         if (event.code !== 'Space') return;
         qa.pageSpaceKeydowns += 1;

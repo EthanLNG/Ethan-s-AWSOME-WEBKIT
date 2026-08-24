@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.8.20 (2026-08-24): Animation-safe feedback geometry
+
+- Split every rectangle's live metadata into independent geometry, visible
+  surface, scene-state, and viewport-anchor roles. Tight page elements now
+  control placement while the actual painted surface controls visibility, its
+  state owner controls scene identity, and the sticky or fixed container
+  controls scrolling behavior.
+- Kept pointer-transparent SVG, canvas, 3D, and animated scene layers
+  discoverable through bounded capture-time scans, even behind deep hit-test
+  stacks, without allowing unrelated full-screen sticky layers to hijack
+  ordinary document points.
+- Kept accessibility-only `aria-hidden="true"` from vetoing painted decorative
+  scenes, while treating explicit inactive panes as weaker than positive live
+  activation. This prevents transient entrance and exit children from making a
+  saved rectangle disappear or bind to a pre-rendered inactive sibling.
+- Replaced animation-mutation motion hiding with targeted, frame-coalesced
+  repositioning. Continuous transform or style writes no longer leave every
+  marker invisible, and observation disconnects outside feedback mode to keep
+  animated sites responsive.
+- Added backward-compatible `geometrySelector` validation plus focused and
+  browser-fixture regressions for continuous mutation, pointerless scenes,
+  mixed document and sticky targets, and state restoration.
+
+**Migration:** finish or discard active project sessions, update the project's
+Webkit, and start a fresh color session. Existing feedback metadata remains
+supported; newly drawn rectangles use the stronger role separation.
+
 ## v0.8.19 (2026-08-24): Reusable Space dictation and state-aware sticky marks
 
 - Made Space start dictation whenever the active Webkit note is empty,

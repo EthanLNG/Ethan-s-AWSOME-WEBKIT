@@ -1843,7 +1843,7 @@ def _valid_rect_surface(value):
     if value is None:
         return True
     required = {"targetSelector", "anchor", "stateChain"}
-    allowed = required | {"scroll"}
+    allowed = required | {"geometrySelector", "scroll"}
     if (
         not isinstance(value, dict)
         or not required.issubset(value)
@@ -1851,6 +1851,10 @@ def _valid_rect_surface(value):
     ):
         return False
     if not _bounded_string(value["targetSelector"], 2048, allow_empty=False):
+        return False
+    if "geometrySelector" in value and not _bounded_string(
+        value["geometrySelector"], 2048, allow_empty=False
+    ):
         return False
     anchor = value["anchor"]
     if anchor is not None and (

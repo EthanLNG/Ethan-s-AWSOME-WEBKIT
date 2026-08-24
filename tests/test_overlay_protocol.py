@@ -38,10 +38,18 @@ class OverlayProtocolTests(unittest.TestCase):
             + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
             + "anchorFitScore, anchorCoverageScore, anchorContextScore, "
             + "reanchorRect, reviewScrollTarget, viewportStateAttributeName, "
-            + "surfaceStateValuesMatch, effectiveStyleChainVisible, sameRectGeometry, "
+            + "surfaceStateAttributeCapturable, surfaceStateClassCapturable, "
+            + "surfaceStateMatchStatus, surfaceStateValuesMatch, "
+            + "surfaceStateSignalHasActivation, surfaceStateSignalHasEvidence, "
+            + "aggregateSurfaceStateStatus, "
+            + "surfaceCandidateSpatialScore, effectiveStyleChainVisible, sameRectGeometry, "
             + "surfaceMutationRelevant, surfaceChildListRelevant, pointAnchorMode, "
-            + "preferredSurfaceCandidate, "
-            + "rectUsesLegacyViewportAnchor, "
+            + "preferredSurfaceCandidate, rankedCaptureEntries, "
+            + "rectUsesLegacyViewportAnchor, surfaceUsesSeparatedGeometry, "
+            + "resolvedRectAnchorMode, "
+            + "firstUnderlayAnchorMode, surfaceGeometryEntryAllowed, "
+            + "surfaceGeometryEntryPriority, "
+            + "capturedSurfaceGeometrySelector, "
             + "persistedRectForDraft, primaryRectIndex, visualSurfaceActive, "
             + "tabActivityMode, tabPollDelay, keyboardActivationTarget, "
             + "dictationTargetAllowsActivation, dictationKeyAction, "
@@ -263,10 +271,26 @@ assert.deepStrictEqual(
   { x: 190, y: 160, w: 200, h: 80 }
 );
 for (const name of [
-  'data-state', 'data-current-step', 'data-screen-mode', 'aria-hidden', 'aria-selected'
+  'data-state', 'data-current-step', 'data-screen-mode', 'data-scene',
+  'aria-hidden', 'aria-selected'
 ]) assert.strictEqual(H.viewportStateAttributeName(name), true, name);
 for (const name of ['data-copy', 'data-testid', 'aria-label', 'style']) {
   assert.strictEqual(H.viewportStateAttributeName(name), false, name);
+}
+for (const [name, value] of [
+  ['aria-current', 'page'], ['aria-selected', 'true'],
+  ['aria-expanded', 'true'], ['aria-pressed', 'mixed'], ['aria-hidden', 'false'],
+  ['data-scene', '0'], ['data-state', 'setup'],
+]) assert.strictEqual(H.surfaceStateAttributeCapturable(name, value), true, `${name}=${value}`);
+for (const [name, value] of [
+  ['aria-current', 'false'], ['aria-selected', 'false'],
+  ['aria-expanded', 'false'], ['aria-pressed', 'false'], ['aria-hidden', 'true'],
+]) assert.strictEqual(H.surfaceStateAttributeCapturable(name, value), false, `${name}=${value}`);
+for (const token of ['active', 'is-active', 'current', 'visible', 'has-open']) {
+  assert.strictEqual(H.surfaceStateClassCapturable(token), true, token);
+}
+for (const token of ['inactive', 'is-off', 'hidden', 'closed', 'collapsed']) {
+  assert.strictEqual(H.surfaceStateClassCapturable(token), false, token);
 }
 const capturedState = {
   attrs: { 'data-state': 'setup' }, classes: ['is-active'],
@@ -277,6 +301,80 @@ assert.strictEqual(H.surfaceStateValuesMatch(
 assert.strictEqual(H.surfaceStateValuesMatch(
   capturedState, () => 'out', () => true
 ), false);
+assert.strictEqual(H.surfaceStateMatchStatus(
+  capturedState, (name) => ({ 'data-state': 'setup' })[name],
+  (name) => name === 'is-active'
+), 'match');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  capturedState, () => 'out', () => true
+), 'mismatch');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  capturedState, () => null, () => true
+), 'unknown');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  capturedState, () => null, () => false
+), 'mismatch');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  { attrs: { 'aria-hidden': 'true' }, classes: [] }, () => 'false', () => false
+), 'unknown');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  { attrs: {}, classes: ['is-off'] }, () => null, () => false
+), 'unknown');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  { attrs: { 'aria-hidden': 'true' }, classes: ['is-active'] },
+  () => 'true', (name) => name === 'is-active'
+), 'match');
+assert.strictEqual(H.aggregateSurfaceStateStatus(['match', 'match']), 'match');
+assert.strictEqual(H.aggregateSurfaceStateStatus(['match', 'unknown']), 'unknown');
+assert.strictEqual(H.aggregateSurfaceStateStatus(['mismatch', 'unknown']), 'mismatch');
+assert.strictEqual(H.aggregateSurfaceStateStatus([]), 'unknown');
+assert.strictEqual(H.surfaceStateSignalHasActivation({
+  attrs: { 'aria-selected': 'true', 'data-index': '2' }, classes: [],
+}), true);
+assert.strictEqual(H.surfaceStateSignalHasActivation({
+  attrs: { 'data-index': '2', 'data-scene': 'intro' }, classes: [],
+}), false);
+assert.strictEqual(H.surfaceStateSignalHasEvidence({
+  attrs: { 'aria-hidden': 'true' }, classes: [],
+}), false);
+assert.strictEqual(H.surfaceStateSignalHasEvidence({
+  attrs: {}, classes: ['is-off'],
+}), false);
+assert.strictEqual(H.surfaceStateSignalHasEvidence({
+  attrs: { 'data-index': '2' }, classes: [],
+}), true);
+assert.strictEqual(H.surfaceStateSignalHasEvidence({
+  attrs: { 'aria-hidden': 'true' }, classes: ['is-active'],
+}), true);
+
+const legacyNegativeOnly = [
+  { attrs: { 'aria-hidden': 'true' }, classes: [] },
+  { attrs: {}, classes: ['is-off'] },
+].filter(H.surfaceStateSignalHasEvidence);
+assert.deepStrictEqual(legacyNegativeOnly, []);
+assert.strictEqual(H.visualSurfaceActive(
+  true, legacyNegativeOnly.length > 0, false, 'doc', false, 400, 100, 800
+), true);
+
+const mixedLegacySignals = [
+  { attrs: { 'aria-hidden': 'true' }, classes: [] },
+  { attrs: { 'aria-selected': 'true' }, classes: ['is-active'] },
+].filter(H.surfaceStateSignalHasEvidence);
+assert.strictEqual(mixedLegacySignals.length, 1);
+const mixedLegacyStatus = H.aggregateSurfaceStateStatus(mixedLegacySignals.map((signal) =>
+  H.surfaceStateMatchStatus(
+    signal,
+    (name) => ({ 'aria-selected': 'true' })[name],
+    (name) => name === 'is-active'
+  )
+));
+assert.strictEqual(mixedLegacyStatus, 'match');
+assert.strictEqual(H.visualSurfaceActive(
+  true, true, mixedLegacyStatus === 'match', 'sticky', false, 900, 100, 800
+), true);
+assert.strictEqual(H.surfaceStateSignalHasActivation({
+  attrs: {}, classes: ['is-active'],
+}), true);
 assert.strictEqual(H.surfaceStateValuesMatch(
   { attrs: {}, classes: ['active state'] }, () => null, () => {
     throw new Error('DOMTokenList would reject this token');
@@ -329,9 +427,61 @@ assert.strictEqual(H.pointAnchorMode([], [], false), 'doc');
 assert.strictEqual(H.rectUsesLegacyViewportAnchor('viewport', null), true);
 assert.strictEqual(H.rectUsesLegacyViewportAnchor('viewport', { anchor: null }), false);
 assert.strictEqual(H.rectUsesLegacyViewportAnchor('doc', null), false);
+assert.strictEqual(H.surfaceUsesSeparatedGeometry({ anchor: null }), false);
+assert.strictEqual(H.surfaceUsesSeparatedGeometry({
+  geometrySelector: '#target', anchor: null,
+}), true);
+assert.strictEqual(H.resolvedRectAnchorMode(
+  ['sticky'], { anchor: null }, 'doc'
+), 'sticky');
+assert.strictEqual(H.resolvedRectAnchorMode(
+  ['sticky'], { geometrySelector: '#target', anchor: null }, 'doc'
+), 'doc');
+assert.strictEqual(H.resolvedRectAnchorMode([], { anchor: { mode: 'sticky' } }, 'doc'), 'sticky');
+assert.strictEqual(H.resolvedRectAnchorMode(['sticky'], null, 'doc'), 'sticky');
+assert.strictEqual(H.resolvedRectAnchorMode([], null, 'viewport'), 'unknown');
+const normalTarget = { id: 'normal' };
+const stickyBackdrop = { id: 'sticky' };
+assert.strictEqual(H.firstUnderlayAnchorMode(
+  [normalTarget, stickyBackdrop], () => false, (node) => node === stickyBackdrop
+), 'doc');
+assert.strictEqual(H.firstUnderlayAnchorMode(
+  [{ id: 'overlay' }, stickyBackdrop], (node) => node.id === 'overlay',
+  (node) => node === stickyBackdrop
+), 'viewport');
+const surfaceRoles = {
+  geometrySelector: '#normal-target',
+  targetSelector: '#normal-state',
+  anchor: null,
+};
+const normalEntry = { context: { selector: '#normal-target' }, viewportAnchorMode: null };
+const stickyBackdropEntry = {
+  context: { selector: '#sticky-backdrop' }, viewportAnchorMode: 'sticky',
+};
+assert.strictEqual(H.surfaceGeometryEntryAllowed(normalEntry, surfaceRoles, 'doc', false), true);
+assert.strictEqual(
+  H.surfaceGeometryEntryAllowed(stickyBackdropEntry, surfaceRoles, 'doc', false), false
+);
+assert.strictEqual(H.surfaceGeometryEntryPriority(normalEntry, surfaceRoles), 0);
+assert.strictEqual(H.surfaceGeometryEntryPriority(stickyBackdropEntry, surfaceRoles), 3);
+const stickyRoles = {
+  geometrySelector: '#normal-target', targetSelector: '#scene',
+  anchor: { selector: '#sticky-anchor', mode: 'sticky' },
+};
+assert.strictEqual(H.surfaceGeometryEntryAllowed(normalEntry, stickyRoles, 'sticky', false), false);
+assert.strictEqual(H.surfaceGeometryEntryAllowed(normalEntry, stickyRoles, 'sticky', true), true);
+const spatialMark = { x: 100, y: 100, w: 200, h: 80 };
+assert(
+  H.surfaceCandidateSpatialScore(spatialMark, { x: 90, y: 90, w: 230, h: 100 }) >
+  H.surfaceCandidateSpatialScore(spatialMark, { x: 0, y: 0, w: 1920, h: 1080 })
+);
+assert.strictEqual(
+  H.surfaceCandidateSpatialScore(spatialMark, { x: 500, y: 500, w: 200, h: 80 }),
+  0
+);
 """
         )
-        self.assertIn("right[1].score - left[1].score", self.source)
+        self.assertIn("rankedCaptureEntries([...rankedElements.entries()], 12, 4)", self.source)
         self.assertIn("const MIN_ANCHOR_FIT = 0.08", self.source)
         self.assertIn("sameRectGeometry(rect, draft.rectMetadataRects?.[rectIndex])", self.source)
         self.assertIn("if (contexts.length) contexts[0].role = 'primary'", self.source)
@@ -364,9 +514,10 @@ assert.strictEqual(H.rectUsesLegacyViewportAnchor('doc', null), false);
     def test_surface_tracking_is_targeted_and_can_reactivate_hidden_markers(self):
         for fragment in (
             "refreshSurfaceObservation();\n    repositionAll();",
-            "surfaceObserver.observe(node, { attributes: true })",
+            "surfaceObserver.observe(node, { attributes: true, attributeFilter })",
             "trackedNodes?.has(target) || remountParents?.has(target)",
-            "if (!target) return unresolvedSurfaceActive(point, surface);",
+            "if (!separatedGeometry) return unresolvedSurfaceActive(point, surface, reviewFallback);",
+            "return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;",
             "records.filter(childListAffectsTrackedSurface)",
             "surfaceChildListRelevant(",
         ):
@@ -446,11 +597,15 @@ const genericStage = {
   targetSelector: '#scroll-stage',
   anchor: null,
   stateChain: [],
+  spatialScore: 0.6,
 };
 const stickyTarget = {
   targetSelector: '#sticky-target',
   anchor: { selector: '#sticky-target', mode: 'sticky' },
   stateChain: [{ selector: '#sticky-target', attrs: { 'data-state': 'one' }, classes: [] }],
+  spatialScore: 0.12,
+  relatedToPrimary: true,
+  stronglyRelatedToPrimary: true,
 };
 const statefulDocumentTarget = {
   targetSelector: '#stateful-document-target',
@@ -460,30 +615,210 @@ const statefulDocumentTarget = {
     attrs: { 'data-state': 'one' },
     classes: [],
   }],
+  spatialScore: 0.2,
+  relatedToPrimary: true,
+};
+const strongStatefulDocumentTarget = {
+  ...statefulDocumentTarget,
+  stronglyRelatedToPrimary: true,
+};
+const inactiveStickyVisual = {
+  ...stickyTarget,
+  targetSelector: '#inactive-canvas',
+  stateChain: [],
+  spatialScore: 0.3,
+};
+const activeIndexedPane = {
+  ...stickyTarget,
+  targetSelector: '#active-indexed-pane',
+  stateChain: [{ selector: '#active-indexed-pane', attrs: {
+    'aria-selected': 'true', 'data-index': '1',
+  }, classes: [] }],
+  hasPositiveActivation: true,
+};
+const inactiveIndexedPane = {
+  ...stickyTarget,
+  targetSelector: '#inactive-indexed-pane',
+  stateChain: [{ selector: '#inactive-indexed-pane', attrs: {
+    'data-index': '2',
+  }, classes: [] }],
+  inactiveBoundary: true,
+  spatialScore: 0.4,
 };
 assert.strictEqual(
   H.preferredSurfaceCandidate([genericStage, statefulDocumentTarget, stickyTarget]),
   stickyTarget
 );
 assert.strictEqual(
-  H.preferredSurfaceCandidate([genericStage, statefulDocumentTarget]),
-  statefulDocumentTarget
+  H.preferredSurfaceCandidate([genericStage, strongStatefulDocumentTarget]),
+  strongStatefulDocumentTarget
+);
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, strongStatefulDocumentTarget, stickyTarget]),
+  stickyTarget
+);
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, inactiveStickyVisual, stickyTarget]),
+  stickyTarget
+);
+assert.strictEqual(H.preferredSurfaceCandidate([
+  genericStage,
+  { ...inactiveStickyVisual, inactiveBoundary: true },
+]), genericStage);
+assert.strictEqual(H.preferredSurfaceCandidate([
+  genericStage, inactiveIndexedPane, activeIndexedPane,
+]), activeIndexedPane);
+const statelessCanvas = {
+  targetSelector: '#pointerless-canvas',
+  anchor: null,
+  stateChain: [],
+  visualKind: 'canvas',
+  spatialScore: 0.5,
+  relatedToPrimary: true,
+};
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, statelessCanvas]), statelessCanvas
+);
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(genericStage, statelessCanvas, null),
+  statelessCanvas.targetSelector
+);
+const statelessSvg = {
+  ...statelessCanvas,
+  targetSelector: '#pointerless-svg',
+  visualKind: 'svg',
+};
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, statelessSvg]), statelessSvg
+);
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(genericStage, statelessSvg, null),
+  statelessSvg.targetSelector
+);
+const tinyIconSvg = {
+  ...statelessSvg,
+  targetSelector: '#button-icon',
+  spatialScore: 0,
+  stronglyRelatedToPrimary: true,
+};
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, tinyIconSvg]), genericStage
+);
+const activeTinyIconSvg = {
+  ...tinyIconSvg,
+  stateChain: [{ selector: '#button-icon', attrs: { 'data-state': 'active' }, classes: [] }],
+};
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(genericStage, activeTinyIconSvg, null),
+  genericStage.targetSelector
+);
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(genericStage, stickyTarget, stickyTarget.anchor),
+  genericStage.targetSelector
 );
 assert.strictEqual(
   H.preferredSurfaceCandidate([genericStage, { ...genericStage, targetSelector: '#other' }]),
   genericStage
 );
+assert.strictEqual(H.preferredSurfaceCandidate([
+  genericStage,
+  { ...stickyTarget, targetSelector: '#unrelated-backdrop', spatialScore: 0.04,
+    relatedToPrimary: false, stronglyRelatedToPrimary: false },
+]), genericStage);
+assert.strictEqual(H.preferredSurfaceCandidate([
+  genericStage,
+  { ...stickyTarget, targetSelector: '#tiny-state-layer', spatialScore: 0.02,
+    stronglyRelatedToPrimary: false },
+]), genericStage);
 assert.strictEqual(H.preferredSurfaceCandidate([]), null);
 """
         )
         for fragment in (
             "for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12))",
             "const selected = preferredSurfaceCandidate(candidates)",
+            "geometrySelector: capturedSurfaceGeometrySelector(primary, selected, selectedAnchor)",
             "targetSelector: selected.targetSelector",
             "stateChain: selected.stateChain",
+            "captureRectSurface(contexts, rect)",
+            "for (const selector of SURFACE_VISUAL_SELECTORS)",
+            "SURFACE_ACTIVE_SELECTOR, SURFACE_VISUAL_SELECTOR, 'canvas,video,svg'",
+            "rankedCaptureEntries([...rankedElements.entries()], 12, 4)",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
+
+    def test_pointerless_visual_surface_survives_deep_hit_stack(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const hits = Array.from({ length: 20 }, (_, index) => [
+  `hit-${index}`,
+  { sourcePriority: 0, score: 1 - index / 100, order: index },
+]);
+const visual = ['active-pointerless-scene', {
+  sourcePriority: 1, score: 0.08, order: 20,
+}];
+const ranked = H.rankedCaptureEntries([...hits, visual], 12, 4);
+assert.strictEqual(ranked.length, 12);
+assert.strictEqual(ranked[0][0], 'hit-0');
+assert(ranked.some(([name]) => name === 'active-pointerless-scene'));
+assert.strictEqual(ranked.filter(([, meta]) => meta.sourcePriority === 0).length, 11);
+"""
+        )
+
+    def test_continuous_surface_animation_repositions_without_starving_visibility(self):
+        transition = re.search(
+            r"document\.addEventListener\('transitionend'.*?\n  \}, true\);",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(transition)
+        self.assertIn("scheduleSurfacePosition()", transition.group(0))
+        self.assertNotIn("notePinMotion()", transition.group(0))
+        for event_name in (
+            "transitioncancel", "animationend", "animationcancel",
+        ):
+            with self.subTest(event_name=event_name):
+                self.assertIn(
+                    f"document.addEventListener('{event_name}', (event) => {{",
+                    self.source,
+                )
+
+        observer = re.search(
+            r"surfaceObserver = new MutationObserver\(\(records\) => \{.*?\n    \}\);",
+            self.source,
+            re.S,
+        )
+        self.assertIsNotNone(observer)
+        self.assertIn("scheduleSurfacePosition()", observer.group(0))
+        self.assertNotIn("notePinMotion()", observer.group(0))
+        for fragment in (
+            "if (S.mode !== 'feedback' || !S.pinEls.length) return;",
+            "const trackedSurfaceAttributeSets = new Map()",
+            "trackedSurfaceAttributeSets.get(node)",
+            "if (S.mode !== 'feedback')",
+            "queueSurfaceRebind()",
+            "document.addEventListener('scroll', notePinMotion",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_browser_fixture_covers_pointerless_continuous_surface_animation(self):
+        for fragment in (
+            ".sticky-pane { transition: opacity 120ms linear; pointer-events: none; }",
+            'class="sticky-pane sticky-pane-one is-active" aria-hidden="true" aria-selected="true"',
+            'class="sticky-pane sticky-pane-two" aria-selected="false"',
+            'id="runtime-canvas-two"',
+            "qa.startSurfaceChurn = (frameCount = 240) =>",
+            "stickyTarget.style.setProperty('--qa-surface-frame'",
+            "qa.stopSurfaceChurn = () =>",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.qa_fixture)
+        self.assertIn(
+            "inactiveBoundary: !hasPositiveActivation && surfaceHasInactiveBoundary(target)",
+            self.source,
+        )
 
     def test_v0818_missing_selectors_only_reappear_at_the_capture_scroll(self):
         self.run_node(
@@ -499,10 +834,34 @@ assert.strictEqual(H.visualSurfaceActive(
 ), false);
 """
         )
-        self.assertIn("function unresolvedSurfaceActive(point, surface)", self.source)
+        self.assertIn("function currentReviewPointMatches(point)", self.source)
+        self.assertIn(
+            "function unresolvedSurfaceActive(point, surface, reviewing = currentReviewPointMatches(point))",
+            self.source,
+        )
+        self.assertIn(
+            "if (!separatedGeometry) return unresolvedSurfaceActive(point, surface, reviewFallback);",
+            self.source,
+        )
+        self.assertIn(
+            "return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;",
+            self.source,
+        )
+        self.assertIn(
+            "visible, hasStateSignals, stateMatches, anchorMode, reviewFallback,",
+            self.source,
+        )
+        self.assertNotIn(
+            "visible || reviewFallback, hasStateSignals, stateMatches",
+            self.source,
+        )
+        self.assertIn(
+            "effectivelyVisible(target), false, false, anchorMode, reviewFallback,",
+            self.source,
+        )
         self.assertIn("if (!selector) return unresolvedSurfaceActive(point, null);", self.source)
         self.assertIn("surface?.anchor?.mode || point.anchor || 'doc'", self.source)
-        self.assertIn("capturedMode ? [capturedMode] : []", self.source)
+        self.assertIn("resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor)", self.source)
 
     def test_unresolved_document_points_keep_document_geometry_active(self):
         self.run_node(
@@ -563,7 +922,7 @@ assert.deepStrictEqual(H.persistedRectForDraft(
             "const fixedByRect = anchorModes.map((mode) => mode !== 'doc')",
             "geometry.fixedByRect[marker.rectIndex]",
             "editingGeometry.fixedByRect[rectIndex]",
-            "anchorMode: geometry.anchorModes[0]",
+            "anchorMode: geometry.anchorModes[rectIndex]",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
@@ -632,6 +991,13 @@ assert.strictEqual(H.primaryRectIndex([first, first], first), 1);
             "const activeRectIndex = primaryRectIndex(rects, draft.rect)",
             self.source,
         )
+        for fragment in (
+            "const rectIndex = primaryRectIndex(p.rects || [p.rect], p.rect)",
+            "rectIndex === primaryIndex",
+            "pt.rectSurfaces?.[primaryIndex]?.scroll?.y",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
         self.assertNotIn(
             "rects.findIndex((rect) => sameRectGeometry(rect, draft.rect))",
             self.source,
@@ -654,7 +1020,7 @@ assert.strictEqual(H.pointAnchorMode([], [], true), 'unknown');
 """
         )
         self.assertIn(
-            "rectUsesLegacyViewportAnchor(p.anchor, capturedSurface)",
+            "resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor)",
             self.source,
         )
 
@@ -898,7 +1264,7 @@ for (const holderKind of ['feedback', 'redo']) {
         self.assertIn("#sticky-target { position: sticky", self.qa_fixture)
         self.assertIn("<canvas id=\"runtime-canvas\"", self.qa_fixture)
         self.assertIn('id="sticky-target" data-state="one"', self.qa_fixture)
-        self.assertIn("stickyTarget.dataset.state = progress > 420 ? 'two' : 'one'", self.qa_fixture)
+        self.assertIn("stickyTarget.dataset.state = second ? 'two' : 'one'", self.qa_fixture)
 
     def test_namespaced_store_separates_projects_and_colors_and_persists(self):
         self.run_node(

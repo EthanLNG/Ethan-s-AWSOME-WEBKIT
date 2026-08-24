@@ -708,6 +708,7 @@ class PreviewServerTests(unittest.TestCase):
         }]
         point["rectContexts"] = [context, context]
         surface = {
+            "geometrySelector": "#target",
             "targetSelector": ".app-setup",
             "anchor": {"selector": "#phone-stage", "mode": "sticky"},
             "scroll": {"x": 0, "y": 5107},

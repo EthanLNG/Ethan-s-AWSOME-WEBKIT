@@ -70,14 +70,23 @@
               <h2>New agent</h2>
               <p class="section-description">Each active color is a separate branch, preview server, and agent conversation.</p>
             </div>
-            <div class="agent-setting-controls">
-              <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
-              <label class="reasoning-control">Speed
-                <select id="newAgentSpeed">
-                  <option value="normal">Normal</option>
-                  <option value="fast">Fast</option>
-                </select>
-              </label>
+            <div class="agent-setting-stack">
+              <div class="agent-setting-controls">
+                <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
+                <label class="reasoning-control">Speed
+                  <select id="newAgentSpeed">
+                    <option value="normal">Normal</option>
+                    <option value="fast">Fast</option>
+                  </select>
+                </label>
+                <label class="reasoning-control">Overlay contrast
+                  <select id="newAgentOverlayTheme" aria-describedby="overlayThemeNote">
+                    <option value="black">Black</option>
+                    <option value="white">White</option>
+                  </select>
+                </label>
+              </div>
+              <small class="agent-setting-note" id="overlayThemeNote">Project-specific. Black is clearer on light sites, white on dark sites. New sessions only.</small>
             </div>
           </div>
           <div class="color-grid" id="colorGrid"></div>

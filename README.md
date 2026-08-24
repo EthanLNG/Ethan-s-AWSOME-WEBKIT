@@ -49,7 +49,8 @@ overwhelmed would require genuine effort.
 - **Non-blocking feedback:** press **C**, then hold **Alt/Option** while dragging
   a rectangle. Normal clicks continue to reach the website. Press **Space** for
   dictation while the feedback box is empty. C and Space are defaults and can
-  be changed in the Control Center.
+  be changed in the Control Center. Before sending, **Show feedback points**
+  lists every unsent note so you can jump to it and edit it in place.
 - **Git-backed review:** before/after comparison can target one feedback point
   or the whole page. Accept, delete, and redo actions remain point-specific.
 - **Lettered experiments:** A/B/C variants stay scoped to one section and are
@@ -109,6 +110,10 @@ repository or create a starter website. New-project onboarding can collect a
 brand brief and reference files, then ask the agent for several distinct design
 directions. You can preview the directions, choose one or more, and describe how
 to combine them.
+
+Each project can use a black overlay on light sites or a white overlay on dark
+sites. The preference is stored in private Control Center state and applies only
+to new sessions, so changing it does not alter an active review.
 
 Reference files are copied into `project-context/` and committed to the new
 project. WebKit blocks common credential files and high-confidence secret

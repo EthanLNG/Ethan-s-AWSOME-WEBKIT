@@ -92,6 +92,7 @@
       typeof dataset.wkEmoji !== 'string' || !dataset.wkEmoji ||
       !['speech', 'voice-note', 'cloud-voice-note'].includes(dataset.wkDictationMode) ||
       !['browse-default', 'draw-default'].includes(dataset.wkInteractionMode) ||
+      (dataset.wkTheme !== undefined && !['black', 'white'].includes(dataset.wkTheme)) ||
       (dataset.wkMode === 'after' && (dataset.wkBeforePrefix || '') !== '') ||
       (dataset.wkMode === 'before' &&
         !/^\/__wk\/before\/[0-9a-f]{64}$/.test(dataset.wkBeforePrefix || ''))) return null;
@@ -464,6 +465,33 @@
     return Math.max(0, currentScrollY + box.y + box.h / 2 - viewportHeight / 2);
   }
 
+  function feedbackToolsBottom(rects, viewportHeight, gap = 8, fallback = 14) {
+    if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) return fallback;
+    const tops = (rects || []).flatMap((rect) => {
+      if (!rect) return [];
+      const top = Number(rect.top);
+      return Number.isFinite(top) ? [top] : [];
+    });
+    if (!tops.length) return fallback;
+    return Math.max(fallback, viewportHeight - Math.min(...tops) + gap);
+  }
+
+  function feedbackPointListSignature(points) {
+    const ordered = (Array.isArray(points) ? points : []).slice().sort((left, right) =>
+      (left?.number || 0) - (right?.number || 0)
+    );
+    return JSON.stringify(ordered.map((point) => {
+      const text = String(point?.text || '').trim().replace(/\s+/g, ' ');
+      const preview = text || (point?.voiceNote ? 'Voice feedback' : 'Feedback point');
+      return [point?.id || '', point?.number || 0, point?.page || '', preview];
+    }));
+  }
+
+  function ownedSurfaceSessionCanFinish(active, ownerGeneration, requestedGeneration) {
+    return !!active && (requestedGeneration === undefined ||
+      requestedGeneration === ownerGeneration);
+  }
+
   function viewportStateAttributeName(name) {
     if (typeof name !== 'string') return false;
     const lower = name.toLowerCase();
@@ -602,6 +630,42 @@
     return false;
   }
 
+  function surfaceMarkerIdentity(marker) {
+    const pointId = marker?.point?.id;
+    const rectIndex = marker?.rectIndex;
+    const kind = marker?.kind;
+    if (typeof pointId !== 'string' || !pointId || !Number.isInteger(rectIndex) ||
+      !['pin', 'rect'].includes(kind)) return null;
+    return pointId + ':' + rectIndex + ':' + kind;
+  }
+
+  function retainCurrentSurfaceMarkerEntries(entries, currentMarkers) {
+    const currentByIdentity = new Map();
+    for (const marker of (currentMarkers || [])) {
+      const identity = surfaceMarkerIdentity(marker);
+      if (identity && marker?.node?.isConnected) currentByIdentity.set(identity, marker);
+    }
+    const retained = new Map();
+    for (const [role, markers] of (entries || [])) {
+      if (!role?.isConnected) continue;
+      const mapped = new Set();
+      for (const marker of (markers || [])) {
+        const current = currentByIdentity.get(surfaceMarkerIdentity(marker));
+        if (current) mapped.add(current);
+      }
+      if (mapped.size) retained.set(role, mapped);
+    }
+    return retained;
+  }
+
+  function surfaceTrackedNodeSupportsRoles(node, roles) {
+    if (!node || typeof node.contains !== 'function') return false;
+    for (const role of (roles || [])) {
+      if (node === role || node.contains(role)) return true;
+    }
+    return false;
+  }
+
   function surfaceCandidateSpatialScore(rect, box) {
     const coverage = anchorCoverageScore(rect, box);
     if (coverage < 0.5) return 0;
@@ -611,6 +675,51 @@
     // A full-screen layer can cover the mark perfectly while being a terrible
     // semantic target. Reward coverage, but prefer the tightest visual surface.
     return coverage / Math.sqrt(Math.max(1, boxArea / rectArea));
+  }
+
+  function surfaceAnchorOwnsRoles(anchor, target, geometry) {
+    if (!anchor || !target || !geometry || typeof anchor.contains !== 'function') return false;
+    const owns = (node) => anchor === node || anchor.contains(node);
+    return owns(target) && owns(geometry);
+  }
+
+  function surfaceAnimationRunning(animation) {
+    return !!animation && ['pending', 'running'].includes(animation.playState);
+  }
+
+  function surfaceAnimationCapturable(animation) {
+    return !!animation && animation.replaceState !== 'removed' && (
+      ['pending', 'running'].includes(animation.playState) ||
+      (animation.playState === 'paused' && animation.currentTime !== null)
+    );
+  }
+
+  function surfaceAnimationTarget(animation) {
+    let target = animation?.effect?.target || null;
+    if (target && target.element) target = target.element;
+    return target && target.nodeType === 1 ? target : null;
+  }
+
+  function surfaceNodeAnimationRole(node, animationTargets) {
+    if (!node || typeof node.contains !== 'function') return 'none';
+    for (const target of (animationTargets || [])) {
+      if (!target || typeof target.contains !== 'function') continue;
+      if (node === target) return 'exact';
+      // A true animated ancestor moves and fades this tighter descendant.
+      if (target.contains(node)) return 'inside';
+    }
+    // A broad page shell that merely contains one animated descendant must not
+    // become the lifecycle or geometry owner for every point inside the shell.
+    for (const target of (animationTargets || [])) {
+      if (target && typeof target.contains === 'function' && node.contains(target)) {
+        return 'contains';
+      }
+    }
+    return 'none';
+  }
+
+  function surfaceNodeAnimationRelation(node, animationTargets) {
+    return ['exact', 'inside'].includes(surfaceNodeAnimationRole(node, animationTargets));
   }
 
   function preferredSurfaceCandidate(candidates) {
@@ -626,12 +735,22 @@
       const ownsState = Array.isArray(candidate?.stateChain) && candidate.stateChain.length > 0;
       const ownsAnchor = ['fixed', 'sticky'].includes(candidate?.anchor?.mode);
       const isVisualSurface = ['canvas', 'video', 'svg'].includes(candidate?.visualKind);
+      const ownsAnimation = candidate?.hasActiveAnimation === true;
+      const isDynamicSurface = isVisualSurface || ownsAnimation;
       if (candidate?.inactiveBoundary === true) return false;
-      if (!ownsState && !ownsAnchor && !isVisualSurface) return false;
+      if (!ownsState && !ownsAnchor && !isDynamicSurface) return false;
+      // Pointer-transparent SVG, canvas, and video candidates are discovered
+      // outside the browser hit stack. If a sibling visual is painted behind
+      // the primary content, it cannot own a mark on that content merely
+      // because both live in the same sticky story.
+      if (isDynamicSurface && candidate !== primary &&
+        candidate?.paintOrderEvidence === false &&
+        candidate?.anchorContainsPrimary !== true &&
+        candidate?.stronglyRelatedToPrimary !== true) return false;
       // A pointer-transparent icon nested in an ordinary control is strongly
       // related in the DOM but does not own a rectangle drawn over the control.
       // Stateless visual surfaces must materially cover the captured mark.
-      if (isVisualSurface && !ownsState && !ownsAnchor && score(candidate) <= 0) return false;
+      if (isDynamicSurface && !ownsState && !ownsAnchor && score(candidate) <= 0) return false;
       if (candidate?.stronglyRelatedToPrimary === true) return true;
       return candidate?.relatedToPrimary === true && score(candidate) >= minimumRelatedScore;
     }).sort((left, right) => {
@@ -662,6 +781,7 @@
     const reserve = Number.isInteger(visualReserve) && visualReserve > 0 ? visualReserve : 0;
     const rank = (left, right) =>
       Number(right?.[1]?.hits || 0) - Number(left?.[1]?.hits || 0) ||
+      Number(right?.[1]?.surfaceScore || 0) - Number(left?.[1]?.surfaceScore || 0) ||
       Number(right?.[1]?.score || 0) - Number(left?.[1]?.score || 0) ||
       Number(left?.[1]?.order || 0) - Number(right?.[1]?.order || 0);
     const hits = (entries || []).filter((entry) => entry?.[1]?.sourcePriority === 0).sort(rank);
@@ -687,9 +807,14 @@
     return !!surface && Object.prototype.hasOwnProperty.call(surface, 'geometrySelector');
   }
 
-  function resolvedRectAnchorMode(liveModes, capturedSurface, pointAnchor) {
+  function resolvedRectAnchorMode(liveModes, capturedSurface, pointAnchor, anchorOwnsRoles = true) {
     if (capturedSurface) {
       const capturedMode = capturedSurface?.anchor?.mode;
+      // v0.8.20 could persist a sticky lifecycle owner beside geometry from a
+      // different document branch. Never let that contaminated combination
+      // reach the viewport-coordinate fallback.
+      if (surfaceUsesSeparatedGeometry(capturedSurface) &&
+        capturedSurface.anchor && anchorOwnsRoles === false) return 'doc';
       if (['fixed', 'sticky'].includes(capturedMode)) return capturedMode;
       // v0.8.20 surfaces explicitly persist their geometry role, so a null
       // anchor is authoritative. Older surfaces did not have that role and
@@ -732,8 +857,12 @@
 
   function capturedSurfaceGeometrySelector(primary, selected, selectedAnchor) {
     if (!primary || !selected) return null;
-    return !selectedAnchor && selected !== primary &&
-      ['canvas', 'video', 'svg'].includes(selected.visualKind) &&
+    const visualOwnsPaint = !selectedAnchor || selected.paintOrderEvidence === true ||
+      selected.anchorContainsPrimary === true || selected.stronglyRelatedToPrimary === true;
+    const ownsDynamicGeometry = ['canvas', 'video', 'svg'].includes(selected.visualKind) ||
+      selected.hasActiveAnimation === true;
+    return selected !== primary && visualOwnsPaint &&
+      ownsDynamicGeometry &&
       Number(selected.spatialScore) > 0
       ? selected.targetSelector
       : primary.targetSelector;
@@ -874,6 +1003,7 @@
   const INTERACTION_MODE = DS.wkInteractionMode === 'draw-default'
     ? 'draw-default'
     : 'browse-default';
+  const OVERLAY_THEME = DS.wkTheme === 'white' ? 'white' : 'black';
   const PLATFORM = (navigator.userAgentData && navigator.userAgentData.platform)
     || navigator.platform || '';
   const MODIFIER_LABEL = modifierKeyLabel(PLATFORM);
@@ -1091,6 +1221,7 @@
     offeredReview: '',          // batchId:round already auto-entered or queued
     reviewAutoPending: false,   // ready review waiting for an open editor to close
     bootReview: null,           // ?wk-review target during boot - owns automatic entry
+    bootQueuedEdit: null,       // ?wk-edit-point target wins over review auto-entry during boot
     pinEls: [],                 // [{node, point, rectIndex, kind}] for live positioning
     altHeld: false,
   };
@@ -1190,6 +1321,7 @@
   // ===== shadow shell ========================================================
   const host = document.createElement('div');
   host.setAttribute('data-wk-host', '');
+  host.setAttribute('data-wk-theme', OVERLAY_THEME);
   host.setAttribute('popover', 'manual');
   // Inline (not stylesheet) so isolation holds even if the CSS fetch fails.
   host.style.cssText =
@@ -1324,7 +1456,8 @@
   // retrying with backoff until the real sheet lands.
   const CRITICAL =
     '.wk-wrap{position:fixed;inset:0;pointer-events:none}.wk-wrap.wk-off{visibility:hidden}' +
-    '.wk-draw:not(.pass),.wk-pin,.wk-bar,.wk-card,.wk-toast,.wk-send{pointer-events:auto}';
+    '.wk-draw:not(.pass),.wk-pin,.wk-bar,.wk-card,.wk-toast,.wk-send,' +
+    '.wk-feedback-tools-row,.wk-feedback-panel,.wk-show-points{pointer-events:auto}';
   let cssSheet = null, cssStyleNode = null;
   function applySheet(css) {
     try {
@@ -1369,6 +1502,31 @@
   const sendBtn = el('button', 'wk-send');
   sendBtn.type = 'button';
   sendBtn.hidden = true;
+  const feedbackTools = el('div', 'wk-feedback-tools');
+  feedbackTools.hidden = true;
+  const feedbackToolsRow = el('div', 'wk-feedback-tools-row');
+  const showPointsBtn = el('button', 'wk-show-points', 'Show feedback points');
+  showPointsBtn.type = 'button';
+  showPointsBtn.setAttribute('aria-haspopup', 'dialog');
+  showPointsBtn.setAttribute('aria-expanded', 'false');
+  const feedbackPanel = el('div', 'wk-feedback-panel');
+  feedbackPanel.id = 'wk-feedback-panel-' + rand4();
+  feedbackPanel.hidden = true;
+  feedbackPanel.setAttribute('role', 'dialog');
+  feedbackPanel.setAttribute('aria-modal', 'false');
+  const feedbackPanelHead = el('div', 'wk-feedback-panel-head');
+  const feedbackPanelTitle = el('span', 'wk-feedback-panel-title', 'Feedback points');
+  feedbackPanelTitle.id = 'wk-feedback-panel-title-' + rand4();
+  feedbackPanel.setAttribute('aria-labelledby', feedbackPanelTitle.id);
+  showPointsBtn.setAttribute('aria-controls', feedbackPanel.id);
+  const feedbackPanelClose = el('button', 'wk-feedback-panel-close', '×');
+  feedbackPanelClose.type = 'button';
+  feedbackPanelClose.setAttribute('aria-label', 'Close feedback points');
+  feedbackPanelHead.append(feedbackPanelTitle, feedbackPanelClose);
+  const feedbackPointList = el('div', 'wk-feedback-point-list');
+  feedbackPanel.append(feedbackPanelHead, feedbackPointList);
+  feedbackToolsRow.append(showPointsBtn, sendBtn);
+  feedbackTools.append(feedbackPanel, feedbackToolsRow);
   const statusChip = el('div', 'wk-chip');
   statusChip.hidden = true;
   statusChip.setAttribute('role', 'status');
@@ -1386,7 +1544,7 @@
 
   if (drawLayer) wrap.appendChild(drawLayer);
   wrap.appendChild(pinLayer);
-  if (!IS_BEFORE) { wrap.appendChild(hintChip); wrap.appendChild(sendBtn); }
+  if (!IS_BEFORE) { wrap.appendChild(hintChip); wrap.appendChild(feedbackTools); }
   wrap.appendChild(statusChip);
   wrap.appendChild(bar);
   root.appendChild(wrap);
@@ -1484,6 +1642,7 @@
       updateHint();
       if (S.reviewing) updateBar();   // re-parks the page's abc switcher for this point
     } else {
+      closeFeedbackPointsList({ restoreFocus: false });
       // overlay hidden = the page is the user's again: its own abc switcher is
       // now the only control there is, so un-park it
       restorePageAbc();
@@ -1493,9 +1652,37 @@
   }
   const toggleMode = () => setMode(S.mode === 'feedback' ? 'evaluate' : 'feedback');
 
+  let feedbackToolsPositionRaf = 0;
+  function positionFeedbackTools() {
+    feedbackToolsPositionRaf = 0;
+    if (feedbackTools.hidden) return;
+    const controls = [hintChip, statusChip, bar, ...bar.querySelectorAll('.wk-abc-chip')];
+    const rects = [];
+    for (const control of controls) {
+      if (!control || control.hidden || !control.isConnected || !control.getClientRects().length) continue;
+      const rect = control.getBoundingClientRect();
+      if (Number.isFinite(rect.top)) rects.push(rect);
+    }
+    feedbackTools.style.bottom = feedbackToolsBottom(rects, innerHeight) + 'px';
+  }
+  function scheduleFeedbackToolsPosition() {
+    if (feedbackToolsPositionRaf) return;
+    feedbackToolsPositionRaf = requestAnimationFrame(positionFeedbackTools);
+  }
+  if (typeof ResizeObserver === 'function') {
+    const feedbackToolsResizeObserver = new ResizeObserver(scheduleFeedbackToolsPosition);
+    feedbackToolsResizeObserver.observe(hintChip);
+    feedbackToolsResizeObserver.observe(statusChip);
+    feedbackToolsResizeObserver.observe(bar);
+  }
+  window.addEventListener('resize', scheduleFeedbackToolsPosition);
+
   function updateHint() {
     if (IS_BEFORE) { hintChip.hidden = true; return; }
     hintChip.hidden = !(S.mode === 'feedback' && !S.card && !S.reviewing);
+    showPointsBtn.disabled = !!S.card;
+    if (S.card) closeFeedbackPointsList({ restoreFocus: false });
+    scheduleFeedbackToolsPosition();
   }
 
   // ===== rAF reposition engine ===============================================
@@ -1512,11 +1699,10 @@
     node.style.transform = 'translate(' + x + 'px,' + y + 'px)';
     return { x, y };
   }
-  function repositionAll() {
-    posRaf = 0;
+  function repositionMarkers(markers) {
     const geometryCache = new Map();
     const signature = [];
-    for (const marker of S.pinEls) {
+    for (const marker of (markers || [])) {
       let geometry = geometryCache.get(marker.point);
       if (!geometry) {
         geometry = correctedPointRects(marker.point);
@@ -1543,8 +1729,13 @@
         Math.round(box.w * 10) + ':' + Math.round(box.h * 10)
       );
     }
-    if (S.card) positionFrozen(), positionCard();
     return signature.join('|');
+  }
+  function repositionAll() {
+    posRaf = 0;
+    const signature = repositionMarkers(S.pinEls);
+    if (S.card) positionFrozen(), positionCard();
+    return signature;
   }
 
   // Moving sites often keep animating their scene for several frames after the
@@ -1602,10 +1793,145 @@
   }
 
   let surfaceObserver = null;
+  let surfaceResizeObserver = null;
+  let surfaceIntersectionObserver = null;
   let surfaceRebindRaf = 0;
   const trackedSurfaceNodes = new Set();
   const trackedSurfaceAttributeSets = new Map();
+  const trackedSurfaceMarkers = new Map();
   const surfaceRemountParents = new Set();
+  let surfaceAnimationRaf = 0;
+  let surfaceAnimationTickTimer = 0;
+  let surfaceAnimationRescanTimer = 0;
+  let surfaceAnimationMarkers = new Set();
+  let surfaceAnimationLastSignature = '';
+  let surfaceAnimationStableFrames = 0;
+
+  function surfaceAnimationEnvironmentActive() {
+    return S.mode === 'feedback' && S.pinEls.length > 0 && !document.hidden;
+  }
+
+  function discoverSurfaceAnimationMarkers() {
+    const markers = new Set();
+    if (!surfaceAnimationEnvironmentActive()) return markers;
+    const animationStates = new Map();
+    for (const [role, relatedMarkers] of trackedSurfaceMarkers) {
+      if (!role.isConnected || typeof role.getAnimations !== 'function') continue;
+      let roleActive = false;
+      const seenForRole = new Set();
+      const inspect = (animations) => {
+        for (const animation of animations) {
+          if (seenForRole.has(animation)) continue;
+          seenForRole.add(animation);
+          let running = animationStates.get(animation);
+          if (running === undefined) {
+            running = surfaceAnimationRunning(animation);
+            animationStates.set(animation, running);
+          }
+          if (running) roleActive = true;
+        }
+      };
+      // Exact roles own their own effects. SVG is the only composite DOM
+      // surface whose painted animation commonly lives on descendants. Avoid
+      // turning a generic role such as main into a hot marker because an
+      // unrelated child elsewhere on the page happens to animate.
+      const compositeAnimationRole = String(role.tagName || '').toLowerCase() === 'svg';
+      try {
+        inspect(compositeAnimationRole
+          ? role.getAnimations({ subtree: true })
+          : role.getAnimations());
+      } catch (e) {
+        try { inspect(role.getAnimations()); } catch (ignored) { /* unsupported */ }
+      }
+      // An animated true ancestor can move or clip this role. Siblings that
+      // merely share a broad container cannot, so they never wake its marker.
+      for (let ancestor = role.parentElement;
+        ancestor && !roleActive; ancestor = ancestor.parentElement) {
+        if (typeof ancestor.getAnimations !== 'function') continue;
+        try { inspect(ancestor.getAnimations()); } catch (e) { /* unsupported */ }
+      }
+      if (roleActive) {
+        for (const marker of relatedMarkers) markers.add(marker);
+      }
+    }
+    return markers;
+  }
+
+  function stopSurfaceAnimationSampling() {
+    if (surfaceAnimationRaf) cancelAnimationFrame(surfaceAnimationRaf);
+    if (surfaceAnimationTickTimer) clearTimeout(surfaceAnimationTickTimer);
+    surfaceAnimationRaf = 0;
+    surfaceAnimationTickTimer = 0;
+    surfaceAnimationMarkers = new Set();
+    surfaceAnimationLastSignature = '';
+    surfaceAnimationStableFrames = 0;
+  }
+
+  function stopSurfaceAnimationDriver() {
+    if (surfaceAnimationRescanTimer) clearTimeout(surfaceAnimationRescanTimer);
+    surfaceAnimationRescanTimer = 0;
+    stopSurfaceAnimationSampling();
+  }
+
+  function surfaceAnimationTick(timestamp) {
+    surfaceAnimationRaf = 0;
+    if (!surfaceAnimationEnvironmentActive() || !surfaceAnimationMarkers.size) {
+      return;
+    }
+    const signature = repositionMarkers(surfaceAnimationMarkers);
+    surfaceAnimationStableFrames = signature === surfaceAnimationLastSignature
+      ? surfaceAnimationStableFrames + 1
+      : 0;
+    surfaceAnimationLastSignature = signature;
+    if (surfaceAnimationStableFrames >= 4) {
+      // Settled infinite animations still need visibility checks, but a timer
+      // avoids a no-op callback on every display frame.
+      surfaceAnimationTickTimer = setTimeout(() => {
+        surfaceAnimationTickTimer = 0;
+        if (surfaceAnimationEnvironmentActive() && surfaceAnimationMarkers.size &&
+          !surfaceAnimationRaf) {
+          surfaceAnimationRaf = requestAnimationFrame(surfaceAnimationTick);
+        }
+      }, 100);
+    } else {
+      surfaceAnimationRaf = requestAnimationFrame(surfaceAnimationTick);
+    }
+  }
+
+  function scanSurfaceAnimations() {
+    surfaceAnimationRescanTimer = 0;
+    if (!surfaceAnimationEnvironmentActive()) {
+      stopSurfaceAnimationDriver();
+      return;
+    }
+    const nextMarkers = discoverSurfaceAnimationMarkers();
+    if (nextMarkers.size) {
+      surfaceAnimationMarkers = nextMarkers;
+      if (!surfaceAnimationRaf && !surfaceAnimationTickTimer) {
+        surfaceAnimationRaf = requestAnimationFrame(surfaceAnimationTick);
+      }
+    } else {
+      stopSurfaceAnimationSampling();
+    }
+    // CSS animation events cover ordinary starts. This bounded heartbeat also
+    // catches animations created later through Element.animate().
+    surfaceAnimationRescanTimer = setTimeout(scanSurfaceAnimations, 500);
+  }
+
+  function scheduleSurfaceAnimationScan() {
+    if (!surfaceAnimationEnvironmentActive()) {
+      stopSurfaceAnimationDriver();
+      return;
+    }
+    if (surfaceAnimationRescanTimer) clearTimeout(surfaceAnimationRescanTimer);
+    surfaceAnimationRescanTimer = setTimeout(scanSurfaceAnimations, 0);
+  }
+
+  function wakeTrackedSurface(event) {
+    if (!animationNodeAffectsTrackedSurface(event.target)) return;
+    scheduleSurfacePosition();
+    scheduleSurfaceAnimationScan();
+  }
   function rememberSurfaceRemountParent(node) {
     if (!node || !node.isConnected || isOverlayNode(node) ||
       (surfaceRemountParents.size >= 64 && !surfaceRemountParents.has(node))) return;
@@ -1625,6 +1951,15 @@
     }
     return false;
   }
+  function animationNodeAffectsTrackedSurface(changedNode) {
+    if (!changedNode || typeof changedNode.contains !== 'function') return false;
+    for (const role of trackedSurfaceMarkers.keys()) {
+      if (role === changedNode || role.contains(changedNode) || changedNode.contains(role)) {
+        return true;
+      }
+    }
+    return false;
+  }
   function childListAffectsTrackedSurface(record) {
     return !!record && record.type === 'childList' && surfaceChildListRelevant(
       record.target, record.removedNodes, trackedSurfaceNodes, surfaceRemountParents
@@ -1636,19 +1971,37 @@
       surfaceRebindRaf = 0;
     }
     if (surfaceObserver) surfaceObserver.disconnect();
+    if (surfaceResizeObserver) surfaceResizeObserver.disconnect();
+    if (surfaceIntersectionObserver) surfaceIntersectionObserver.disconnect();
     if (S.mode !== 'feedback') {
       trackedSurfaceNodes.clear();
       trackedSurfaceAttributeSets.clear();
+      trackedSurfaceMarkers.clear();
       surfaceRemountParents.clear();
+      stopSurfaceAnimationDriver();
       return;
     }
-    const connectedTrackedNodes = [...trackedSurfaceNodes].filter((node) =>
-      node.isConnected && !isOverlayNode(node)
+    // renderPins replaces every overlay marker node. Remap retained page roles
+    // to the equivalent marker in the current generation, and discard roles
+    // whose point no longer exists. Otherwise one unresolved selector keeps
+    // detached marker generations alive and animation sampling grows forever.
+    const connectedTrackedMarkers = retainCurrentSurfaceMarkerEntries(
+      trackedSurfaceMarkers, S.pinEls
     );
+    const connectedRoleNodes = [...connectedTrackedMarkers.keys()];
+    const connectedTrackedNodes = [...trackedSurfaceNodes].filter((node) =>
+      node.isConnected && !isOverlayNode(node) &&
+      surfaceTrackedNodeSupportsRoles(node, connectedRoleNodes)
+    );
+    const connectedTrackedAttributes = new Map(connectedTrackedNodes.map((node) => [
+      node, new Set(trackedSurfaceAttributeSets.get(node) || []),
+    ]));
     trackedSurfaceNodes.clear();
     trackedSurfaceAttributeSets.clear();
+    trackedSurfaceMarkers.clear();
     if (!S.pinEls.length) {
       surfaceRemountParents.clear();
+      stopSurfaceAnimationDriver();
       return;
     }
     let unresolvedSurface = false;
@@ -1667,12 +2020,27 @@
       }
       return true;
     };
-    const addTargetChain = (target) => {
+    const addTrackedRole = (node, attributeNames = [], marker = null) => {
+      if (!addTrackedNode(node, attributeNames)) return false;
+      if (marker) {
+        let markers = trackedSurfaceMarkers.get(node);
+        if (!markers) {
+          markers = new Set();
+          trackedSurfaceMarkers.set(node, markers);
+        }
+        markers.add(marker);
+      }
+      return true;
+    };
+    const addTargetChain = (target, marker) => {
       let depth = 0;
       for (let current = target; current && depth < 24; current = current.parentElement) {
         // Inline transforms are frequently rewritten every animation frame.
         // Observe style only on exact role owners, never on every ancestor.
-        if (!addTrackedNode(current, depth === 0 ? ['style'] : [])) break;
+        const added = depth === 0
+          ? addTrackedRole(current, ['style'], marker)
+          : addTrackedNode(current);
+        if (!added) break;
         depth += 1;
       }
     };
@@ -1685,7 +2053,7 @@
       if (surface) {
         const target = uniqueElement(surface.targetSelector);
         if (target) {
-          addTargetChain(target);
+          addTargetChain(target, marker);
         } else {
           unresolvedSurface = true;
           const fallbackContexts = Array.isArray(point.rectContexts) &&
@@ -1695,18 +2063,18 @@
           for (const context of fallbackContexts) {
             const fallbackTarget = uniqueElement(context?.selector);
             if (!fallbackTarget) continue;
-            addTargetChain(fallbackTarget);
+            addTargetChain(fallbackTarget, marker);
             break;
           }
         }
         const anchorTarget = uniqueElement(surface.anchor?.selector);
         if (surface.anchor && !anchorTarget) unresolvedSurface = true;
-        if (anchorTarget) addTrackedNode(anchorTarget, ['style']);
+        if (anchorTarget) addTrackedRole(anchorTarget, ['style'], marker);
         const geometryTarget = uniqueElement(surface.geometrySelector);
-        if (geometryTarget) addTrackedNode(geometryTarget, ['style']);
+        if (geometryTarget) addTrackedRole(geometryTarget, ['style'], marker);
         for (const signal of (surface.stateChain || [])) {
-          addTrackedNode(
-            uniqueElement(signal.selector), ['style', ...Object.keys(signal.attrs || {})]
+          addTrackedRole(
+            uniqueElement(signal.selector), ['style', ...Object.keys(signal.attrs || {})], marker
           );
         }
       } else {
@@ -1725,12 +2093,20 @@
           target = contextTarget;
           break;
         }
-        if (target) addTargetChain(target);
+        if (target) addTargetChain(target, marker);
       }
     }
 
     if (unresolvedSurface) {
-      for (const node of connectedTrackedNodes) addTrackedNode(node);
+      for (const node of connectedTrackedNodes) {
+        const attributes = [...(connectedTrackedAttributes.get(node) || [])];
+        const markers = connectedTrackedMarkers.get(node);
+        if (markers?.size) {
+          for (const marker of markers) addTrackedRole(node, attributes, marker);
+        } else {
+          addTrackedNode(node, attributes);
+        }
+      }
       for (const node of [...surfaceRemountParents]) {
         if (!node.isConnected) surfaceRemountParents.delete(node);
       }
@@ -1738,11 +2114,15 @@
       surfaceRemountParents.clear();
     }
 
-    if (!surfaceObserver) return;
     for (const node of trackedSurfaceNodes) {
       const attributeFilter = [...(trackedSurfaceAttributeSets.get(node) || [])];
-      surfaceObserver.observe(node, { attributes: true, attributeFilter });
+      if (surfaceObserver) surfaceObserver.observe(node, { attributes: true, attributeFilter });
     }
+    for (const node of trackedSurfaceMarkers.keys()) {
+      if (surfaceResizeObserver) surfaceResizeObserver.observe(node);
+      if (surfaceIntersectionObserver) surfaceIntersectionObserver.observe(node);
+    }
+    scheduleSurfaceAnimationScan();
   }
   document.addEventListener('wheel', notePinMotion, { capture: true, passive: true });
   document.addEventListener('touchmove', notePinMotion, { capture: true, passive: true });
@@ -1753,23 +2133,39 @@
     window.visualViewport.addEventListener('scroll', notePinMotion, { passive: true });
     window.visualViewport.addEventListener('resize', notePinMotion, { passive: true });
   }
-  document.addEventListener('transitionend', (event) => {
-    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
-  }, true);
-  document.addEventListener('transitioncancel', (event) => {
-    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
-  }, true);
-  document.addEventListener('animationend', (event) => {
-    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
-  }, true);
-  document.addEventListener('animationcancel', (event) => {
-    if (nodeAffectsTrackedSurface(event.target)) scheduleSurfacePosition();
-  }, true);
+  document.addEventListener('transitionrun', wakeTrackedSurface, true);
+  document.addEventListener('transitionstart', wakeTrackedSurface, true);
+  document.addEventListener('transitionend', wakeTrackedSurface, true);
+  document.addEventListener('transitioncancel', wakeTrackedSurface, true);
+  document.addEventListener('animationstart', wakeTrackedSurface, true);
+  document.addEventListener('animationiteration', wakeTrackedSurface, true);
+  document.addEventListener('animationend', wakeTrackedSurface, true);
+  document.addEventListener('animationcancel', wakeTrackedSurface, true);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopSurfaceAnimationDriver();
+    else scheduleSurfaceAnimationScan();
+  });
   if (typeof MutationObserver === 'function') {
     surfaceObserver = new MutationObserver((records) => {
       if (records.some((record) => surfaceMutationRelevant(
         record.attributeName || '', trackedSurfaceNodes.has(record.target)
-      ))) scheduleSurfacePosition();
+      ))) {
+        scheduleSurfacePosition();
+      }
+    });
+  }
+  if (typeof ResizeObserver === 'function') {
+    surfaceResizeObserver = new ResizeObserver((entries) => {
+      if (entries.some((entry) => trackedSurfaceMarkers.has(entry.target))) {
+        scheduleSurfacePosition();
+      }
+    });
+  }
+  if (typeof IntersectionObserver === 'function') {
+    surfaceIntersectionObserver = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => trackedSurfaceMarkers.has(entry.target))) {
+        scheduleSurfacePosition();
+      }
     });
   }
 
@@ -1891,12 +2287,58 @@
     }
   }
 
+  function surfaceCandidatePaintOrderEvidence(candidate, primary, rect) {
+    const node = candidate?.node;
+    const primaryNode = primary?.node;
+    if (!node || !primaryNode || !rect || !node.style ||
+      typeof node.contains !== 'function' || typeof primaryNode.contains !== 'function') return false;
+    if (node === primaryNode || node.contains(primaryNode) || primaryNode.contains(node)) return true;
+    const pointerValue = node.style.getPropertyValue('pointer-events');
+    const pointerPriority = node.style.getPropertyPriority('pointer-events');
+    let samples = 0;
+    let above = 0;
+    node.style.setProperty('pointer-events', 'auto', 'important');
+    try {
+      for (const fy of [0.2, 0.5, 0.8]) {
+        for (const fx of [0.2, 0.5, 0.8]) {
+          const x = rect.x - scrollX + rect.w * fx;
+          const y = rect.y - scrollY + rect.h * fy;
+          if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+          const stack = underlayElementsFromPoint(x, y);
+          const candidateIndex = stack.findIndex((entry) =>
+            entry === node || node.contains(entry)
+          );
+          const primaryIndex = stack.findIndex((entry) =>
+            entry === primaryNode || primaryNode.contains(entry)
+          );
+          if (candidateIndex < 0 && primaryIndex < 0) continue;
+          samples += 1;
+          if (candidateIndex >= 0 && (primaryIndex < 0 || candidateIndex < primaryIndex)) above += 1;
+        }
+      }
+    } catch (e) { /* a hostile page cannot turn capture into a save failure */ }
+    finally {
+      if (pointerValue) node.style.setProperty('pointer-events', pointerValue, pointerPriority);
+      else node.style.removeProperty('pointer-events');
+    }
+    return samples > 0 && above >= Math.ceil(samples / 2);
+  }
+
   function uniqueElement(selector) {
     if (!selector) return null;
     try {
       const matches = document.querySelectorAll(selector);
       return matches.length === 1 ? matches[0] : null;
     } catch (e) { return null; }
+  }
+
+  function resolvedSurfaceAnchorOwnership(surface) {
+    if (!surfaceUsesSeparatedGeometry(surface) || !surface?.anchor) return true;
+    const anchor = uniqueElement(surface.anchor.selector);
+    const target = uniqueElement(surface.targetSelector);
+    const geometry = uniqueElement(surface.geometrySelector);
+    if (!anchor || !target || !geometry) return null;
+    return surfaceAnchorOwnsRoles(anchor, target, geometry);
   }
 
   function surfaceNodesRelated(first, second) {
@@ -1960,9 +2402,29 @@
     return false;
   }
 
+  function capturableSurfaceAnimationTargets(limit = 512, targetLimit = 64) {
+    if (typeof document.getAnimations !== 'function') return [];
+    let animations = [];
+    try { animations = document.getAnimations(); } catch (e) { return []; }
+    const targets = [];
+    const seen = new Set();
+    for (const animation of animations.slice(0, limit)) {
+      if (!surfaceAnimationCapturable(animation)) continue;
+      const target = surfaceAnimationTarget(animation);
+      if (!target || !target.isConnected || seen.has(target) || isOverlayNode(target)) continue;
+      seen.add(target);
+      targets.push(target);
+      if (targets.length >= targetLimit) break;
+    }
+    return targets;
+  }
+
   function captureRectSurface(contexts, rect) {
     const candidates = [];
     const seenTargets = new Set();
+    const animationTargets = Array.isArray(contexts?.animationTargets)
+      ? contexts.animationTargets
+      : capturableSurfaceAnimationTargets();
     for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12)) {
       const target = uniqueElement(context?.selector);
       if (!target || seenTargets.has(target)) continue;
@@ -1995,6 +2457,8 @@
         hasPositiveActivation,
         anchor: anchor && anchorSelector ? { selector: anchorSelector, mode: anchor.mode } : null,
         stateChain,
+        animationRole: surfaceNodeAnimationRole(target, animationTargets),
+        hasActiveAnimation: surfaceNodeAnimationRelation(target, animationTargets),
         spatialScore: surfaceCandidateSpatialScore(rect, context?.box),
       });
     }
@@ -2004,17 +2468,36 @@
       candidate.relatedToPrimary = surfaceNodesRelated(primary.node, candidate.node);
       candidate.stronglyRelatedToPrimary = primary.node === candidate.node ||
         primary.node.contains(candidate.node) || candidate.node.contains(primary.node);
+      candidate.anchorContainsPrimary = !!candidate.anchorNode &&
+        (candidate.anchorNode === primary.node || candidate.anchorNode.contains(primary.node));
+      if (['canvas', 'video', 'svg'].includes(candidate.visualKind) ||
+        candidate.hasActiveAnimation) {
+        candidate.paintOrderEvidence = candidate.stronglyRelatedToPrimary ||
+          surfaceCandidatePaintOrderEvidence(candidate, primary, rect);
+      }
     }
     const selected = preferredSurfaceCandidate(candidates);
     if (!selected) return null;
     let selectedAnchor = selected.anchor;
+    let selectedAnchorNode = selected.anchorNode;
     if (!selectedAnchor && primary.anchor && primary.anchorNode &&
-      primary.anchorNode.contains(selected.node)) selectedAnchor = primary.anchor;
+      primary.anchorNode.contains(selected.node)) {
+      selectedAnchor = primary.anchor;
+      selectedAnchorNode = primary.anchorNode;
+    }
+    const geometrySelector = capturedSurfaceGeometrySelector(primary, selected, selectedAnchor);
+    const geometryOwner = candidates.find((candidate) =>
+      candidate.targetSelector === geometrySelector
+    )?.node || uniqueElement(geometrySelector);
+    if (selectedAnchor && (!selectedAnchorNode || !geometryOwner ||
+      !(selectedAnchorNode === geometryOwner || selectedAnchorNode.contains(geometryOwner)))) {
+      selectedAnchor = null;
+    }
     return {
       // Geometry, lifecycle, and viewport anchoring have separate owners. This
       // prevents an unrelated fullscreen sticky layer from hijacking a normal
       // document rectangle while still tracking pointer-transparent scenes.
-      geometrySelector: capturedSurfaceGeometrySelector(primary, selected, selectedAnchor),
+      geometrySelector,
       targetSelector: selected.targetSelector,
       anchor: selectedAnchor,
       stateChain: selected.stateChain,
@@ -2082,6 +2565,20 @@
         if (!separatedGeometry) return unresolvedSurfaceActive(point, surface, reviewFallback);
         return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;
       }
+      const geometry = separatedGeometry ? uniqueElement(surface.geometrySelector) : target;
+      if (separatedGeometry && !geometry) {
+        return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;
+      }
+      const anchorOwnership = resolvedSurfaceAnchorOwnership(surface);
+      if (surface.anchor && separatedGeometry && anchorOwnership === false) {
+        // Repair points captured by v0.8.20 with a sticky scene as lifecycle
+        // owner and a document element as geometry owner. The real geometry is
+        // authoritative; the foreign scene's state and anchor are discarded.
+        return visualSurfaceActive(
+          effectivelyVisible(geometry), false, false, 'doc', reviewFallback,
+          scrollY, Number(surface.scroll?.y ?? point.scroll?.y), innerHeight
+        );
+      }
       const visible = effectivelyVisible(target);
       const stateChain = Array.isArray(surface.stateChain) ? surface.stateChain : [];
       // Old points may contain only negative ARIA values or inactive class
@@ -2099,7 +2596,7 @@
         } else {
           const anchor = uniqueElement(surface.anchor.selector);
           const anchorValid = !!anchor && effectivelyVisible(anchor) &&
-            (anchor === target || anchor.contains(target)) &&
+            anchorOwnership === true &&
             elementViewportAnchorMode(anchor) === surface.anchor.mode;
           if (!anchorValid) {
             return reviewFallback ? unresolvedSurfaceActive(point, surface, true) : false;
@@ -2153,7 +2650,8 @@
       const score = anchorContextScore(rectDoc, box, viewport);
       if (score <= 0 || (requireEffectiveVisibility && !effectivelyVisible(elm))) return;
       rankedElements.set(elm, {
-        box, score, sourcePriority, hits: sourcePriority === 0 ? 1 : 0,
+        box, score, surfaceScore: surfaceCandidateSpatialScore(rectDoc, box),
+        sourcePriority, hits: sourcePriority === 0 ? 1 : 0,
         order: rankedElements.size,
       });
     }
@@ -2185,7 +2683,12 @@
         }
       } catch (e) { /* an older selector engine keeps the hit-test candidates */ }
     }
-    // 3) bbox scan fallback - the rect may sit partly outside the viewport
+    // 3) Normal DOM elements can be the visual scene too. Include a bounded
+    // set of visible CSS and Web Animation targets so a point drawn on a
+    // moving illustration remains attached after capture.
+    const animationTargets = capturableSurfaceAnimationTargets();
+    for (const elm of animationTargets) consider(elm, true, 2);
+    // 4) bbox scan fallback - the rect may sit partly outside the viewport
     //    where elementsFromPoint can't see.
     if (rankedElements.size === 0 && document.body) {
       let scanned = 0;
@@ -2213,6 +2716,13 @@
       };
     }).filter((context) => context.selector);
     if (contexts.length) contexts[0].role = 'primary';
+    // Array properties are ignored by JSON serialization. Keep the live nodes
+    // only long enough for captureRectSurface to identify animation ownership.
+    try {
+      Object.defineProperty(contexts, 'animationTargets', {
+        value: animationTargets, configurable: true,
+      });
+    } catch (e) { /* capture remains useful without animation ownership */ }
     return contexts;
   }
 
@@ -2369,7 +2879,10 @@
         .map((entry) => entry.viewportAnchorMode)
         .filter(Boolean);
       const capturedSurface = Array.isArray(p.rectSurfaces) ? p.rectSurfaces[rectIndex] : null;
-      return resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor);
+      return resolvedRectAnchorMode(
+        liveModes, capturedSurface, p.anchor,
+        resolvedSurfaceAnchorOwnership(capturedSurface)
+      );
     });
     const fixedByRect = anchorModes.map((mode) => mode !== 'doc');
     return {
@@ -3598,6 +4111,7 @@
       node.remove();
       clearFrozen();
       S.card = null;
+      finishQueuedEditorSurfaceSession();
       renderPins();
       updateSendBtn();
       if (S.reviewing) updateBar();
@@ -3843,15 +4357,222 @@
   }
 
   // ===== send ================================================================
+  function feedbackPointPreview(point) {
+    const text = String(point && point.text || '').trim().replace(/\s+/g, ' ');
+    if (text) return text;
+    return point && point.voiceNote ? 'Voice feedback' : 'Feedback point';
+  }
+
+  let paintedFeedbackPointListSignature = '';
+  function paintFeedbackPointList() {
+    const points = S.points.slice().sort((left, right) =>
+      (left.number || 0) - (right.number || 0)
+    );
+    const signature = feedbackPointListSignature(points);
+    if (signature === paintedFeedbackPointListSignature &&
+      feedbackPointList.childElementCount === points.length) return false;
+
+    const active = root.activeElement;
+    const focusedPointId = active && feedbackPointList.contains(active)
+      ? active.dataset?.pointId || ''
+      : '';
+    feedbackPointList.textContent = '';
+    for (const point of points) {
+      const item = el('button', 'wk-feedback-point-item');
+      item.type = 'button';
+      item.dataset.pointId = point.id;
+      const number = el('span', 'wk-feedback-point-number', String(point.number));
+      const copy = el('span', 'wk-feedback-point-copy');
+      copy.appendChild(el('span', 'wk-feedback-point-text', feedbackPointPreview(point)));
+      if (point.page !== logicalPath()) {
+        copy.appendChild(el('span', 'wk-feedback-point-page', point.page));
+      }
+      item.append(number, copy);
+      item.setAttribute('aria-label', 'Edit feedback point ' + point.number + ': ' +
+        feedbackPointPreview(point) + (point.page !== logicalPath() ? ', on ' + point.page : ''));
+      item.addEventListener('click', () => { openQueuedPointEditor(point.id); });
+      feedbackPointList.appendChild(item);
+    }
+    paintedFeedbackPointListSignature = signature;
+    if (focusedPointId) {
+      const replacement = [...feedbackPointList.querySelectorAll('.wk-feedback-point-item')]
+        .find((item) => item.dataset.pointId === focusedPointId);
+      if (replacement) replacement.focus();
+    }
+    return true;
+  }
+
+  function closeFeedbackPointsList(opts) {
+    opts = opts || {};
+    if (feedbackPanel.hidden) return;
+    feedbackPanel.hidden = true;
+    showPointsBtn.setAttribute('aria-expanded', 'false');
+    showPointsBtn.classList.remove('open');
+    if (opts.restoreFocus && showPointsBtn.isConnected && !showPointsBtn.disabled) {
+      showPointsBtn.focus();
+    }
+  }
+
+  function openFeedbackPointsList() {
+    if (!S.points.length || S.card || IS_BEFORE) return;
+    paintFeedbackPointList();
+    feedbackPanel.hidden = false;
+    showPointsBtn.setAttribute('aria-expanded', 'true');
+    showPointsBtn.classList.add('open');
+    requestAnimationFrame(() => {
+      feedbackPointList.querySelector('.wk-feedback-point-item')?.focus();
+    });
+  }
+
+  function stripInternalQueryParam(name) {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete(name);
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    } catch (e) { /* leave a harmless internal parameter in unusual browsers */ }
+  }
+
+  function scrollQueuedPointIntoView(point) {
+    const viewportAnchor = pinBox(point);
+    const box = viewportAnchor ? viewportAnchor.box : correctedRect(point);
+    const primaryIndex = primaryRectIndex(point.rects || [point.rect], point.rect);
+    const capturedStickyScrollY = Number(
+      point.rectSurfaces?.[primaryIndex]?.scroll?.y ?? point.scroll?.y
+    );
+    const target = reviewScrollTarget(
+      box, !!viewportAnchor, viewportAnchor ? viewportAnchor.anchorMode : 'doc',
+      scrollY, innerHeight, capturedStickyScrollY
+    );
+    if (target !== null) window.scrollTo({ top: target, behavior: 'instant' });
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => {
+        const settledAnchor = pinBox(point);
+        const settledBox = settledAnchor ? settledAnchor.box : correctedRect(point);
+        const retry = reviewScrollTarget(
+          settledBox, !!settledAnchor, settledAnchor ? settledAnchor.anchorMode : 'doc',
+          scrollY, innerHeight, capturedStickyScrollY
+        );
+        if (retry !== null && Math.abs(retry - scrollY) > 1) {
+          window.scrollTo({ top: retry, behavior: 'instant' });
+        }
+        requestAnimationFrame(() => {
+          schedulePos();
+          resolve();
+        });
+      });
+    });
+  }
+
+  let queuedPointNavigationGeneration = 0;
+  let queuedEditorSurfacesActive = false;
+  let queuedEditorSurfaceGeneration = 0;
+  function finishQueuedEditorSurfaceSession(ownerGeneration) {
+    if (!ownedSurfaceSessionCanFinish(
+      queuedEditorSurfacesActive, queuedEditorSurfaceGeneration, ownerGeneration
+    )) return;
+    queuedEditorSurfacesActive = false;
+    queuedEditorSurfaceGeneration = 0;
+    if (S.reviewing) restoreReviewSurfaces(currentPoint());
+    else closeAutoOpenedReviewSurfaces();
+  }
+  async function openQueuedPointEditor(pointId, opts) {
+    opts = opts || {};
+    const generation = ++queuedPointNavigationGeneration;
+    // A newer navigation owns the surface from this point onward. Close any
+    // dialog or popover restored by an older pending navigation before an
+    // early return can strand it on screen.
+    finishQueuedEditorSurfaceSession();
+    closeFeedbackPointsList({ restoreFocus: false });
+    S.points = loadQueuedPoints();
+    updateSendBtn();
+    let point = S.points.find((candidate) => candidate.id === pointId);
+    if (!point) {
+      toast('That feedback point was already sent or deleted.', { kind: 'warn' });
+      return false;
+    }
+    if (point.page !== logicalPath()) {
+      if (opts.samePageOnly) {
+        toast('That feedback point belongs to a different page.', { kind: 'warn' });
+        return false;
+      }
+      navGuarded(
+        physicalPath(point.page, 'after') + '?wk-edit-point=' + encodeURIComponent(point.id),
+        "This feedback point's page no longer exists."
+      );
+      return false;
+    }
+    restoreReviewSurfaces(point);
+    queuedEditorSurfacesActive = true;
+    queuedEditorSurfaceGeneration = generation;
+    await scrollQueuedPointIntoView(point);
+    if (generation !== queuedPointNavigationGeneration) {
+      finishQueuedEditorSurfaceSession(generation);
+      return false;
+    }
+    S.points = loadQueuedPoints();
+    updateSendBtn();
+    point = S.points.find((candidate) => candidate.id === pointId);
+    if (!point) {
+      finishQueuedEditorSurfaceSession(generation);
+      toast('That feedback point was already sent or deleted.', { kind: 'warn' });
+      return false;
+    }
+    if (point.page !== logicalPath()) {
+      finishQueuedEditorSurfaceSession(generation);
+      toast('That feedback point now belongs to a different page.', { kind: 'warn' });
+      return false;
+    }
+    if (S.card) {
+      finishQueuedEditorSurfaceSession(generation);
+      toast('Finish the open feedback point before editing another one.', { kind: 'warn' });
+      return false;
+    }
+    if (S.mode !== 'feedback' || IS_BEFORE) {
+      finishQueuedEditorSurfaceSession(generation);
+      return false;
+    }
+    openCard({ editId: point.id });
+    if (!S.card) finishQueuedEditorSurfaceSession(generation);
+    return !!S.card;
+  }
+
+  showPointsBtn.addEventListener('click', () => {
+    if (feedbackPanel.hidden) openFeedbackPointsList();
+    else closeFeedbackPointsList({ restoreFocus: true });
+  });
+  feedbackPanelClose.addEventListener('click', () => {
+    closeFeedbackPointsList({ restoreFocus: true });
+  });
+  window.addEventListener('pointerdown', (event) => {
+    if (feedbackPanel.hidden) return;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    if (path.includes(feedbackTools)) return;
+    closeFeedbackPointsList({ restoreFocus: false });
+  }, true);
+  window.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || feedbackPanel.hidden) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeFeedbackPointsList({ restoreFocus: true });
+  }, true);
+
   function updateSendBtn() {
     const n = S.points.length;
+    feedbackTools.hidden = n === 0;
     sendBtn.hidden = n === 0;
+    showPointsBtn.disabled = !!S.card;
+    showPointsBtn.title = n + ' unsent feedback point' + (n === 1 ? '' : 's');
+    showPointsBtn.setAttribute('aria-label', 'Show ' + n + ' unsent feedback point' +
+      (n === 1 ? '' : 's'));
     if (n === 0) {
+      closeFeedbackPointsList({ restoreFocus: false });
       sendBtn.classList.remove('queued');
       sendBtn.replaceChildren();
       sendBtn.title = '';
+      scheduleFeedbackToolsPosition();
       return;
     }
+    if (!feedbackPanel.hidden) paintFeedbackPointList();
     const activeRound = S.phase !== null && S.phase !== 'collecting';
     const queued = S.phase === 'verdicts_sent';
     sendBtn.classList.toggle('queued', activeRound);
@@ -3865,6 +4586,7 @@
       : activeRound
       ? 'Add ' + n + ' point(s) to the current feedback batch'
       : 'Send ' + n + ' point(s) to the ' + COLOR + ' agent';
+    scheduleFeedbackToolsPosition();
   }
 
   let sending = false;
@@ -3981,6 +4703,7 @@
   let pollT = 0;
   let tabTitleTimer = 0;
   let tabTitleTick = 0;
+  let reviewAssetReloadPending = false;
 
   function syncTabTitle() {
     clearInterval(tabTitleTimer);
@@ -4111,6 +4834,7 @@
         // review.json is written only after the point commits. Reload once per
         // round before exposing review controls so the host document, CSS, and
         // JS all come from that committed AFTER state rather than a stale DOM.
+        reviewAssetReloadPending = true;
         location.reload();
         return;
       }
@@ -4132,7 +4856,11 @@
   }
 
   function updateStatusChip() {
-    if (S.mode !== 'feedback' || S.reviewing) { statusChip.hidden = true; return; }
+    if (S.mode !== 'feedback' || S.reviewing) {
+      statusChip.hidden = true;
+      scheduleFeedbackToolsPosition();
+      return;
+    }
     if (S.phase === 'awaiting_agent') {
       statusChip.textContent = EMOJI + ' agent is working on your batch…';
       statusChip.hidden = false;
@@ -4142,6 +4870,7 @@
     } else {
       statusChip.hidden = true;
     }
+    scheduleFeedbackToolsPosition();
   }
 
   // ===== review ==============================================================
@@ -4155,6 +4884,7 @@
   function maybeAutoEnterReview() {
     if (
       !S.reviewAutoPending || S.reviewing || S.card ||
+      S.bootQueuedEdit ||
       S.phase !== 'reviewing' || !S.review || !S.batch
     ) return false;
     S.reviewAutoPending = false;
@@ -5016,6 +5746,7 @@
     B.sendv.hidden = !all || S.sentVerdicts || S.phase !== 'reviewing';
     B.sendv.textContent = 'Send verdicts (' + done + ')';
     B.wait.hidden = !S.sentVerdicts;
+    scheduleFeedbackToolsPosition();
   }
 
   function onAccept() {
@@ -5366,11 +6097,15 @@
 
     const params = new URLSearchParams(location.search);
     const reviewParam = params.get('wk-review');
+    const queuedEditParam = params.get('wk-edit-point');
     const pointParam = parseInt(params.get('wk-point') || '', 10);
     const pointBeforeOnArrival = params.get('wk-point-before') === '1';
     S.bootReview = reviewParam;   // don't toast an offer for the round we're booting into
+    S.bootQueuedEdit = queuedEditParam;
 
-    setMode(reviewParam ? 'feedback' : (LS.get('wk:mode') === 'feedback' ? 'feedback' : 'evaluate'));
+    setMode(reviewParam || queuedEditParam
+      ? 'feedback'
+      : (LS.get('wk:mode') === 'feedback' ? 'feedback' : 'evaluate'));
     renderPins();
     updateSendBtn();
 
@@ -5381,6 +6116,7 @@
     } catch (e) {
       console.warn('[wk] initial state fetch failed:', e.message);
     }
+    if (reviewAssetReloadPending) return;
 
     if (reviewParam) {
       if (S.review && S.review.batchId === reviewParam &&
@@ -5403,7 +6139,22 @@
         toast('That review round is finished or superseded.');
       }
     }
+    if (queuedEditParam) {
+      if (reviewParam || IS_BEFORE) {
+        stripInternalQueryParam('wk-edit-point');
+      } else if (S.card) {
+        stripInternalQueryParam('wk-edit-point');
+        if (S.card.draft.editId !== queuedEditParam) {
+          toast('Finish the restored feedback point before opening another one.', { kind: 'warn' });
+        }
+      } else {
+        await openQueuedPointEditor(queuedEditParam, { samePageOnly: true });
+        stripInternalQueryParam('wk-edit-point');
+      }
+    }
     S.bootReview = null;
+    S.bootQueuedEdit = null;
+    maybeAutoEnterReview();
 
     schedulePoll();
   }

@@ -887,6 +887,45 @@ async function testFastModeNoticeIsAcknowledgedOnlyOnce() {
   assert.equal(opens, 1, "acknowledged notice must not reopen");
 }
 
+async function testProjectOverlayThemePersistsWithoutRethemingTheSessionRequest() {
+  const project = { id: "project-1", name: "Project One", overlayTheme: "black" };
+  const select = { value: "white", disabled: false };
+  const requests = [];
+  const notices = [];
+  const state = {
+    projects: [project],
+    projectsSignature: "",
+    selectedProjectId: project.id,
+    projectOverlayThemeRequest: 0,
+    projectOverlayThemeSavingId: null,
+  };
+  const ctx = context({
+    state,
+    $: () => select,
+    api: async (path, options) => {
+      requests.push({ path, options });
+      return { overlayTheme: "white" };
+    },
+    toast: (message) => notices.push(message),
+  });
+  install(ctx, "normalizedOverlayTheme", "selectedProject", "changeProjectOverlayTheme");
+
+  await ctx.changeProjectOverlayTheme(select);
+  assert.equal(requests[0].path, "/api/projects/project-1/overlay-theme");
+  assert.equal(requests[0].options.body.overlayTheme, "white");
+  assert.equal(project.overlayTheme, "white");
+  assert.equal(select.disabled, false);
+  assert.equal(state.projectOverlayThemeSavingId, null);
+  assert.match(notices[0], /new sessions/);
+
+  const startColorSource = extractFunction("startColor");
+  assert.doesNotMatch(
+    startColorSource,
+    /overlayTheme/,
+    "session start must snapshot the server-side project preference"
+  );
+}
+
 (async () => {
   await testHomeSelectionPersists();
   await testFinishedSessionsCloseTheirOwnedPreviewWindows();
@@ -903,6 +942,7 @@ async function testFastModeNoticeIsAcknowledgedOnlyOnce() {
   await testPushFailureBecomesPersistentAgentIssue();
   await testIssueActionStartsAnUncoloredAgent();
   await testFastModeNoticeIsAcknowledgedOnlyOnce();
+  await testProjectOverlayThemePersistsWithoutRethemingTheSessionRequest();
 })().catch((error) => {
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
@@ -943,6 +983,21 @@ class ControlCenterFrontendTests(unittest.TestCase):
         self.assertIn("/speed`,", source)
         self.assertIn(".agent-setting-controls", styles)
         self.assertIn(".chat-settings", styles)
+
+    def test_project_specific_overlay_theme_control_is_wired(self):
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        styles = STYLES_CSS.read_text(encoding="utf-8")
+        self.assertIn('id="newAgentOverlayTheme"', markup)
+        self.assertIn('<option value="black">Black</option>', markup)
+        self.assertIn('<option value="white">White</option>', markup)
+        self.assertIn(
+            "Project-specific. Black is clearer on light sites, white on dark sites. New sessions only.",
+            markup,
+        )
+        self.assertIn("changeProjectOverlayTheme", source)
+        self.assertIn("/overlay-theme`,", source)
+        self.assertIn(".agent-setting-note", styles)
 
     def test_registered_project_update_action_is_visible_in_markup(self):
         markup = INDEX_HTML.read_text(encoding="utf-8")

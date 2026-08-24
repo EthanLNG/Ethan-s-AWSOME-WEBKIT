@@ -1468,6 +1468,9 @@ _INTERACTION_MODE = os.environ.get(
 )
 if _INTERACTION_MODE not in ("browse-default", "draw-default"):
     _INTERACTION_MODE = "browse-default"
+_OVERLAY_THEME = os.environ.get("WK_OVERLAY_THEME", "black")
+if _OVERLAY_THEME not in ("black", "white"):
+    _OVERLAY_THEME = "black"
 
 
 def inject(html, mode, before_prefix="", nonce=None, trusted_types_policy=None):
@@ -1479,6 +1482,7 @@ def inject(html, mode, before_prefix="", nonce=None, trusted_types_policy=None):
         "data-wk-mode": str(mode),
         "data-wk-dictation-mode": str(_DICTATION_MODE),
         "data-wk-interaction-mode": str(_INTERACTION_MODE),
+        "data-wk-theme": str(_OVERLAY_THEME),
         "data-wk-before-prefix": str(before_prefix),
         "data-wk-hotkey-toggle": str(_HOTKEY_VALUES["toggle"]),
         "data-wk-hotkey-dictate": str(_HOTKEY_VALUES["dictate"]),
@@ -1498,11 +1502,11 @@ def inject(html, mode, before_prefix="", nonce=None, trusted_types_policy=None):
         '<script src="/__wk/overlay.js" defer nonce="{}" data-wk-nonce="{}" '
         'data-wk-trusted-types-policy="{}" data-wk-color="{}" data-wk-token="{}" '
         'data-wk-project="{}" data-wk-emoji="{}" data-wk-mode="{}" data-wk-dictation-mode="{}" '
-        'data-wk-interaction-mode="{}" data-wk-before-prefix="{}"{}></script>'.format(
+        'data-wk-interaction-mode="{}" data-wk-theme="{}" data-wk-before-prefix="{}"{}></script>'.format(
             attr(nonce), attr(nonce), attr(trusted_types_policy),
             attr(SLUG), attr(MUTATION_TOKEN), attr(PROJECT_STORAGE_ID), attr(COLOR),
             attr(mode), attr(_DICTATION_MODE), attr(_INTERACTION_MODE),
-            attr(before_prefix), _HOTKEY_ATTRS
+            attr(_OVERLAY_THEME), attr(before_prefix), _HOTKEY_ATTRS
         )
     )
     _overlay_found, insertion = _overlay_document_info(

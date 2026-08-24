@@ -77,6 +77,7 @@ class PreviewServerTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {
             "WK_CONFIG": str(self.config_path),
             "WK_COLOR_FORCE": "1",
+            "WK_OVERLAY_THEME": "black",
             "WK_MUTATION_TOKEN": "test-mutation-token-1234567890",
             "WK_PREVIEW_INSTANCE_TOKEN": "test-instance-token-123456",
         }), mock.patch.object(sys, "argv", [str(SERVER_PATH), "🔵", "5311", str(self.root)]):
@@ -130,6 +131,39 @@ class PreviewServerTests(unittest.TestCase):
             self.module._HOTKEY_VALUES,
             {"toggle": "KeyC", "dictate": "Space"},
         )
+
+    def test_overlay_theme_is_bounded_and_injected_into_every_document_mode(self):
+        self.assertEqual(self.module._OVERLAY_THEME, "black")
+        self.assertIn(
+            'data-wk-theme="black"',
+            self.module.inject("<html><body></body></html>", "after"),
+        )
+        self.assertIn(
+            'data-wk-theme="black"',
+            self.module.inject(
+                "<html><body></body></html>",
+                "before",
+                before_prefix="/__wk/before/" + "a" * 64,
+            ),
+        )
+
+        config = json.loads(self.config_path.read_text(encoding="utf-8"))
+        white = self.import_server(
+            config, env_overrides={"WK_OVERLAY_THEME": "white"}
+        )
+        self.assertEqual(white._OVERLAY_THEME, "white")
+        self.assertIn(
+            'data-wk-theme="white"',
+            white.inject("<html><body></body></html>", "after"),
+        )
+
+        invalid = self.import_server(
+            config, env_overrides={"WK_OVERLAY_THEME": 'white" data-unsafe="yes'}
+        )
+        self.assertEqual(invalid._OVERLAY_THEME, "black")
+        injected = invalid.inject("<html><body></body></html>", "after")
+        self.assertIn('data-wk-theme="black"', injected)
+        self.assertNotIn("data-unsafe", injected)
 
     def test_legacy_control_center_v_hotkey_migrates_inside_preview(self):
         resolve = self.module._resolved_hotkeys
@@ -2008,6 +2042,7 @@ class PreviewServerTests(unittest.TestCase):
             'DATA-WK-PROJECT="{project}" DATA-WK-EMOJI="{emoji}" '
             'DATA-WK-MODE="after" DATA-WK-DICTATION-MODE="speech" '
             'DATA-WK-INTERACTION-MODE="browse-default" '
+            'DATA-WK-THEME="black" '
             'DATA-WK-BEFORE-PREFIX="" DATA-WK-HOTKEY-TOGGLE="KeyC" '
             'DATA-WK-HOTKEY-DICTATE="Space"></sCrIpT></BODY></HTML>'
         ).format(
@@ -2027,6 +2062,10 @@ class PreviewServerTests(unittest.TestCase):
             (
                 'DATA-WK-COLOR="{}"'.format(self.module.SLUG),
                 'DATA-WK-COLOR="red"',
+            ),
+            (
+                'DATA-WK-THEME="black"',
+                'DATA-WK-THEME="white"',
             ),
             (
                 'DATA-WK-PROJECT="{}"'.format(self.module.PROJECT_STORAGE_ID),

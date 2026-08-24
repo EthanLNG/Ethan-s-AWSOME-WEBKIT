@@ -37,13 +37,17 @@ class OverlayProtocolTests(unittest.TestCase):
             + "normalizeQueuedPointNumbers, readQueuedPointState, "
             + "hasQueuedTombstoneCapacity, pointRevision, pendingReviewPoints, "
             + "anchorFitScore, anchorCoverageScore, anchorContextScore, "
-            + "reanchorRect, reviewScrollTarget, viewportStateAttributeName, "
+            + "reanchorRect, reviewScrollTarget, feedbackToolsBottom, "
+            + "feedbackPointListSignature, ownedSurfaceSessionCanFinish, viewportStateAttributeName, "
             + "surfaceStateAttributeCapturable, surfaceStateClassCapturable, "
             + "surfaceStateMatchStatus, surfaceStateValuesMatch, "
             + "surfaceStateSignalHasActivation, surfaceStateSignalHasEvidence, "
             + "aggregateSurfaceStateStatus, "
             + "surfaceCandidateSpatialScore, effectiveStyleChainVisible, sameRectGeometry, "
-            + "surfaceMutationRelevant, surfaceChildListRelevant, pointAnchorMode, "
+            + "surfaceAnchorOwnsRoles, surfaceAnimationRunning, surfaceAnimationCapturable, "
+            + "surfaceAnimationTarget, surfaceNodeAnimationRole, surfaceNodeAnimationRelation, "
+            + "surfaceMutationRelevant, surfaceChildListRelevant, surfaceMarkerIdentity, "
+            + "retainCurrentSurfaceMarkerEntries, surfaceTrackedNodeSupportsRoles, pointAnchorMode, "
             + "preferredSurfaceCandidate, rankedCaptureEntries, "
             + "rectUsesLegacyViewportAnchor, surfaceUsesSeparatedGeometry, "
             + "resolvedRectAnchorMode, "
@@ -146,6 +150,14 @@ assert.strictEqual(claimed.dataset.wkToken, validDataset.wkToken);
 assert.strictEqual(firstWindow.__wkOverlayLoaded, true);
 assert.strictEqual(
   H.claimOverlayInstance(firstWindow, H.findOverlayHandshake(firstDocument, page)),
+  null
+);
+assert.strictEqual(
+  H.overlayScriptHandshake(script({ ...validDataset, wkTheme: 'white' }), page).dataset.wkTheme,
+  'white'
+);
+assert.strictEqual(
+  H.overlayScriptHandshake(script({ ...validDataset, wkTheme: 'sepia' }), page),
   null
 );
 
@@ -493,7 +505,7 @@ assert.strictEqual(
         self.assertIn("function effectivelyVisible(node)", self.source)
         self.assertIn("geometry.active[marker.rectIndex] === false", self.source)
         self.assertIn("surfaceObserver = new MutationObserver((records) =>", self.source)
-        self.assertIn("nodeAffectsTrackedSurface(event.target)", self.source)
+        self.assertIn("animationNodeAffectsTrackedSurface(event.target)", self.source)
 
     def test_pins_track_live_geometry_without_scroll_ghosts(self):
         for fragment in (
@@ -560,9 +572,57 @@ assert.strictEqual(H.surfaceChildListRelevant(
         for fragment in (
             "const connectedTrackedNodes = [...trackedSurfaceNodes]",
             "if (unresolvedSurface)",
-            "for (const node of connectedTrackedNodes) addTrackedNode(node)",
+            "for (const node of connectedTrackedNodes)",
+            "const connectedTrackedMarkers = retainCurrentSurfaceMarkerEntries(",
             "rememberSurfaceRemountParent(record.target)",
             "if (surfaceRebindRaf) return",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_surface_remount_retention_rebinds_to_current_marker_generation(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const role = { isConnected: true, contains(node) { return node === this; } };
+const ancestor = { contains(node) { return node === role; } };
+const removedRole = { isConnected: true };
+const marker = (generation, connected = true) => ({
+  point: { id: 'p-stable' }, rectIndex: 0, kind: 'rect',
+  node: { generation, isConnected: connected },
+});
+let current = marker(0);
+let entries = new Map([
+  [role, new Set([current])],
+  [removedRole, new Set([{
+    point: { id: 'p-removed' }, rectIndex: 0, kind: 'rect',
+    node: { generation: 0, isConnected: false },
+  }])],
+]);
+let trackedNodes = new Set([role, ancestor, removedRole]);
+for (let generation = 1; generation <= 100; generation += 1) {
+  current = marker(generation);
+  entries = H.retainCurrentSurfaceMarkerEntries(entries, [current]);
+  const roles = [...entries.keys()];
+  trackedNodes = new Set([...trackedNodes].filter((node) =>
+    H.surfaceTrackedNodeSupportsRoles(node, roles)
+  ));
+  assert.strictEqual(entries.size, 1);
+  assert.strictEqual(entries.get(role).size, 1);
+  assert.strictEqual([...entries.get(role)][0], current);
+  assert.strictEqual([...entries.get(role)][0].node.isConnected, true);
+  assert.deepStrictEqual([...trackedNodes], [role, ancestor]);
+}
+assert.strictEqual(H.surfaceMarkerIdentity(current), 'p-stable:0:rect');
+assert.strictEqual(
+  H.retainCurrentSurfaceMarkerEntries(entries, [marker(101, false)]).size,
+  0
+);
+"""
+        )
+        for fragment in (
+            "retainCurrentSurfaceMarkerEntries(\n      trackedSurfaceMarkers, S.pinEls",
+            "surfaceTrackedNodeSupportsRoles(node, connectedRoleNodes)",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
@@ -581,7 +641,7 @@ assert.strictEqual(H.surfaceChildListRelevant(
         for fragment in (
             "const fallbackContexts = Array.isArray(point.rectContexts)",
             "const fallbackTarget = uniqueElement(context?.selector)",
-            "addTargetChain(fallbackTarget)",
+            "addTargetChain(fallbackTarget, marker)",
             "for (const context of contexts)",
             "const contextTarget = uniqueElement(context.selector)",
             "target = contextTarget",
@@ -695,6 +755,25 @@ assert.strictEqual(
   H.capturedSurfaceGeometrySelector(genericStage, statelessSvg, null),
   statelessSvg.targetSelector
 );
+const animatedSection = {
+  ...statelessCanvas,
+  targetSelector: '#animated-section',
+  visualKind: 'section',
+  hasActiveAnimation: true,
+  paintOrderEvidence: true,
+};
+assert.strictEqual(
+  H.preferredSurfaceCandidate([genericStage, animatedSection]), animatedSection
+);
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(genericStage, animatedSection, null),
+  animatedSection.targetSelector
+);
+assert.strictEqual(H.preferredSurfaceCandidate([
+  genericStage,
+  { ...animatedSection, targetSelector: '#background-animation',
+    stronglyRelatedToPrimary: false, relatedToPrimary: true, paintOrderEvidence: false },
+]), genericStage);
 const tinyIconSvg = {
   ...statelessSvg,
   targetSelector: '#button-icon',
@@ -736,7 +815,8 @@ assert.strictEqual(H.preferredSurfaceCandidate([]), null);
         for fragment in (
             "for (const context of (Array.isArray(contexts) ? contexts : []).slice(0, 12))",
             "const selected = preferredSurfaceCandidate(candidates)",
-            "geometrySelector: capturedSurfaceGeometrySelector(primary, selected, selectedAnchor)",
+            "const geometrySelector = capturedSurfaceGeometrySelector(primary, selected, selectedAnchor)",
+            "geometrySelector,",
             "targetSelector: selected.targetSelector",
             "stateChain: selected.stateChain",
             "captureRectSurface(contexts, rect)",
@@ -763,24 +843,97 @@ assert.strictEqual(ranked.length, 12);
 assert.strictEqual(ranked[0][0], 'hit-0');
 assert(ranked.some(([name]) => name === 'active-pointerless-scene'));
 assert.strictEqual(ranked.filter(([, meta]) => meta.sourcePriority === 0).length, 11);
+const broad = ['main', {
+  sourcePriority: 0, hits: 9, score: 1, surfaceScore: 0.1, order: 0,
+}];
+const tight = ['animated-target', {
+  sourcePriority: 0, hits: 9, score: 0.6, surfaceScore: 0.75, order: 1,
+}];
+assert.strictEqual(
+  H.rankedCaptureEntries([broad, tight], 12, 4)[0][0], 'animated-target'
+);
 """
         )
 
-    def test_continuous_surface_animation_repositions_without_starving_visibility(self):
-        transition = re.search(
-            r"document\.addEventListener\('transitionend'.*?\n  \}, true\);",
-            self.source,
-            re.S,
+    def test_surface_roles_reject_foreign_anchors_and_preserve_painted_visuals(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const target = { id: 'sticky-target' };
+const geometry = { id: 'document-geometry' };
+const anchor = {
+  contains(node) { return node === target; },
+};
+assert.strictEqual(H.surfaceAnchorOwnsRoles(anchor, target, geometry), false);
+const ownedAnchor = {
+  contains(node) { return node === target || node === geometry; },
+};
+assert.strictEqual(H.surfaceAnchorOwnsRoles(ownedAnchor, target, geometry), true);
+const contaminated = {
+  geometrySelector: '#document-geometry',
+  targetSelector: '#sticky-target',
+  anchor: { selector: '#sticky-anchor', mode: 'sticky' },
+};
+assert.strictEqual(H.resolvedRectAnchorMode([], contaminated, 'doc', false), 'doc');
+assert.strictEqual(H.resolvedRectAnchorMode([], contaminated, 'doc', true), 'sticky');
+
+const primary = { targetSelector: '#copy', spatialScore: 0.6, stateChain: [] };
+const behindSvg = {
+  targetSelector: '#behind', visualKind: 'svg', spatialScore: 0.4,
+  stateChain: [], anchor: { selector: '#stage', mode: 'sticky' },
+  relatedToPrimary: true, paintOrderEvidence: false,
+};
+assert.strictEqual(H.preferredSurfaceCandidate([primary, behindSvg]), primary);
+const paintedSvg = { ...behindSvg, targetSelector: '#painted', paintOrderEvidence: true };
+assert.strictEqual(H.preferredSurfaceCandidate([primary, paintedSvg]), paintedSvg);
+assert.strictEqual(
+  H.capturedSurfaceGeometrySelector(primary, paintedSvg, paintedSvg.anchor),
+  paintedSvg.targetSelector
+);
+assert.strictEqual(H.surfaceAnimationRunning({ playState: 'pending' }), true);
+assert.strictEqual(H.surfaceAnimationRunning({ playState: 'running' }), true);
+assert.strictEqual(H.surfaceAnimationRunning({ playState: 'finished' }), false);
+assert.strictEqual(H.surfaceAnimationCapturable({ playState: 'paused', currentTime: 0 }), true);
+assert.strictEqual(H.surfaceAnimationCapturable({ playState: 'paused', currentTime: null }), false);
+assert.strictEqual(H.surfaceAnimationCapturable({ playState: 'running' }), true);
+assert.strictEqual(H.surfaceAnimationCapturable({ playState: 'finished' }), false);
+const childNode = { nodeType: 1, contains() { return false; } };
+const animatedNode = {
+  nodeType: 1, contains(node) { return node === this || node === childNode; },
+};
+const broadNode = { contains(node) { return node === animatedNode || node === childNode; } };
+assert.strictEqual(H.surfaceAnimationTarget({ effect: { target: animatedNode } }), animatedNode);
+assert.strictEqual(H.surfaceNodeAnimationRole(animatedNode, [animatedNode]), 'exact');
+assert.strictEqual(H.surfaceNodeAnimationRelation(childNode, [animatedNode]), true);
+assert.strictEqual(H.surfaceNodeAnimationRole(childNode, [animatedNode]), 'inside');
+assert.strictEqual(H.surfaceNodeAnimationRelation(broadNode, [animatedNode]), false);
+assert.strictEqual(H.surfaceNodeAnimationRole(broadNode, [animatedNode]), 'contains');
+assert.strictEqual(H.surfaceAnimationCapturable({
+  playState: 'running', replaceState: 'removed',
+}), false);
+"""
         )
-        self.assertIsNotNone(transition)
-        self.assertIn("scheduleSurfacePosition()", transition.group(0))
-        self.assertNotIn("notePinMotion()", transition.group(0))
+        for fragment in (
+            "surfaceCandidatePaintOrderEvidence(candidate, primary, rect)",
+            "selectedAnchorNode.contains(geometryOwner)",
+            "resolvedSurfaceAnchorOwnership(capturedSurface)",
+            "if (surface.anchor && separatedGeometry && anchorOwnership === false)",
+            "effectivelyVisible(geometry), false, false, 'doc'",
+            "const animationTargets = capturableSurfaceAnimationTargets()",
+            "hasActiveAnimation: surfaceNodeAnimationRelation(target, animationTargets)",
+            "for (const elm of animationTargets) consider(elm, true, 2)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_continuous_surface_animation_repositions_without_starving_visibility(self):
         for event_name in (
-            "transitioncancel", "animationend", "animationcancel",
+            "transitionrun", "transitionstart", "transitionend", "transitioncancel",
+            "animationstart", "animationiteration", "animationend", "animationcancel",
         ):
             with self.subTest(event_name=event_name):
                 self.assertIn(
-                    f"document.addEventListener('{event_name}', (event) => {{",
+                    f"document.addEventListener('{event_name}', wakeTrackedSurface, true)",
                     self.source,
                 )
 
@@ -795,6 +948,18 @@ assert.strictEqual(ranked.filter(([, meta]) => meta.sourcePriority === 0).length
         for fragment in (
             "if (S.mode !== 'feedback' || !S.pinEls.length) return;",
             "const trackedSurfaceAttributeSets = new Map()",
+            "const trackedSurfaceMarkers = new Map()",
+            "role.getAnimations({ subtree: true })",
+            "ancestor.getAnimations()",
+            "const addTrackedRole = (node, attributeNames = [], marker = null)",
+            "? addTrackedRole(current, ['style'], marker)",
+            "repositionMarkers(surfaceAnimationMarkers)",
+            "surfaceAnimationTickTimer = setTimeout(() =>",
+            "surfaceAnimationRescanTimer = setTimeout(scanSurfaceAnimations, 500)",
+            "surfaceResizeObserver = new ResizeObserver",
+            "surfaceIntersectionObserver = new IntersectionObserver",
+            "for (const node of trackedSurfaceMarkers.keys())",
+            "trackedSurfaceMarkers.has(entry.target)",
             "trackedSurfaceAttributeSets.get(node)",
             "if (S.mode !== 'feedback')",
             "queueSurfaceRebind()",
@@ -802,6 +967,13 @@ assert.strictEqual(ranked.filter(([, meta]) => meta.sourcePriority === 0).length
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
+        self.assertNotIn("addTrackedNode(current, depth === 0 ? ['style'] : [], marker)", self.source)
+        animation_driver = self.source[
+            self.source.index("  function discoverSurfaceAnimationMarkers"):
+            self.source.index("  function rememberSurfaceRemountParent")
+        ]
+        self.assertNotIn("notePinMotion", animation_driver)
+        self.assertNotIn("document.getAnimations()", animation_driver)
 
     def test_browser_fixture_covers_pointerless_continuous_surface_animation(self):
         for fragment in (
@@ -812,6 +984,12 @@ assert.strictEqual(ranked.filter(([, meta]) => meta.sourcePriority === 0).length
             "qa.startSurfaceChurn = (frameCount = 240) =>",
             "stickyTarget.style.setProperty('--qa-surface-frame'",
             "qa.stopSurfaceChurn = () =>",
+            "@keyframes qa-marker-pulse",
+            "animation: qa-marker-pulse 1.4s linear infinite",
+            "#keyframe-target.qa-animation-paused { animation-play-state: paused; }",
+            'id="start-keyframe-animation"',
+            "classList.remove('qa-animation-paused')",
+            'id="keyframe-target"',
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.qa_fixture)
@@ -861,7 +1039,7 @@ assert.strictEqual(H.visualSurfaceActive(
         )
         self.assertIn("if (!selector) return unresolvedSurfaceActive(point, null);", self.source)
         self.assertIn("surface?.anchor?.mode || point.anchor || 'doc'", self.source)
-        self.assertIn("resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor)", self.source)
+        self.assertIn("resolvedRectAnchorMode(\n        liveModes, capturedSurface, p.anchor,", self.source)
 
     def test_unresolved_document_points_keep_document_geometry_active(self):
         self.run_node(
@@ -1020,7 +1198,7 @@ assert.strictEqual(H.pointAnchorMode([], [], true), 'unknown');
 """
         )
         self.assertIn(
-            "resolvedRectAnchorMode(liveModes, capturedSurface, p.anchor)",
+            "resolvedRectAnchorMode(\n        liveModes, capturedSurface, p.anchor,",
             self.source,
         )
 
@@ -1114,6 +1292,146 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
             "Points are saved locally. Send them after the current verdicts finish processing.",
             self.source,
         )
+
+    def test_unsent_feedback_points_have_a_navigable_focused_editor_list(self):
+        list_start = self.source.index("  function paintFeedbackPointList()")
+        list_end = self.source.index("  function closeFeedbackPointsList", list_start)
+        list_source = self.source[list_start:list_end]
+        self.assertIn("const points = S.points.slice().sort", list_source)
+        self.assertNotIn("S.batch", list_source)
+        self.assertNotIn("S.submittedPoints", list_source)
+        for fragment in (
+            "showPointsBtn.setAttribute('aria-haspopup', 'dialog')",
+            "showPointsBtn.setAttribute('aria-controls', feedbackPanel.id)",
+            "feedbackPanel.setAttribute('role', 'dialog')",
+            "openQueuedPointEditor(point.id)",
+            "S.points = loadQueuedPoints()",
+            "openCard({ editId: point.id })",
+            "feedbackPointList.querySelector('.wk-feedback-point-item')?.focus()",
+            "const queuedEditParam = params.get('wk-edit-point')",
+            "S.bootQueuedEdit = queuedEditParam",
+            "S.bootQueuedEdit ||",
+            "S.bootQueuedEdit = null;\n    maybeAutoEnterReview();",
+            "physicalPath(point.page, 'after') + '?wk-edit-point='",
+            "stripInternalQueryParam('wk-edit-point')",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+        self.assertLess(
+            self.source.index("await scrollQueuedPointIntoView(point)"),
+            self.source.index("openCard({ editId: point.id })"),
+        )
+
+    def test_feedback_point_navigation_owns_and_cleans_restored_surfaces(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+let active = false;
+let owner = 0;
+const begin = (generation) => { active = true; owner = generation; };
+const finish = (generation) => {
+  if (!H.ownedSurfaceSessionCanFinish(active, owner, generation)) return false;
+  active = false;
+  owner = 0;
+  return true;
+};
+
+begin(1);
+assert.strictEqual(finish(undefined), true);
+assert.strictEqual(active, false);
+begin(2);
+assert.strictEqual(finish(1), false);
+assert.strictEqual(active, true);
+assert.strictEqual(owner, 2);
+assert.strictEqual(finish(2), true);
+assert.strictEqual(active, false);
+assert.strictEqual(finish(2), false);
+"""
+        )
+        navigator = self.source[
+            self.source.index("  let queuedPointNavigationGeneration"):
+            self.source.index("  showPointsBtn.addEventListener('click'")
+        ]
+        for fragment in (
+            "let queuedEditorSurfaceGeneration = 0",
+            "function finishQueuedEditorSurfaceSession(ownerGeneration)",
+            "ownedSurfaceSessionCanFinish(\n      queuedEditorSurfacesActive",
+            "finishQueuedEditorSurfaceSession();\n    closeFeedbackPointsList",
+            "queuedEditorSurfaceGeneration = generation",
+            "finishQueuedEditorSurfaceSession(generation);\n      return false;",
+            "if (S.mode !== 'feedback' || IS_BEFORE)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, navigator)
+        self.assertLess(
+            navigator.index("finishQueuedEditorSurfaceSession();"),
+            navigator.index("if (!point)"),
+        )
+        self.assertLess(
+            navigator.index("if (generation !== queuedPointNavigationGeneration)"),
+            navigator.index("openCard({ editId: point.id })"),
+        )
+        self.assertLess(
+            navigator.index("if (S.mode !== 'feedback' || IS_BEFORE)"),
+            navigator.index("openCard({ editId: point.id })"),
+        )
+
+    def test_feedback_point_list_reconciles_without_losing_keyboard_focus(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+const first = { id: 'p-1', number: 1, page: '/', text: '  Fix   this  ' };
+const second = { id: 'p-2', number: 2, page: '/about', text: '', voiceNote: { path: 'v.webm' } };
+const signature = H.feedbackPointListSignature([first, second]);
+assert.strictEqual(signature, H.feedbackPointListSignature([second, first]));
+assert.strictEqual(signature, H.feedbackPointListSignature([
+  { ...first, rect: { x: 10, y: 20, w: 30, h: 40 } }, second,
+]));
+assert.notStrictEqual(signature, H.feedbackPointListSignature([
+  { ...first, text: 'Fix something else' }, second,
+]));
+assert.notStrictEqual(signature, H.feedbackPointListSignature([first]));
+"""
+        )
+        for fragment in (
+            "let paintedFeedbackPointListSignature = '';",
+            "if (signature === paintedFeedbackPointListSignature &&",
+            "feedbackPointList.childElementCount === points.length) return false;",
+            "const focusedPointId = active && feedbackPointList.contains(active)",
+            ".find((item) => item.dataset.pointId === focusedPointId)",
+            "if (replacement) replacement.focus();",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+
+    def test_feedback_actions_track_the_topmost_bottom_control(self):
+        self.run_node(
+            r"""
+const assert = require('assert');
+assert.strictEqual(H.feedbackToolsBottom([], 900), 14);
+assert.strictEqual(H.feedbackToolsBottom([{ top: 840 }], 900), 68);
+assert.strictEqual(H.feedbackToolsBottom([{ top: 840 }, { top: 760 }], 900), 148);
+assert.strictEqual(H.feedbackToolsBottom([{ top: NaN }, null], 900), 14);
+assert.strictEqual(H.feedbackToolsBottom([{ top: 760 }], 900, 12, 20), 152);
+"""
+        )
+        for fragment in (
+            ".wk-feedback-tools {",
+            "left: 50%;",
+            "max-width: calc(100vw - 32px);",
+            ".wk-feedback-tools-row {",
+            "flex-wrap: nowrap;",
+            ".wk-feedback-panel {",
+            "bottom: calc(100% + 8px);",
+            "width: min(360px, calc(100vw - 32px));",
+            "max-height: min(360px, 50vh);",
+            "overflow-y: auto;",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.css)
+        self.assertIn("...bar.querySelectorAll('.wk-abc-chip')", self.source)
+        self.assertIn("scheduleFeedbackToolsPosition();", self.source)
+        self.assertIn(".wk-feedback-tools-row,.wk-feedback-panel,.wk-show-points", self.source)
 
     def test_every_feedback_save_finishes_an_active_voice_note_first(self):
         commit_start = self.source.index("    async function commit()")
@@ -1628,6 +1946,25 @@ assert.deepStrictEqual(
         self.assertIn("max-width: min(280px, 35vw);\n  overflow-x: auto;", self.css)
         self.assertIn("x: source.x - 12, y: source.y - 12, w: 24, h: 24", self.source)
         self.assertIn("pin.setAttribute('aria-label'", self.source)
+
+    def test_overlay_contrast_theme_is_isolated_and_complete(self):
+        for fragment in (
+            "!['black', 'white'].includes(dataset.wkTheme)",
+            "const OVERLAY_THEME = DS.wkTheme === 'white' ? 'white' : 'black'",
+            "host.setAttribute('data-wk-theme', OVERLAY_THEME)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.source)
+        for fragment in (
+            ':host([data-wk-theme="white"])',
+            "--wk-on-accent: #111111",
+            "color-scheme: dark",
+            "color: var(--wk-on-accent)",
+            "--wk-marker-line",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, self.css)
+        self.assertNotIn("color: #fff", self.css)
 
     def test_swap_cache_and_async_work_are_bound_to_active_review(self):
         required = [

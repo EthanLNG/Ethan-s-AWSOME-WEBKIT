@@ -86,6 +86,8 @@ const state = {
   chatReturnFocus: null,
   seedGeneration: 0,
   projectGeneration: 0,
+  projectOverlayThemeRequest: 0,
+  projectOverlayThemeSavingId: null,
   projectSaveInFlight: false,
   projectAssetOperationsPending: 0,
   confirmGeneration: 0,
@@ -519,6 +521,10 @@ function selectedProject() {
   return state.projects.find((project) => project.id === state.selectedProjectId) || null;
 }
 
+function normalizedOverlayTheme(value) {
+  return value === "white" ? "white" : "black";
+}
+
 function targetBranch(project = selectedProject()) {
   return project?.targetBranch || "main";
 }
@@ -633,6 +639,9 @@ function renderProjectView() {
   fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
   const savedSpeed = safeLocalStorageGet(`wkcc:speed:${project.provider}`) || "normal";
   fillSpeed($("#newAgentSpeed"), state.settings.fastModeNoticeSeen ? savedSpeed : "normal");
+  const overlayTheme = $("#newAgentOverlayTheme");
+  overlayTheme.value = normalizedOverlayTheme(project.overlayTheme);
+  overlayTheme.disabled = state.projectOverlayThemeSavingId !== null;
   const live = (project.sessions || []).filter((session) => (
     ["active", "busy", "merging", "error"].includes(session.status)
   ));
@@ -784,6 +793,45 @@ async function startColor(color, button) {
       toast(error.message);
     }
   } finally { setBusy(button, false); }
+}
+
+async function changeProjectOverlayTheme(select) {
+  const project = selectedProject();
+  if (!project || state.projectOverlayThemeSavingId !== null) return;
+  const projectId = project.id;
+  const previous = normalizedOverlayTheme(project.overlayTheme);
+  const requested = normalizedOverlayTheme(select.value);
+  if (requested === previous) {
+    select.value = previous;
+    return;
+  }
+  const request = ++state.projectOverlayThemeRequest;
+  state.projectOverlayThemeSavingId = projectId;
+  select.disabled = true;
+  try {
+    const result = await api(`/api/projects/${projectId}/overlay-theme`, {
+      method: "POST", body: { overlayTheme: requested },
+    });
+    if (request !== state.projectOverlayThemeRequest) return;
+    if (!result || !["black", "white"].includes(result.overlayTheme)) {
+      throw new Error("The Control Center returned an invalid overlay theme.");
+    }
+    const savedProject = state.projects.find((item) => item.id === projectId);
+    if (savedProject) savedProject.overlayTheme = result.overlayTheme;
+    state.projectsSignature = JSON.stringify(state.projects);
+    if (state.selectedProjectId === projectId) select.value = result.overlayTheme;
+    toast(`${project.name} will use the ${result.overlayTheme} overlay for new sessions.`);
+  } catch (error) {
+    if (request === state.projectOverlayThemeRequest && state.selectedProjectId === projectId) {
+      select.value = previous;
+    }
+    toast(error.message);
+  } finally {
+    if (request === state.projectOverlayThemeRequest) {
+      state.projectOverlayThemeSavingId = null;
+      $("#newAgentOverlayTheme").disabled = false;
+    }
+  }
 }
 
 async function pushSelectedProject() {
@@ -2127,6 +2175,7 @@ $("#newAgentReasoning").addEventListener("change", () => {
   if (project) safeLocalStorageSet(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
 });
 $("#newAgentSpeed").addEventListener("change", changeNewAgentSpeed);
+$("#newAgentOverlayTheme").addEventListener("change", (event) => changeProjectOverlayTheme(event.currentTarget));
 $("#chatReasoning").addEventListener("change", changeChatReasoning);
 $("#chatSpeed").addEventListener("change", changeChatSpeed);
 $("#fastModeNoticeOk").addEventListener("click", acknowledgeFastModeNotice);

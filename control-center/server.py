@@ -199,6 +199,13 @@ class Handler(BaseHTTPRequestHandler):
                     update_webkit=body.get("updateWebkit", False),
                 )
                 self._json({"project": project}, 201)
+            elif path.startswith("/api/projects/") and path.endswith("/overlay-theme"):
+                parts = path.strip("/").split("/")
+                if len(parts) != 4:
+                    raise ControlCenterError("Project route not found.", 404)
+                self._json(self.server.app.projects.set_overlay_theme(
+                    parts[2], body.get("overlayTheme", "")
+                ))
             elif path.startswith("/api/projects/") and path.endswith("/push"):
                 parts = path.strip("/").split("/")
                 if len(parts) != 4:

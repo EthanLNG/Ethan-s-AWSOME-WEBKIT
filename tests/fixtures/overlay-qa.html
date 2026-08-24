@@ -17,6 +17,17 @@
     #sticky-target[data-state="two"] .sticky-pane-one { opacity: 0; pointer-events: none; }
     #sticky-target[data-state="two"] .sticky-pane-two { opacity: 1; pointer-events: none; }
     #runtime-canvas, #runtime-canvas-two { display: block; width: 320px; height: 120px; margin-top: 20px; background: #111827; }
+    @keyframes qa-marker-pulse {
+      0%, 38% { opacity: 1; transform: translateX(0); }
+      52%, 86% { opacity: 0; transform: translateX(72px); }
+      100% { opacity: 1; transform: translateX(0); }
+    }
+    #keyframe-target {
+      width: 280px; min-height: 96px; margin-top: 20px; padding: 24px;
+      border: 3px solid #7c3aed; background: #ede9fe;
+      animation: qa-marker-pulse 1.4s linear infinite;
+    }
+    #keyframe-target.qa-animation-paused { animation-play-state: paused; }
     dialog { width: min(480px, calc(100% - 40px)); padding: 32px; }
   </style>
 </head>
@@ -36,10 +47,15 @@
     <button id="bump-review-round" type="button">Bump review round</button>
     <button id="clear-review-round" type="button">Clear review override</button>
     <button id="start-surface-churn" type="button">Start surface churn</button>
+    <button id="start-keyframe-animation" type="button">Start keyframe animation</button>
     <output id="qa-state" aria-label="QA state"></output>
     <section id="target">
       <h2>Rectangle target</h2>
       <p>Draw a feedback rectangle here to open the voice-note editor.</p>
+    </section>
+    <section id="keyframe-target" class="qa-animation-paused">
+      <strong>CSS keyframe target</strong>
+      <p>This target moves and fades without mutating the DOM or scrolling.</p>
     </section>
     <section id="scroll-stage">
       <div id="sticky-target" data-state="one">
@@ -195,6 +211,9 @@
       };
       document.getElementById('start-surface-churn').addEventListener('click', () => {
         qa.startSurfaceChurn();
+      });
+      document.getElementById('start-keyframe-animation').addEventListener('click', () => {
+        document.getElementById('keyframe-target').classList.remove('qa-animation-paused');
       });
       window.addEventListener('keydown', (event) => {
         if (event.code !== 'Space') return;

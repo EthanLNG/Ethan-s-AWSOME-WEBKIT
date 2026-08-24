@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.8.21 (2026-08-24): Live feedback navigation and adaptive contrast
+
+- Repaired feedback points captured beside an unrelated sticky lifecycle
+  owner. Geometry and visibility now follow the element that actually owns the
+  mark, while bounded paint-order evidence prevents a background animation from
+  hijacking ordinary document feedback.
+- Added targeted CSS and Web Animations refreshes so rectangles follow live
+  transforms, opacity, and scene changes without requiring a scroll. Only exact
+  feedback roles and true ancestors are sampled, settled animations fall back
+  to a low-frequency timer, and unrelated sibling animations stay isolated.
+- Added a **Show feedback points** navigator beside Send. Unsent points can now
+  be reviewed in one list, jumped to across pages, and opened directly in a
+  focused editor before the batch is submitted.
+- Added a project-specific black or white overlay preference in the Control
+  Center. The choice is stored privately and snapshotted into new sessions, so
+  changing it never rethemes work already in progress.
+- Kept legacy theme state and v0.8.20 rectangle metadata compatible, including
+  safe black-theme defaults and automatic repair of contaminated anchors.
+
+**Migration:** finish or discard active project sessions, relaunch the Control
+Center, update the project's Webkit, and start a fresh color session. Existing
+feedback remains readable; newly started sessions inherit the project's chosen
+overlay contrast.
+
 ## v0.8.20 (2026-08-24): Animation-safe feedback geometry
 
 - Split every rectangle's live metadata into independent geometry, visible

@@ -274,6 +274,62 @@ class ControlCenterTests(unittest.TestCase):
             "mutationToken", self.app.start_project_seeds("project-1")["seedSession"]
         )
 
+    def test_project_overlay_theme_is_private_persistent_and_backward_compatible(self):
+        project = {
+            "id": "theme-project", "name": "Theme Project", "slug": "theme-project",
+            "path": str(self.root), "provider": "codex",
+        }
+        self.app.store.update(
+            lambda state: state.setdefault("projects", []).append(dict(project))
+        )
+        self.assertEqual(
+            self.app.projects.get_project("theme-project")["overlayTheme"], "black"
+        )
+        with mock.patch.object(
+            self.app.projects, "github_sync_status", return_value={}
+        ), mock.patch.object(
+            self.app.projects, "_existing_kit_update", return_value=None
+        ):
+            listed = self.app.projects.list_projects()
+        self.assertEqual(listed[0]["overlayTheme"], "black")
+
+        self.assertEqual(
+            self.app.projects.set_overlay_theme("theme-project", "white"),
+            {"overlayTheme": "white"},
+        )
+        self.assertEqual(
+            self.app.store.read()["projects"][0]["overlayTheme"], "white"
+        )
+        for invalid_theme in ("sepia", [], {}):
+            with self.subTest(invalid_theme=invalid_theme), self.assertRaisesRegex(
+                ControlCenterError, "black or white"
+            ):
+                self.app.projects.set_overlay_theme("theme-project", invalid_theme)
+            self.assertEqual(
+                self.app.store.read()["projects"][0]["overlayTheme"], "white"
+            )
+        with self.assertRaisesRegex(ControlCenterError, "Unknown project"):
+            self.app.projects.set_overlay_theme("missing-project", "black")
+
+        for corrupt_theme in ([], {}):
+            self.app.store.update(
+                lambda state, value=corrupt_theme: state["projects"][0].update(
+                    {"overlayTheme": value}
+                )
+            )
+            self.assertEqual(
+                self.app.projects.get_project("theme-project")["overlayTheme"],
+                "black",
+            )
+            with mock.patch.object(
+                self.app.projects, "github_sync_status", return_value={}
+            ), mock.patch.object(
+                self.app.projects, "_existing_kit_update", return_value=None
+            ):
+                self.assertEqual(
+                    self.app.projects.list_projects()[0]["overlayTheme"], "black"
+                )
+
     def test_macos_folder_picker_returns_selected_absolute_path(self):
         selected = self.root / "chosen"
         selected.mkdir()
@@ -301,7 +357,7 @@ class ControlCenterTests(unittest.TestCase):
         project_path = Path(project["path"])
         self.assertTrue((project_path / "index.html").exists())
         self.assertTrue((project_path / "webkit" / "CONTROL-CENTER.md").exists())
-        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.20")
+        self.assertEqual((project_path / "webkit" / "VERSION").read_text().strip(), "0.8.21")
         self.assertIn("WK_CONTROL_CENTER=1", (project_path / "AGENTS.md").read_text())
         config = json.loads((project_path / "webkit" / "webkit.config.json").read_text())
         self.assertEqual(config["project_name"], "demo-site")
@@ -2829,6 +2885,7 @@ class ControlCenterTests(unittest.TestCase):
             self.app.projects, "_find_port_block", return_value=6400
         ):
             project = self.app.projects.add_existing(str(repo), "codex")
+        self.app.projects.set_overlay_theme(project["id"], "white")
         (repo / "remote-note.txt").write_text(
             "collaborator update\n", encoding="utf-8"
         )
@@ -2867,9 +2924,18 @@ class ControlCenterTests(unittest.TestCase):
             session = self.app.sessions.start_session(
                 project["id"], color, "medium", "fast"
             )
+            self.app.projects.set_overlay_theme(project["id"], "black")
+            next_session = self.app.sessions.start_session(
+                project["id"], config["palette"][1]["slug"], "medium", "normal"
+            )
 
         self.assertEqual(session["status"], "active")
         self.assertEqual(session["speedMode"], "fast")
+        self.assertEqual(session["overlayTheme"], "white")
+        self.assertEqual(
+            self.app.sessions._get_session(session["id"])["overlayTheme"], "white"
+        )
+        self.assertEqual(next_session["overlayTheme"], "black")
         runtime = self.app.sessions.runtimes[session["id"]]
         bootstrap_job = runtime.jobs.get_nowait()
         self.assertEqual(bootstrap_job["source"], "bootstrap")
@@ -3399,7 +3465,9 @@ class ControlCenterTests(unittest.TestCase):
             "WK_SESSION_COLOR": "inherited-color",
             "WK_ENABLE_API_PROXY": "1",
             "WK_COLOR_FORCE": "purple",
+            "WK_OVERLAY_THEME": "inherited-theme",
         }
+        session["overlayTheme"] = "white"
         with mock.patch.dict(os.environ, inherited, clear=False), mock.patch(
             "control_center.subprocess.Popen", side_effect=processes
         ) as popen, mock.patch.object(
@@ -3415,6 +3483,8 @@ class ControlCenterTests(unittest.TestCase):
         self.assertIsNotNone(runtime.preview_log)
         self.assertIsNotNone(runtime.preview_log.thread)
         self.assertEqual(second_env["WK_COLOR_LOCKDIR"], config["lock_dir"])
+        self.assertEqual(first_env["WK_OVERLAY_THEME"], "white")
+        self.assertEqual(second_env["WK_OVERLAY_THEME"], "white")
         self.assertEqual(second_env["PYTHONIOENCODING"], "utf-8")
         self.assertIn("WK_PREVIEW_INSTANCE_TOKEN", second_env)
         self.assertEqual(first_env["WK_MUTATION_TOKEN"], runtime.mutation_token)
@@ -3625,6 +3695,63 @@ class ControlCenterTests(unittest.TestCase):
             app.projects.add_existing.assert_called_once_with(
                 "/projects/old-site", "codex", update_webkit=True
             )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_project_overlay_theme_http_route_forwards_the_private_preference(self):
+        token = "test-token-1234567890"
+        app = mock.Mock()
+        app.projects = self.app.projects
+        self.app.store.update(lambda state: state.setdefault("projects", []).append({
+            "id": "project-1", "name": "Project", "slug": "project",
+            "path": str(self.root), "provider": "codex",
+        }))
+        server = ControlCenterHTTPServer(
+            ("127.0.0.1", 0), ControlCenterHandler, app, token
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            body = json.dumps({"overlayTheme": "white"})
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/projects/project-1/overlay-theme", body=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body.encode("utf-8"))),
+                    "X-WKCC-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(payload, {"overlayTheme": "white"})
+            self.assertEqual(
+                self.app.store.read()["projects"][0]["overlayTheme"], "white"
+            )
+
+            invalid_body = json.dumps({"overlayTheme": []})
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=3
+            )
+            connection.request(
+                "POST", "/api/projects/project-1/overlay-theme", body=invalid_body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(invalid_body.encode("utf-8"))),
+                    "X-WKCC-Token": token,
+                },
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read().decode("utf-8"))
+            connection.close()
+            self.assertEqual(response.status, 409)
+            self.assertIn("black or white", payload["error"])
         finally:
             server.shutdown()
             server.server_close()
@@ -4108,7 +4235,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(raised.exception.details, {
             "code": "webkit_update_required",
             "installedVersion": "0.0.1",
-            "requiredVersion": "0.8.20",
+            "requiredVersion": "0.8.21",
         })
 
         status = subprocess.run(
@@ -4155,9 +4282,9 @@ class ControlCenterTests(unittest.TestCase):
         )
 
         self.assertEqual(project["webkitUpdated"]["installedVersion"], "0.4.1")
-        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.20")
+        self.assertEqual(project["webkitUpdated"]["requiredVersion"], "0.8.21")
         self.assertFalse(project["sourceIntegrationPending"])
-        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.20")
+        self.assertEqual((repo / "webkit" / "VERSION").read_text().strip(), "0.8.21")
         self.assertEqual(config_path.read_bytes(), config_before)
         self.assertFalse((repo / "webkit" / "legacy-only.txt").exists())
         self.assertTrue((repo / "webkit" / "CONTROL-CENTER.md").is_file())
@@ -4165,7 +4292,7 @@ class ControlCenterTests(unittest.TestCase):
             ["git", "log", "-1", "--pretty=%s"], cwd=repo,
             text=True, capture_output=True, check=True,
         ).stdout.strip()
-        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.20")
+        self.assertEqual(subject, "Update AWESOME WEBKIT to v0.8.21")
         self.assertEqual(
             subprocess.run(
                 ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -4223,7 +4350,7 @@ class ControlCenterTests(unittest.TestCase):
         )
         managed_path = Path(project["path"])
         self.assertEqual(
-            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.20"
+            (managed_path / "webkit" / "VERSION").read_text().strip(), "0.8.21"
         )
         self.assertEqual(
             subprocess.run(
@@ -4267,7 +4394,7 @@ class ControlCenterTests(unittest.TestCase):
         self.assertEqual(listed["webkitUpdate"], {
             "code": "webkit_update_required",
             "installedVersion": "0.8.3",
-            "requiredVersion": "0.8.20",
+            "requiredVersion": "0.8.21",
         })
 
         active = {
@@ -4296,9 +4423,9 @@ class ControlCenterTests(unittest.TestCase):
                 str(source), "codex", update_webkit=True
             )
 
-        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.20")
-        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.20")
-        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.20")
+        self.assertEqual(updated["webkitUpdated"]["requiredVersion"], "0.8.21")
+        self.assertEqual((managed / "webkit" / "VERSION").read_text().strip(), "0.8.21")
+        self.assertEqual((source / "webkit" / "VERSION").read_text().strip(), "0.8.21")
         self.assertIsNone(
             next(
                 item for item in self.app.projects.list_projects()

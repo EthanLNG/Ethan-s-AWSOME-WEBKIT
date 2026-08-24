@@ -107,6 +107,8 @@ DEFAULT_SETTINGS = {
     "fastModeNoticeSeen": False,
 }
 
+OVERLAY_THEMES = frozenset(("black", "white"))
+
 HOTKEY_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
 MODIFIER_HOTKEYS = {
     "AltLeft", "AltRight", "ControlLeft", "ControlRight",
@@ -197,6 +199,10 @@ def valid_hotkey(value):
         and HOTKEY_CODE.fullmatch(value) is not None
         and value not in MODIFIER_HOTKEYS
     )
+
+
+def normalized_overlay_theme(value):
+    return value if isinstance(value, str) and value in OVERLAY_THEMES else "black"
 
 
 def parsed_git_version(value):
@@ -3580,6 +3586,9 @@ class ProjectManager:
         projects = []
         for project in state.get("projects", []):
             item = dict(project)
+            item["overlayTheme"] = normalized_overlay_theme(
+                project.get("overlayTheme")
+            )
             item["exists"] = Path(project["path"]).is_dir()
             item["github"] = self.github_sync_status(project)
             try:
@@ -3615,8 +3624,25 @@ class ProjectManager:
     def get_project(self, project_id):
         for project in self.store.read().get("projects", []):
             if project["id"] == project_id:
-                return dict(project)
+                item = dict(project)
+                item["overlayTheme"] = normalized_overlay_theme(
+                    project.get("overlayTheme")
+                )
+                return item
         raise ControlCenterError("Unknown project.", 404)
+
+    def set_overlay_theme(self, project_id, theme):
+        if not isinstance(theme, str) or theme not in OVERLAY_THEMES:
+            raise ControlCenterError("Choose a black or white overlay theme.", 409)
+
+        def mutate(state):
+            for project in state.get("projects", []):
+                if project.get("id") == project_id:
+                    project["overlayTheme"] = theme
+                    return {"overlayTheme": theme}
+            raise ControlCenterError("Unknown project.", 404)
+
+        return self.store.update(mutate)
 
     def record_project_issue(self, project_id, code, message):
         if code != GITHUB_TARGET_DIVERGED:
@@ -4154,6 +4180,7 @@ class ProjectManager:
                 "managedCheckout": bool(managed),
                 "sourceIntegrationPending": bool(source_integration_pending),
                 "provider": provider,
+                "overlayTheme": "black",
                 "createdAt": utc_now(),
             }
             state.setdefault("projects", []).append(project)
@@ -7884,6 +7911,9 @@ class SessionManager:
                 "hasRun": False,
                 "reasoningEffort": reasoning_effort,
                 "speedMode": speed_mode,
+                "overlayTheme": normalized_overlay_theme(
+                    project.get("overlayTheme")
+                ),
                 "mutationToken": uuid.uuid4().hex,
                 "createdAt": utc_now(),
             }
@@ -8825,6 +8855,9 @@ to `{marker}`. If user input is required, write
         env["WK_HOTKEY_TOGGLE"] = settings["toggleHotkey"]
         env["WK_HOTKEY_DICTATE"] = settings["dictateHotkey"]
         env["WK_HOTKEY_DEFAULTS_VERSION"] = str(settings["defaultsVersion"])
+        env["WK_OVERLAY_THEME"] = normalized_overlay_theme(
+            session.get("overlayTheme")
+        )
         env["WK_MUTATION_TOKEN"] = runtime.mutation_token
         instance_token = uuid.uuid4().hex
         env["WK_PREVIEW_INSTANCE_TOKEN"] = instance_token

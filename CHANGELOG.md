@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.8.22 (2026-08-24): Cleaner controls and section-local feedback
+
+- Moved the project-specific black or white overlay preference into Settings,
+  where it remains clearly scoped to new sessions for the current project.
+- Promoted **Show feedback points** to the same primary treatment as Send while
+  preserving fast navigation and focused editing across an unsent batch.
+- Suppressed the duplicate selected rectangle that could appear when navigation
+  opened an existing feedback point directly in its editor.
+- Hardened fixed and sticky visual lifecycle checks so both newly captured and
+  legacy feedback points stay local to their intended section instead of
+  leaking into earlier scenes with similar viewport geometry.
+
+**Migration:** update the project's Webkit and start a fresh color session for
+the new project contrast preference and capture metadata. Existing feedback
+points remain supported and receive the stronger legacy lifecycle repair.
+
 ## v0.8.21 (2026-08-24): Live feedback navigation and adaptive contrast
 
 - Repaired feedback points captured beside an unrelated sticky lifecycle

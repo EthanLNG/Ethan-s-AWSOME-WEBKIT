@@ -70,23 +70,14 @@
               <h2>New agent</h2>
               <p class="section-description">Each active color is a separate branch, preview server, and agent conversation.</p>
             </div>
-            <div class="agent-setting-stack">
-              <div class="agent-setting-controls">
-                <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
-                <label class="reasoning-control">Speed
-                  <select id="newAgentSpeed">
-                    <option value="normal">Normal</option>
-                    <option value="fast">Fast</option>
-                  </select>
-                </label>
-                <label class="reasoning-control">Overlay contrast
-                  <select id="newAgentOverlayTheme" aria-describedby="overlayThemeNote">
-                    <option value="black">Black</option>
-                    <option value="white">White</option>
-                  </select>
-                </label>
-              </div>
-              <small class="agent-setting-note" id="overlayThemeNote">Project-specific. Black is clearer on light sites, white on dark sites. New sessions only.</small>
+            <div class="agent-setting-controls">
+              <label class="reasoning-control">Default reasoning <select id="newAgentReasoning"></select></label>
+              <label class="reasoning-control">Speed
+                <select id="newAgentSpeed">
+                  <option value="normal">Normal</option>
+                  <option value="fast">Fast</option>
+                </select>
+              </label>
             </div>
           </div>
           <div class="color-grid" id="colorGrid"></div>
@@ -328,6 +319,21 @@
             <span><b>Draw rectangles immediately</b><small>Legacy mode. Hold Alt/Option when you want to click the website underneath.</small></span>
           </label>
         </div>
+      </div>
+      <div class="settings-section" id="projectOverlayThemeSettings">
+        <h2>Feedback overlay contrast</h2>
+        <p id="overlayThemeNote">Choose a project to set its feedback overlay contrast.</p>
+        <div class="settings-theme-toggle" role="group" aria-label="Feedback overlay contrast" aria-describedby="overlayThemeNote overlayThemeBehaviorNote">
+          <label>
+            <input type="radio" name="projectOverlayTheme" value="black">
+            <span><i class="theme-swatch black" aria-hidden="true"></i>Black</span>
+          </label>
+          <label>
+            <input type="radio" name="projectOverlayTheme" value="white">
+            <span><i class="theme-swatch white" aria-hidden="true"></i>White</span>
+          </label>
+        </div>
+        <p class="capability-note overlay-theme-note" id="overlayThemeBehaviorNote">Project-specific. Black is clearer on light sites and white on dark sites. Changes are saved immediately and affect new sessions only.</p>
       </div>
       <div class="settings-section">
         <h2>Open AWESOME WEBKIT</h2>

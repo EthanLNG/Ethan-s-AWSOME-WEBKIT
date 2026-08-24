@@ -646,11 +646,14 @@ input:focus-visible {
   max-width: calc(100vw - 104px);
   overflow: hidden;
   text-overflow: ellipsis;
-  background: var(--wk-paper);
-  color: var(--wk-ink);
+  background: var(--wk-accent);
+  color: var(--wk-on-accent);
 }
 .wk-show-points:hover,
-.wk-show-points.open { background: var(--wk-accent-soft); }
+.wk-show-points.open {
+  background: var(--wk-accent-dim);
+  border-color: var(--wk-accent-dim);
+}
 .wk-show-points:active { transform: scale(0.96); }
 .wk-show-points:disabled { opacity: 0.5; cursor: not-allowed; }
 .wk-send {

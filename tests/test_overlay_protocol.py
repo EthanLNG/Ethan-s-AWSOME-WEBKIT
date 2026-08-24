@@ -55,6 +55,8 @@ class OverlayProtocolTests(unittest.TestCase):
             + "surfaceGeometryEntryPriority, "
             + "capturedSurfaceGeometrySelector, "
             + "persistedRectForDraft, primaryRectIndex, visualSurfaceActive, "
+            + "sectionLocalFixedScopeEligible, "
+            + "surfaceScopeRectActive, "
             + "tabActivityMode, tabPollDelay, keyboardActivationTarget, "
             + "dictationTargetAllowsActivation, dictationKeyAction, "
             + "MAX_QUEUED_TOMBSTONES };"
@@ -298,10 +300,16 @@ for (const [name, value] of [
   ['aria-current', 'false'], ['aria-selected', 'false'],
   ['aria-expanded', 'false'], ['aria-pressed', 'false'], ['aria-hidden', 'true'],
 ]) assert.strictEqual(H.surfaceStateAttributeCapturable(name, value), false, `${name}=${value}`);
-for (const token of ['active', 'is-active', 'current', 'visible', 'has-open']) {
+for (const token of [
+  'active', 'is-active', 'current', 'visible', 'has-open',
+  'lit', 'is-lit',
+]) {
   assert.strictEqual(H.surfaceStateClassCapturable(token), true, token);
 }
-for (const token of ['inactive', 'is-off', 'hidden', 'closed', 'collapsed']) {
+for (const token of [
+  'inactive', 'is-off', 'hidden', 'closed', 'collapsed', 'is-mobile', 'is-loaded',
+  'ready', 'is-ready', 'revealed', 'is-entered', 'is-playing',
+]) {
   assert.strictEqual(H.surfaceStateClassCapturable(token), false, token);
 }
 const capturedState = {
@@ -325,6 +333,9 @@ assert.strictEqual(H.surfaceStateMatchStatus(
 ), 'unknown');
 assert.strictEqual(H.surfaceStateMatchStatus(
   capturedState, () => null, () => false
+), 'mismatch');
+assert.strictEqual(H.surfaceStateMatchStatus(
+  { attrs: {}, classes: ['is-lit'] }, () => null, () => false
 ), 'mismatch');
 assert.strictEqual(H.surfaceStateMatchStatus(
   { attrs: { 'aria-hidden': 'true' }, classes: [] }, () => 'false', () => false
@@ -410,7 +421,7 @@ assert.strictEqual(H.visualSurfaceActive(
   false, true, true, 'sticky', true, 5107, 5107, 900
 ), false);
 // A sticky scene with no explicit data/class state signal is still tied to its
-// capture moment. Fixed and document content remain active while visible.
+// capture moment. Global fixed and document content remain active while visible.
 assert.strictEqual(H.visualSurfaceActive(
   true, false, false, 'sticky', false, 7200, 5107, 900
 ), false);
@@ -423,6 +434,31 @@ assert.strictEqual(H.visualSurfaceActive(
 assert.strictEqual(H.visualSurfaceActive(
   true, false, false, 'doc', false, 7200, 5107, 900
 ), true);
+// Section-local fixed visuals must follow their ordinary flow scope. An
+// unresolved scope preserves the legacy global-fixed behavior, while the
+// current review point can still recover at its exact capture moment.
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'fixed', false, 7200, 5107, 900, false
+), false);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'fixed', false, 7200, 5107, 900, true
+), false);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'fixed', false, 5140, 5107, 900, true
+), true);
+assert.strictEqual(H.visualSurfaceActive(
+  true, false, false, 'fixed', true, 5107, 5107, 900, false
+), true);
+assert.strictEqual(H.surfaceScopeRectActive(
+  { top: 920, bottom: 2100, height: 1180 }, 900
+), false);
+assert.strictEqual(H.surfaceScopeRectActive(
+  { top: -100, bottom: 1070, height: 1170 }, 900
+), true);
+assert.strictEqual(H.surfaceScopeRectActive(null, 900), true);
+assert.strictEqual(H.sectionLocalFixedScopeEligible(true, true, true), true);
+assert.strictEqual(H.sectionLocalFixedScopeEligible(true, false, true), false);
+assert.strictEqual(H.sectionLocalFixedScopeEligible(true, true, false), false);
 assert.strictEqual(H.sameRectGeometry(
   { x: 10, y: 20, w: 30, h: 40 }, { x: 10, y: 20, w: 30, h: 40 }
 ), true);
@@ -926,6 +962,72 @@ assert.strictEqual(H.surfaceAnimationCapturable({
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, self.source)
 
+    def test_section_local_fixed_surfaces_capture_and_recover_flow_scope(self):
+        capture_start = self.source.index("  function captureRectSurface")
+        capture_end = self.source.index("  function captureDraftRectMetadata", capture_start)
+        capture = self.source[capture_start:capture_end]
+        self.assertIn("const stateDepthLimit = anchor ? 8 : 5;", capture)
+        self.assertNotIn("if (anchor && current === anchor.node) break;", capture)
+        self.assertIn("const scopeOwner = surfaceScopeOwner(selected.node, geometryOwner);", capture)
+        self.assertIn("const scopeNode = scopeOwner ? surfaceFlowScope", capture)
+        self.assertIn("...(scopeSelector ? { scopeSelector } : {}),", capture)
+
+        scope_start = self.source.index("  function surfaceFlowScope(")
+        scope_end = self.source.index("  function resolvedSurfaceAnchorOwnership", scope_start)
+        scope = self.source[scope_start:scope_end]
+        for fragment in (
+            "position === 'fixed'",
+            "position === 'sticky'",
+            "getComputedStyle(node).pointerEvents === 'none'",
+            "sectionLocalFixedScopeEligible(",
+            "current.matches('section,article,[role=\"region\"],[data-stage],[data-scene]')",
+            "const owner = surfaceScopeOwner(target, geometry);",
+            "if (!owner) return null;",
+            "captured.contains(owner)",
+            "const cached = inferredSurfaceScopeCache.get(owner);",
+            "cached.isConnected",
+            "inferredSurfaceScopeCache.delete(owner)",
+            "if (inferred) inferredSurfaceScopeCache.set(owner, inferred);",
+            "const inferred = surfaceFlowScope(owner, innerHeight);",
+            "surfaceScopeRectActive(rect, innerHeight)",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, scope)
+
+        active_start = self.source.index("  function rectSurfaceActive")
+        active_end = self.source.index("  const SKIP_TAGS", active_start)
+        active = self.source[active_start:active_end]
+        self.assertIn(
+            "const scopeActive = resolvedSurfaceScopeActive(surface, target, geometry);",
+            active,
+        )
+        self.assertIn(
+            "const geometryScopeActive = resolvedSurfaceScopeActive(surface, geometry, geometry);",
+            active,
+        )
+        self.assertIn("geometryScopeActive", active)
+        self.assertIn("innerHeight, scopeActive", active)
+        self.assertIn("resolvedSurfaceScopeActive(null, target, target)", active)
+
+        tracking_start = self.source.index("  function refreshSurfaceObservation")
+        tracking_end = self.source.index("  document.addEventListener('wheel'", tracking_start)
+        tracking = self.source[tracking_start:tracking_end]
+        self.assertIn("const capturedScopeTarget = uniqueElement(surface.scopeSelector);", tracking)
+        self.assertIn("if (scopeTarget) addTrackedRole(scopeTarget, ['style'], marker);", tracking)
+
+        navigator_start = self.source.index("  function scrollQueuedPointIntoView")
+        navigator_end = self.source.index("  let queuedPointNavigationGeneration", navigator_start)
+        navigator = self.source[navigator_start:navigator_end]
+        self.assertIn("viewportAnchor?.active === false", navigator)
+        self.assertIn("settledAnchor?.active === false", navigator)
+        self.assertNotIn("rectSurfaceActive(point, primaryIndex) === false", navigator)
+        review_start = self.source.index("  function jumpTo(")
+        review_end = self.source.index("  // ===== BEFORE|AFTER", review_start)
+        review = self.source[review_start:review_end]
+        self.assertIn("va?.active === false", review)
+        self.assertIn("settled?.active === false", review)
+        self.assertNotIn("rectSurfaceActive(pt, primaryIndex) === false", review)
+
     def test_continuous_surface_animation_repositions_without_starving_visibility(self):
         for event_name in (
             "transitionrun", "transitionstart", "transitionend", "transitioncancel",
@@ -1320,6 +1422,28 @@ assert.strictEqual(H.tabPollDelay('normal', 'evaluate', false), 15000);
         self.assertLess(
             self.source.index("await scrollQueuedPointIntoView(point)"),
             self.source.index("openCard({ editId: point.id })"),
+        )
+
+    def test_feedback_navigator_uses_primary_button_and_editor_has_one_rectangle(self):
+        show_start = self.css.index(".wk-show-points {")
+        show_end = self.css.index(".wk-show-points:hover", show_start)
+        show_button = self.css[show_start:show_end]
+        self.assertIn("background: var(--wk-accent);", show_button)
+        self.assertIn("color: var(--wk-on-accent);", show_button)
+        self.assertNotIn("background: var(--wk-paper);", show_button)
+
+        pins_start = self.source.index("  function renderPins()")
+        pins_end = self.source.index("  function correctedRect", pins_start)
+        pins = self.source[pins_start:pins_end]
+        self.assertIn("const editedPointId = S.card?.draft?.editId || null;", pins)
+        self.assertIn("if (p.id === editedPointId || p.page !== page) continue;", pins)
+        self.assertIn(
+            "if (p.id === editedPointId || submittedIds.has(p.id) || p.page !== page) continue;",
+            pins,
+        )
+        self.assertLess(
+            self.source.index("S.card = cardOwner;"),
+            self.source.index("renderPins();", self.source.index("S.card = cardOwner;")),
         )
 
     def test_feedback_point_navigation_owns_and_cleans_restored_surfaces(self):

@@ -517,7 +517,7 @@
 
   function surfaceStateClassCapturable(token) {
     return typeof token === 'string' && token.length <= 128 &&
-      /^(?:active|current|selected|open(?:ed)?|visible|shown|expanded|in-view|is-(?:active|current|selected|open|visible|shown|expanded|on)|has-(?:active|current|selection|open))$/i
+      /^(?:active|current|selected|open(?:ed)?|visible|shown|expanded|in-view|lit|is-(?:active|current|selected|open|visible|shown|expanded|on|lit)|has-(?:active|current|selection|open))$/i
         .test(token);
   }
 
@@ -884,15 +884,44 @@
 
   function visualSurfaceActive(
     visible, hasStateSignals, stateMatches, anchorMode, reviewing,
-    currentScrollY, capturedScrollY, viewportHeight
+    currentScrollY, capturedScrollY, viewportHeight, scopeActive = null
   ) {
     if (!visible) return false;
     const nearCapture = [currentScrollY, capturedScrollY, viewportHeight].every(Number.isFinite) &&
       Math.abs(currentScrollY - capturedScrollY) <=
         Math.max(64, Math.min(240, viewportHeight * 0.2));
+    // A fixed visual can belong to one ordinary document section even though
+    // its own box remains painted at the same viewport coordinates everywhere.
+    // The section boundary is authoritative, with the usual review fallback
+    // at the exact capture moment for agent-renamed or temporarily missing UI.
+    if (scopeActive === false) return !!reviewing && nearCapture;
     if (hasStateSignals) return stateMatches || (!!reviewing && nearCapture);
-    if (anchorMode === 'sticky') return nearCapture;
+    // A scoped fixed visual is section-local but can still occupy the same
+    // viewport box for a long pinned story. Without captured phase evidence,
+    // keep it close to the exact scroll moment just like an ordinary sticky
+    // target. A global fixed control has no scope and remains always active.
+    if (anchorMode === 'sticky' || (anchorMode === 'fixed' && scopeActive === true)) {
+      return nearCapture;
+    }
     return true;
+  }
+
+  function surfaceScopeRectActive(rect, viewportHeight) {
+    const top = Number(rect?.top);
+    const bottom = Number(rect?.bottom);
+    const height = Number(rect?.height);
+    const viewport = Number(viewportHeight);
+    // Missing geometry is unknown, not inactive. This keeps old points and
+    // agent-replaced markup reviewable instead of hiding them permanently.
+    if (![top, bottom, viewport].every(Number.isFinite) || viewport <= 0) return true;
+    if (Number.isFinite(height) && height <= 0) return false;
+    return bottom > 0 && top < viewport;
+  }
+
+  function sectionLocalFixedScopeEligible(
+    crossedFixedAnchor, crossedStickyAnchor, pointerTransparent
+  ) {
+    return !!crossedFixedAnchor && !!crossedStickyAnchor && !!pointerTransparent;
   }
 
   function tabActivityMode(phase) {
@@ -2072,6 +2101,10 @@
         if (anchorTarget) addTrackedRole(anchorTarget, ['style'], marker);
         const geometryTarget = uniqueElement(surface.geometrySelector);
         if (geometryTarget) addTrackedRole(geometryTarget, ['style'], marker);
+        const capturedScopeTarget = uniqueElement(surface.scopeSelector);
+        if (surface.scopeSelector && !capturedScopeTarget) unresolvedSurface = true;
+        const scopeTarget = resolvedSurfaceScope(surface, target, geometryTarget);
+        if (scopeTarget) addTrackedRole(scopeTarget, ['style'], marker);
         for (const signal of (surface.stateChain || [])) {
           addTrackedRole(
             uniqueElement(signal.selector), ['style', ...Object.keys(signal.attrs || {})], marker
@@ -2332,6 +2365,77 @@
     } catch (e) { return null; }
   }
 
+  const inferredSurfaceScopeCache = new WeakMap();
+  function surfaceFlowScope(node, viewportHeight = innerHeight) {
+    if (!node || node.nodeType !== 1) return null;
+    const viewport = Number(viewportHeight);
+    const substantialHeight = Math.max(160, Math.min(320,
+      Number.isFinite(viewport) && viewport > 0 ? viewport * 0.25 : 240
+    ));
+    let pointerTransparent = false;
+    try { pointerTransparent = getComputedStyle(node).pointerEvents === 'none'; }
+    catch (e) { return null; }
+    if (!pointerTransparent) return null;
+    let crossedFixedAnchor = false;
+    let crossedStickyAnchor = false;
+    let depth = 0;
+    for (let current = node;
+      current && current !== document.body && current !== document.documentElement && depth < 12;
+      current = current.parentElement, depth += 1) {
+      let position = '';
+      try { position = getComputedStyle(current).position; } catch (e) { return null; }
+      if (position === 'fixed') {
+        crossedFixedAnchor = true;
+        continue;
+      }
+      if (position === 'sticky') {
+        crossedStickyAnchor = true;
+        continue;
+      }
+      if (!sectionLocalFixedScopeEligible(
+        crossedFixedAnchor, crossedStickyAnchor, pointerTransparent
+      )) continue;
+      let rect;
+      try { rect = current.getBoundingClientRect(); } catch (e) { continue; }
+      const semantic = typeof current.matches === 'function' &&
+        current.matches('section,article,[role="region"],[data-stage],[data-scene]');
+      const usableHeight = Number.isFinite(rect.height) && rect.height > 0;
+      if (usableHeight && (semantic || rect.height >= substantialHeight)) {
+        return current;
+      }
+    }
+    return null;
+  }
+
+  function surfaceScopeOwner(target, geometry) {
+    if (geometry && elementViewportAnchorMode(geometry) === 'fixed') return geometry;
+    if (target && elementViewportAnchorMode(target) === 'fixed') return target;
+    return null;
+  }
+
+  function resolvedSurfaceScope(surface, target, geometry) {
+    const owner = surfaceScopeOwner(target, geometry);
+    if (!owner) return null;
+    const captured = uniqueElement(surface?.scopeSelector);
+    if (captured && typeof captured.contains === 'function' &&
+      (captured === owner || captured.contains(owner))) return captured;
+    const cached = inferredSurfaceScopeCache.get(owner);
+    if (cached && cached.isConnected && typeof cached.contains === 'function' &&
+      (cached === owner || cached.contains(owner))) return cached;
+    if (cached) inferredSurfaceScopeCache.delete(owner);
+    const inferred = surfaceFlowScope(owner, innerHeight);
+    if (inferred) inferredSurfaceScopeCache.set(owner, inferred);
+    return inferred;
+  }
+
+  function resolvedSurfaceScopeActive(surface, target, geometry) {
+    const scope = resolvedSurfaceScope(surface, target, geometry);
+    if (!scope) return null;
+    let rect;
+    try { rect = scope.getBoundingClientRect(); } catch (e) { return null; }
+    return effectivelyVisible(scope) && surfaceScopeRectActive(rect, innerHeight);
+  }
+
   function resolvedSurfaceAnchorOwnership(surface) {
     if (!surfaceUsesSeparatedGeometry(surface) || !surface?.anchor) return true;
     const anchor = uniqueElement(surface.anchor.selector);
@@ -2434,14 +2538,16 @@
       const anchor = elementViewportAnchorInfo(target);
       const stateChain = [];
       let depth = 0;
-      for (let current = target; current && depth < 12; current = current.parentElement) {
+      const stateDepthLimit = anchor ? 8 : 5;
+      for (let current = target;
+        current && current !== document.body && current !== document.documentElement &&
+          depth <= stateDepthLimit;
+        current = current.parentElement) {
         const signal = surfaceStateSignal(current);
         if (signal) {
           stateChain.push(signal);
           if (stateChain.length >= 3) break;
         }
-        if (anchor && current === anchor.node) break;
-        if (!anchor && depth >= 5) break;
         depth += 1;
       }
       const anchorSelector = anchor ? buildSelector(anchor.node) : null;
@@ -2493,6 +2599,9 @@
       !(selectedAnchorNode === geometryOwner || selectedAnchorNode.contains(geometryOwner)))) {
       selectedAnchor = null;
     }
+    const scopeOwner = surfaceScopeOwner(selected.node, geometryOwner);
+    const scopeNode = scopeOwner ? surfaceFlowScope(scopeOwner, innerHeight) : null;
+    const scopeSelector = scopeNode ? buildSelector(scopeNode) : null;
     return {
       // Geometry, lifecycle, and viewport anchoring have separate owners. This
       // prevents an unrelated fullscreen sticky layer from hijacking a normal
@@ -2500,6 +2609,7 @@
       geometrySelector,
       targetSelector: selected.targetSelector,
       anchor: selectedAnchor,
+      ...(scopeSelector ? { scopeSelector } : {}),
       stateChain: selected.stateChain,
       scroll: { x: Math.round(scrollX), y: Math.round(scrollY) },
     };
@@ -2574,11 +2684,14 @@
         // Repair points captured by v0.8.20 with a sticky scene as lifecycle
         // owner and a document element as geometry owner. The real geometry is
         // authoritative; the foreign scene's state and anchor are discarded.
+        const geometryScopeActive = resolvedSurfaceScopeActive(surface, geometry, geometry);
         return visualSurfaceActive(
           effectivelyVisible(geometry), false, false, 'doc', reviewFallback,
-          scrollY, Number(surface.scroll?.y ?? point.scroll?.y), innerHeight
+          scrollY, Number(surface.scroll?.y ?? point.scroll?.y), innerHeight,
+          geometryScopeActive
         );
       }
+      const scopeActive = resolvedSurfaceScopeActive(surface, target, geometry);
       const visible = effectivelyVisible(target);
       const stateChain = Array.isArray(surface.stateChain) ? surface.stateChain : [];
       // Old points may contain only negative ARIA values or inactive class
@@ -2610,7 +2723,7 @@
       // AFTER/BEFORE surface instead of hiding a correct changed result.
       return visualSurfaceActive(
         visible, hasStateSignals, stateMatches, anchorMode, reviewFallback,
-        scrollY, capturedScrollY, innerHeight
+        scrollY, capturedScrollY, innerHeight, scopeActive
       );
     }
 
@@ -2628,7 +2741,8 @@
       (point.anchor === 'viewport' ? 'fixed' : 'doc');
     return visualSurfaceActive(
       effectivelyVisible(target), false, false, anchorMode, reviewFallback,
-      scrollY, Number(point.scroll?.y), innerHeight
+      scrollY, Number(point.scroll?.y), innerHeight,
+      resolvedSurfaceScopeActive(null, target, target)
     );
   }
   const SKIP_TAGS = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'NOSCRIPT', 'TEMPLATE', 'HTML', 'BODY']);
@@ -3028,6 +3142,11 @@
     S.pinEls = [];
     S.curPinEls = null;   // never flash a node that just got detached
     const page = logicalPath();
+    // While a point is open in the editor, its frozen editing rectangle is the
+    // sole visual owner. Keeping the queued or submitted marker underneath it
+    // produces two coincident rectangles and makes the selected point look as
+    // if navigation created a new mark. Teardown renders the saved marker again.
+    const editedPointId = S.card?.draft?.editId || null;
     const addPin = (point, rectIndex, cls, onClick, title) => {
       const rect = el('div', 'wk-pin-rect ' + cls);
       rect.style.visibility = 'hidden';
@@ -3064,14 +3183,14 @@
       : [];
     const submittedIds = new Set(submitted.map((point) => point.id));
     for (const p of submitted) {
-      if (p.page !== page) continue;
+      if (p.id === editedPointId || p.page !== page) continue;
       (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'submitted', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ pendingPoint: p });
       }, 'added point ' + p.number + ' is saved and waiting - click to edit'));
     }
     for (const p of S.points) {
-      if (submittedIds.has(p.id) || p.page !== page) continue;
+      if (p.id === editedPointId || submittedIds.has(p.id) || p.page !== page) continue;
       (p.rects || [p.rect]).forEach((_box, rectIndex) => addPin(p, rectIndex, 'queued', () => {
         if (IS_BEFORE || S.card) return;
         openCard({ editId: p.id });
@@ -4439,10 +4558,12 @@
     const capturedStickyScrollY = Number(
       point.rectSurfaces?.[primaryIndex]?.scroll?.y ?? point.scroll?.y
     );
-    const target = reviewScrollTarget(
+    let target = reviewScrollTarget(
       box, !!viewportAnchor, viewportAnchor ? viewportAnchor.anchorMode : 'doc',
       scrollY, innerHeight, capturedStickyScrollY
     );
+    if (viewportAnchor?.active === false &&
+      Number.isFinite(capturedStickyScrollY)) target = Math.max(0, capturedStickyScrollY);
     if (target !== null) window.scrollTo({ top: target, behavior: 'instant' });
     return new Promise((resolve) => {
       requestAnimationFrame(() => {
@@ -4452,8 +4573,12 @@
           settledBox, !!settledAnchor, settledAnchor ? settledAnchor.anchorMode : 'doc',
           scrollY, innerHeight, capturedStickyScrollY
         );
-        if (retry !== null && Math.abs(retry - scrollY) > 1) {
-          window.scrollTo({ top: retry, behavior: 'instant' });
+        const retryTarget = settledAnchor?.active === false &&
+          Number.isFinite(capturedStickyScrollY)
+          ? Math.max(0, capturedStickyScrollY)
+          : retry;
+        if (retryTarget !== null && Math.abs(retryTarget - scrollY) > 1) {
+          window.scrollTo({ top: retryTarget, behavior: 'instant' });
         }
         requestAnimationFrame(() => {
           schedulePos();
@@ -5002,10 +5127,12 @@
       // points are viewport-anchored only while their containing scene is live;
       // once that scene passes, bring them back instead of treating them as a
       // permanently visible fixed control.
-      const target = reviewScrollTarget(
+      let target = reviewScrollTarget(
         box, !!va, va ? va.anchorMode : 'doc', scrollY, innerHeight,
         capturedStickyScrollY
       );
+      if (va?.active === false &&
+        Number.isFinite(capturedStickyScrollY)) target = Math.max(0, capturedStickyScrollY);
       if (target !== null) {
         window.scrollTo({ top: target, behavior: 'instant' });
         requestAnimationFrame(() => {
@@ -5015,8 +5142,12 @@
             settledBox, !!settled, settled ? settled.anchorMode : 'doc', scrollY, innerHeight,
             capturedStickyScrollY
           );
-          if (retry !== null && Math.abs(retry - scrollY) > 1) {
-            window.scrollTo({ top: retry, behavior: 'instant' });
+          const retryTarget = settled?.active === false &&
+            Number.isFinite(capturedStickyScrollY)
+            ? Math.max(0, capturedStickyScrollY)
+            : retry;
+          if (retryTarget !== null && Math.abs(retryTarget - scrollY) > 1) {
+            window.scrollTo({ top: retryTarget, behavior: 'instant' });
           }
           schedulePos();
         });

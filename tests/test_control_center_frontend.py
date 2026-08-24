@@ -889,7 +889,9 @@ async function testFastModeNoticeIsAcknowledgedOnlyOnce() {
 
 async function testProjectOverlayThemePersistsWithoutRethemingTheSessionRequest() {
   const project = { id: "project-1", name: "Project One", overlayTheme: "black" };
-  const select = { value: "white", disabled: false };
+  const blackInput = { value: "black", checked: true, disabled: false };
+  const whiteInput = { value: "white", checked: true, disabled: false };
+  const note = { textContent: "" };
   const requests = [];
   const notices = [];
   const state = {
@@ -901,20 +903,39 @@ async function testProjectOverlayThemePersistsWithoutRethemingTheSessionRequest(
   };
   const ctx = context({
     state,
-    $: () => select,
+    document: {
+      querySelectorAll(selector) {
+        assert.equal(selector, 'input[name="projectOverlayTheme"]');
+        return [blackInput, whiteInput];
+      },
+    },
+    $: (selector) => {
+      assert.equal(selector, "#overlayThemeNote");
+      return note;
+    },
     api: async (path, options) => {
       requests.push({ path, options });
       return { overlayTheme: "white" };
     },
     toast: (message) => notices.push(message),
   });
-  install(ctx, "normalizedOverlayTheme", "selectedProject", "changeProjectOverlayTheme");
+  install(
+    ctx,
+    "normalizedOverlayTheme",
+    "selectedProject",
+    "renderProjectOverlayThemeSetting",
+    "changeProjectOverlayTheme"
+  );
 
-  await ctx.changeProjectOverlayTheme(select);
+  await ctx.changeProjectOverlayTheme(whiteInput);
   assert.equal(requests[0].path, "/api/projects/project-1/overlay-theme");
   assert.equal(requests[0].options.body.overlayTheme, "white");
   assert.equal(project.overlayTheme, "white");
-  assert.equal(select.disabled, false);
+  assert.equal(blackInput.checked, false);
+  assert.equal(whiteInput.checked, true);
+  assert.equal(blackInput.disabled, false);
+  assert.equal(whiteInput.disabled, false);
+  assert.equal(note.textContent, "For Project One.");
   assert.equal(state.projectOverlayThemeSavingId, null);
   assert.match(notices[0], /new sessions/);
 
@@ -924,6 +945,14 @@ async function testProjectOverlayThemePersistsWithoutRethemingTheSessionRequest(
     /overlayTheme/,
     "session start must snapshot the server-side project preference"
   );
+
+  state.selectedProjectId = null;
+  ctx.renderProjectOverlayThemeSetting();
+  assert.equal(blackInput.checked, false);
+  assert.equal(whiteInput.checked, false);
+  assert.equal(blackInput.disabled, true);
+  assert.equal(whiteInput.disabled, true);
+  assert.match(note.textContent, /Choose a project/);
 }
 
 (async () => {
@@ -988,16 +1017,24 @@ class ControlCenterFrontendTests(unittest.TestCase):
         markup = INDEX_HTML.read_text(encoding="utf-8")
         source = APP_JS.read_text(encoding="utf-8")
         styles = STYLES_CSS.read_text(encoding="utf-8")
-        self.assertIn('id="newAgentOverlayTheme"', markup)
-        self.assertIn('<option value="black">Black</option>', markup)
-        self.assertIn('<option value="white">White</option>', markup)
+        settings_start = markup.index('id="settingsDialog"')
+        theme_start = markup.index('id="projectOverlayThemeSettings"')
+        settings_end = markup.index("</dialog>", settings_start)
+        self.assertGreater(theme_start, settings_start)
+        self.assertLess(theme_start, settings_end)
+        self.assertNotIn('id="newAgentOverlayTheme"', markup)
+        self.assertIn('name="projectOverlayTheme" value="black"', markup)
+        self.assertIn('name="projectOverlayTheme" value="white"', markup)
         self.assertIn(
-            "Project-specific. Black is clearer on light sites, white on dark sites. New sessions only.",
+            "Project-specific. Black is clearer on light sites and white on dark sites. Changes are saved immediately and affect new sessions only.",
             markup,
         )
+        self.assertIn("renderProjectOverlayThemeSetting", source)
         self.assertIn("changeProjectOverlayTheme", source)
         self.assertIn("/overlay-theme`,", source)
-        self.assertIn(".agent-setting-note", styles)
+        self.assertIn(".settings-theme-toggle", styles)
+        self.assertIn(".theme-swatch.black", styles)
+        self.assertIn(".theme-swatch.white", styles)
 
     def test_registered_project_update_action_is_visible_in_markup(self):
         markup = INDEX_HTML.read_text(encoding="utf-8")

@@ -745,6 +745,7 @@ class PreviewServerTests(unittest.TestCase):
             "geometrySelector": "#target",
             "targetSelector": ".app-setup",
             "anchor": {"selector": "#phone-stage", "mode": "sticky"},
+            "scopeSelector": "#story-section",
             "scroll": {"x": 0, "y": 5107},
             "stateChain": [{
                 "selector": "#phone-stage",
@@ -758,6 +759,10 @@ class PreviewServerTests(unittest.TestCase):
         point["rectSurfaces"] = [surface, surface]
         status, _, payload = self.post_json("/__wk/feedback", batch)
         self.assertEqual(status, 200, payload)
+        self.assertEqual(
+            self.read_data("feedback.json")["points"][0]["rectSurfaces"][0]["scopeSelector"],
+            "#story-section",
+        )
 
         invalid = self.batch("point-2")
         invalid_point = invalid["points"][0]
@@ -830,6 +835,19 @@ class PreviewServerTests(unittest.TestCase):
         }]
         self.assertEqual(
             self.module._feedback_schema_error(invalid_scroll),
+            "feedback point rectangle surfaces are invalid",
+        )
+
+        invalid_scope = self.batch("point-invalid-scope")
+        invalid_scope_point = invalid_scope["points"][0]
+        invalid_scope_point["rect"] = {"x": 10, "y": 20, "w": 30, "h": 40}
+        invalid_scope_point["rects"] = [invalid_scope_point["rect"]]
+        invalid_scope_point["rectSurfaces"] = [{
+            **surface,
+            "scopeSelector": "",
+        }]
+        self.assertEqual(
+            self.module._feedback_schema_error(invalid_scope),
             "feedback point rectangle surfaces are invalid",
         )
 

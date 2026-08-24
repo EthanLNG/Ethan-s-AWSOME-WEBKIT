@@ -387,6 +387,7 @@ async function installShortcut() {
 
 function openSettings() {
   state.settingsGeneration += 1;
+  renderProjectOverlayThemeSetting();
   const capability = state.system.voiceTranscription || { available: false };
   const voiceInput = document.querySelector('input[name="dictationMode"][value="voice-note"]');
   voiceInput.disabled = !capability.available;
@@ -525,6 +526,19 @@ function normalizedOverlayTheme(value) {
   return value === "white" ? "white" : "black";
 }
 
+function renderProjectOverlayThemeSetting() {
+  const project = selectedProject();
+  const theme = normalizedOverlayTheme(project?.overlayTheme);
+  const disabled = !project || state.projectOverlayThemeSavingId !== null;
+  document.querySelectorAll('input[name="projectOverlayTheme"]').forEach((input) => {
+    input.checked = !!project && input.value === theme;
+    input.disabled = disabled;
+  });
+  $("#overlayThemeNote").textContent = project
+    ? `For ${project.name}.`
+    : "Choose a project to set its feedback overlay contrast.";
+}
+
 function targetBranch(project = selectedProject()) {
   return project?.targetBranch || "main";
 }
@@ -639,9 +653,7 @@ function renderProjectView() {
   fillReasoning($("#newAgentReasoning"), project.provider, defaultEffort);
   const savedSpeed = safeLocalStorageGet(`wkcc:speed:${project.provider}`) || "normal";
   fillSpeed($("#newAgentSpeed"), state.settings.fastModeNoticeSeen ? savedSpeed : "normal");
-  const overlayTheme = $("#newAgentOverlayTheme");
-  overlayTheme.value = normalizedOverlayTheme(project.overlayTheme);
-  overlayTheme.disabled = state.projectOverlayThemeSavingId !== null;
+  renderProjectOverlayThemeSetting();
   const live = (project.sessions || []).filter((session) => (
     ["active", "busy", "merging", "error"].includes(session.status)
   ));
@@ -795,19 +807,21 @@ async function startColor(color, button) {
   } finally { setBusy(button, false); }
 }
 
-async function changeProjectOverlayTheme(select) {
+async function changeProjectOverlayTheme(input) {
   const project = selectedProject();
   if (!project || state.projectOverlayThemeSavingId !== null) return;
   const projectId = project.id;
   const previous = normalizedOverlayTheme(project.overlayTheme);
-  const requested = normalizedOverlayTheme(select.value);
+  const requested = normalizedOverlayTheme(input.value);
   if (requested === previous) {
-    select.value = previous;
+    renderProjectOverlayThemeSetting();
     return;
   }
   const request = ++state.projectOverlayThemeRequest;
   state.projectOverlayThemeSavingId = projectId;
-  select.disabled = true;
+  document.querySelectorAll('input[name="projectOverlayTheme"]').forEach((option) => {
+    option.disabled = true;
+  });
   try {
     const result = await api(`/api/projects/${projectId}/overlay-theme`, {
       method: "POST", body: { overlayTheme: requested },
@@ -819,17 +833,17 @@ async function changeProjectOverlayTheme(select) {
     const savedProject = state.projects.find((item) => item.id === projectId);
     if (savedProject) savedProject.overlayTheme = result.overlayTheme;
     state.projectsSignature = JSON.stringify(state.projects);
-    if (state.selectedProjectId === projectId) select.value = result.overlayTheme;
+    if (state.selectedProjectId === projectId) renderProjectOverlayThemeSetting();
     toast(`${project.name} will use the ${result.overlayTheme} overlay for new sessions.`);
   } catch (error) {
     if (request === state.projectOverlayThemeRequest && state.selectedProjectId === projectId) {
-      select.value = previous;
+      renderProjectOverlayThemeSetting();
     }
     toast(error.message);
   } finally {
     if (request === state.projectOverlayThemeRequest) {
       state.projectOverlayThemeSavingId = null;
-      $("#newAgentOverlayTheme").disabled = false;
+      renderProjectOverlayThemeSetting();
     }
   }
 }
@@ -2175,7 +2189,9 @@ $("#newAgentReasoning").addEventListener("change", () => {
   if (project) safeLocalStorageSet(`wkcc:reasoning:${project.provider}`, $("#newAgentReasoning").value);
 });
 $("#newAgentSpeed").addEventListener("change", changeNewAgentSpeed);
-$("#newAgentOverlayTheme").addEventListener("change", (event) => changeProjectOverlayTheme(event.currentTarget));
+document.querySelectorAll('input[name="projectOverlayTheme"]').forEach((input) => {
+  input.addEventListener("change", (event) => changeProjectOverlayTheme(event.currentTarget));
+});
 $("#chatReasoning").addEventListener("change", changeChatReasoning);
 $("#chatSpeed").addEventListener("change", changeChatSpeed);
 $("#fastModeNoticeOk").addEventListener("click", acknowledgeFastModeNotice);

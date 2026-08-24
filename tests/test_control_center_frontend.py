@@ -466,12 +466,12 @@ async function testSettingsCompletionIsGenerationScoped() {
   const provider = { value: "codex", checked: true };
   const dictation = { value: "speech", checked: true };
   const interaction = { value: "browse-default", checked: true };
-  const saveButton = {};
   const closeButton = { disabled: false };
   const error = { textContent: "" };
+  const autosaveStatus = { textContent: "" };
+  const settingsForm = { inert: false };
   let closes = 0;
   const dialog = { open: true, close() { closes += 1; } };
-  const busy = [];
   const toasts = [];
   const requests = [];
   const state = {
@@ -494,16 +494,16 @@ async function testSettingsCompletionIsGenerationScoped() {
       },
     },
     $: (selector) => ({
-      "#saveSettings": saveButton,
       "#settingsDialogClose": closeButton,
       "#settingsError": error,
+      "#settingsAutosaveStatus": autosaveStatus,
+      "#settingsForm": settingsForm,
       "#settingsDialog": dialog,
     })[selector],
     api: (path, options) => {
       requests.push({ path, options });
       return request.promise;
     },
-    setBusy: (_button, value) => busy.push(value),
     renderStatus: () => {},
     renderShortcutGuide: () => {},
     toast: (message) => toasts.push(message),
@@ -534,8 +534,36 @@ async function testSettingsCompletionIsGenerationScoped() {
   assert.equal(toasts.length, 0);
   assert.equal(state.providers.length, 1, "saved global preferences should still synchronize locally");
   assert.equal(state.settingsSaveInFlight, false);
-  assert.deepEqual(busy, [true, false]);
   assert.equal(closeButton.disabled, false);
+  assert.equal(settingsForm.inert, false);
+
+  let cleanCloses = 0;
+  let cleanRequests = 0;
+  const cleanDialog = { open: true, close() { cleanCloses += 1; } };
+  const cleanState = {
+    settingsGeneration: 2,
+    settingsSaveInFlight: false,
+    providers: ["codex"],
+    settings: {
+      dictationMode: "speech",
+      interactionMode: "browse-default",
+      toggleHotkey: "KeyC",
+      dictateHotkey: "Space",
+    },
+  };
+  const clean = context({
+    state: cleanState,
+    hotkeyDraft: { toggleHotkey: "KeyC", dictateHotkey: "Space" },
+    document: ctx.document,
+    $: (selector) => ({
+      "#settingsDialog": cleanDialog,
+    })[selector],
+    api: () => { cleanRequests += 1; },
+  });
+  install(clean, "saveSettings");
+  await clean.saveSettings({ preventDefault() {} });
+  assert.equal(cleanCloses, 1, "closing unchanged settings should be instant");
+  assert.equal(cleanRequests, 0, "unchanged settings must not make a save request");
 }
 
 function directory(name, children) {
@@ -994,6 +1022,20 @@ class ControlCenterFrontendTests(unittest.TestCase):
         self.assertNotIn("untouched, empty Webkit feedback box", markup)
         self.assertIn('dictateHotkey: "Space"', source)
         self.assertNotIn('dictateHotkey: "KeyV"', source)
+
+    def test_settings_save_when_closed_without_a_manual_save_button(self):
+        markup = INDEX_HTML.read_text(encoding="utf-8")
+        source = APP_JS.read_text(encoding="utf-8")
+        self.assertNotIn('id="saveSettings"', markup)
+        self.assertIn('id="settingsAutosaveStatus"', markup)
+        self.assertIn(
+            "Changes save automatically when you close Settings.", markup
+        )
+        self.assertIn(
+            '$("#settingsDialogClose").addEventListener("click", saveSettings)',
+            source,
+        )
+        self.assertIn('$("#settingsDialog").close();', source)
 
     def test_agent_speed_controls_and_persistent_notice_are_wired(self):
         markup = INDEX_HTML.read_text(encoding="utf-8")

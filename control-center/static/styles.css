@@ -235,6 +235,7 @@ body { margin: 0; min-height: 100vh; overflow: hidden; }
 .theme-swatch.black { background: var(--ink); }
 .theme-swatch.white { background: white; }
 .overlay-theme-note { margin-top: 12px !important; margin-bottom: 0 !important; }
+.settings-save-note { margin: 24px 0 0 !important; color: var(--muted); font-size: 12px; font-weight: 700; text-align: center; }
 .settings-action { width: 100%; margin-top: 14px; }
 .capability-note { margin: 0 0 10px !important; padding: 10px 12px; border-radius: 10px; background: #ece7dd; font-size: 12px; }
 .dialog-close { position: absolute; top: 16px; right: 16px; border: 0; background: none; font-size: 25px; cursor: pointer; }

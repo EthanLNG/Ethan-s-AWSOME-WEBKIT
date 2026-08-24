@@ -427,10 +427,13 @@ function openSettings() {
   };
   hotkeyCapture = null;
   $("#settingsDialogClose").disabled = state.settingsSaveInFlight;
-  setBusy($("#saveSettings"), state.settingsSaveInFlight, "Saving…");
   renderHotkeySettings();
   $("#settingsError").textContent = "";
   const settingsForm = $("#settingsForm");
+  settingsForm.inert = state.settingsSaveInFlight;
+  $("#settingsAutosaveStatus").textContent = state.settingsSaveInFlight
+    ? "Saving changes…"
+    : "Changes save automatically when you close Settings.";
   settingsForm.scrollTop = 0;
   $("#settingsDialog").showModal();
   $("#settingsDialogClose").focus({ preventScroll: true });
@@ -438,7 +441,7 @@ function openSettings() {
 }
 
 async function saveSettings(event) {
-  event.preventDefault();
+  if (event) event.preventDefault();
   if (state.settingsSaveInFlight) return;
   const generation = state.settingsGeneration;
   const dictationInput = document.querySelector('input[name="dictationMode"]:checked');
@@ -453,11 +456,23 @@ async function saveSettings(event) {
     dictateHotkey: hotkeyDraft.dictateHotkey,
   };
   const submitted = JSON.stringify({ ...preferences, providers: [...providers].sort() });
-  const button = $("#saveSettings");
+  const persisted = JSON.stringify({
+    providers: [...state.providers].sort(),
+    dictationMode: state.settings.dictationMode || "speech",
+    interactionMode: state.settings.interactionMode || "browse-default",
+    toggleHotkey: state.settings.toggleHotkey || "KeyC",
+    dictateHotkey: state.settings.dictateHotkey || "Space",
+  });
+  if (submitted === persisted) {
+    $("#settingsDialog").close();
+    return;
+  }
+  const settingsForm = $("#settingsForm");
   $("#settingsError").textContent = "";
+  $("#settingsAutosaveStatus").textContent = "Saving changes…";
   state.settingsSaveInFlight = true;
   $("#settingsDialogClose").disabled = true;
-  setBusy(button, true, "Saving…");
+  settingsForm.inert = true;
   try {
     const result = await api("/api/preferences", {
       method: "POST",
@@ -477,9 +492,12 @@ async function saveSettings(event) {
       dictateHotkey: hotkeyDraft.dictateHotkey,
     });
     if (current !== submitted) {
-      $("#settingsError").textContent = "The submitted settings were saved. Review and save your newer edits.";
+      settingsForm.inert = false;
+      $("#settingsError").textContent = "Your latest edit happened while Settings was closing. Close Settings again to save it.";
+      $("#settingsAutosaveStatus").textContent = "Latest change not saved yet.";
       return;
     }
+    settingsForm.inert = false;
     $("#settingsDialog").close();
     const restarted = result.previews.restarted || 0;
     const deferred = result.previews.deferred || 0;
@@ -487,11 +505,12 @@ async function saveSettings(event) {
   } catch (error) {
     if (generation !== state.settingsGeneration || !$("#settingsDialog").open) return;
     $("#settingsError").textContent = error.message;
+    $("#settingsAutosaveStatus").textContent = "Could not save. Fix the issue, then close Settings again.";
   } finally {
     state.settingsSaveInFlight = false;
     if ($("#settingsDialog").open) {
       $("#settingsDialogClose").disabled = false;
-      setBusy(button, false);
+      settingsForm.inert = false;
     }
   }
 }
@@ -2163,9 +2182,10 @@ $("#openSeedChat").addEventListener("click", () => {
   $("#seedDialog").close();
   openSession(session, $("#seedOnboardingButton"));
 });
-$("#settingsDialogClose").addEventListener("click", () => $("#settingsDialog").close());
+$("#settingsDialogClose").addEventListener("click", saveSettings);
 $("#settingsDialog").addEventListener("cancel", (event) => {
-  if (state.settingsSaveInFlight) event.preventDefault();
+  event.preventDefault();
+  saveSettings(event);
 });
 $("#settingsDialog").addEventListener("close", () => {
   state.settingsGeneration += 1;

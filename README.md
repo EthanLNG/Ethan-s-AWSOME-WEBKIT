@@ -33,6 +33,11 @@ overwhelmed would require genuine effort.
   in the same loop, so you can move from idea to verified change in moments.
 - **Token-efficient by design:** precise points, rectangles, and page context
   tell the agent where to work without repeatedly describing the whole screen.
+- **Absurdly adaptable feedback geometry:** AWESOME WEBKIT follows feedback
+  through sticky storytelling, animated components, transforms, moving
+  elements, and difficult scrolling layouts without losing feedback details.
+  The agent knows exactly what you meant, and traces the right elements in the
+  right places at the right times they appear.
 - **Automatic Git and GitHub safety:** isolated worktrees, point-level commits,
   guarded merges, and verified pushes keep every iteration traceable and
   recoverable.

@@ -11,6 +11,8 @@
 - Hardened fixed and sticky visual lifecycle checks so both newly captured and
   legacy feedback points stay local to their intended section instead of
   leaking into earlier scenes with similar viewport geometry.
+- Kept system status responsive when GitHub CLI authentication checks time out,
+  reporting GitHub as disconnected without blocking the Control Center.
 
 **Migration:** update the project's Webkit and start a fresh color session for
 the new project contrast preference and capture metadata. Existing feedback

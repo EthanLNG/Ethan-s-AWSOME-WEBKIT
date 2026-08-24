@@ -2060,6 +2060,27 @@ class ControlCenterTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertEqual(status["remote"], "origin")
 
+    def test_system_status_survives_github_auth_timeout(self):
+        executable = r"C:\Program Files\GitHub CLI\gh.exe"
+
+        def executable_path(name):
+            return executable if name == "gh" else None
+
+        timeout = subprocess.TimeoutExpired(
+            [executable, "auth", "status", "--hostname", "github.com"],
+            15,
+        )
+        with mock.patch(
+            "control_center.shutil.which", side_effect=executable_path
+        ), mock.patch("control_center.subprocess.run", side_effect=timeout):
+            status = self.app.projects.system_status()
+
+        self.assertEqual(status["github"], {
+            "installed": True,
+            "authenticated": False,
+            "path": executable,
+        })
+
     def test_github_status_skips_option_like_remote_names_and_uses_terminator(self):
         calls = []
 

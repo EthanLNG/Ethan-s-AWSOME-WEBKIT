@@ -3491,7 +3491,18 @@ class ProjectManager:
         executable = shutil.which("gh")
         if not executable:
             return {"installed": False, "authenticated": False, "path": None}
-        result = run_command([executable, "auth", "status", "--hostname", "github.com"], check=False, timeout=15)
+        try:
+            result = run_command(
+                [executable, "auth", "status", "--hostname", "github.com"],
+                check=False,
+                timeout=15,
+            )
+        except ControlCenterError:
+            return {
+                "installed": True,
+                "authenticated": False,
+                "path": executable,
+            }
         return {
             "installed": True,
             "authenticated": result.returncode == 0,

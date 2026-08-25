@@ -280,7 +280,10 @@ class LauncherTests(unittest.TestCase):
             "http://127.0.0.1:8891/?token=private%20token&launch=fresh-launch",
         )
         self.assertEqual(command[4], "http://127.0.0.1:8891/")
-        self.assertEqual(run.call_args.kwargs["timeout"], 3.0)
+        self.assertEqual(
+            run.call_args.kwargs["timeout"],
+            launch.CHROME_REUSE_TIMEOUT_SECONDS,
+        )
         self.assertIn("set URL of tab", command[2])
         self.assertIn("set active tab index", command[2])
         self.assertIn("activate", command[2])
@@ -322,7 +325,9 @@ class LauncherTests(unittest.TestCase):
 
     def test_open_runtime_chrome_reuse_timeout_preserves_native_open_fallback(self):
         runtime = {"port": 8891, "token": "current-token"}
-        timed_out = subprocess.TimeoutExpired(cmd=["osascript"], timeout=3.0)
+        timed_out = subprocess.TimeoutExpired(
+            cmd=["osascript"], timeout=launch.CHROME_REUSE_TIMEOUT_SECONDS
+        )
         opened = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
@@ -338,7 +343,10 @@ class LauncherTests(unittest.TestCase):
             launch.open_runtime(runtime)
 
         self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 3.0)
+        self.assertEqual(
+            run.call_args_list[0].kwargs["timeout"],
+            launch.CHROME_REUSE_TIMEOUT_SECONDS,
+        )
         self.assertEqual(
             run.call_args_list[1].args[0],
             [

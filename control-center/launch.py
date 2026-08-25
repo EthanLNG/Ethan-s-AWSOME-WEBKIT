@@ -37,6 +37,7 @@ STATE_FILE_NAMES = frozenset((
     "state.json",
 ))
 CHROME_REUSE_RESULT = "WKCC_REUSED"
+CHROME_REUSE_TIMEOUT_SECONDS = 15.0
 CHROME_REUSE_SCRIPT = """
 on run argv
     if (count of argv) is not 2 then return "WKCC_MISS"
@@ -767,7 +768,7 @@ def open_runtime(runtime):
                     errors="replace",
                     capture_output=True,
                     check=False,
-                    timeout=3.0,
+                    timeout=CHROME_REUSE_TIMEOUT_SECONDS,
                 )
                 output = result.stdout if isinstance(result.stdout, str) else ""
                 if result.returncode == 0 and output.strip() == CHROME_REUSE_RESULT:

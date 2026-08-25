@@ -36,6 +36,32 @@ STATE_FILE_NAMES = frozenset((
     INSTANCE_LOCK_NAME,
     "state.json",
 ))
+CHROME_REUSE_RESULT = "WKCC_REUSED"
+CHROME_REUSE_SCRIPT = """
+on run argv
+    if (count of argv) is not 2 then return "WKCC_MISS"
+    set targetURL to item 1 of argv
+    set targetPrefix to item 2 of argv
+    if application "Google Chrome" is not running then return "WKCC_MISS"
+    tell application "Google Chrome"
+        repeat with windowNumber from 1 to count of windows
+            repeat with tabNumber from 1 to count of tabs of window windowNumber
+                try
+                    set candidateURL to URL of tab tabNumber of window windowNumber
+                    if candidateURL starts with targetPrefix then
+                        set URL of tab tabNumber of window windowNumber to targetURL
+                        set active tab index of window windowNumber to tabNumber
+                        set index of window windowNumber to 1
+                        activate
+                        return "WKCC_REUSED"
+                    end if
+                end try
+            end repeat
+        end repeat
+    end tell
+    return "WKCC_MISS"
+end run
+""".strip()
 
 
 def validated_state_dir_path(value):
@@ -725,11 +751,29 @@ def stop_outdated_runtime(runtime, state_dir, timeout=15.0):
 
 
 def open_runtime(runtime):
-    url = "http://127.0.0.1:{}/?token={}".format(
-        runtime["port"], urllib.parse.quote(runtime["token"])
+    prefix = "http://127.0.0.1:{}/".format(runtime["port"])
+    url = "{}?token={}".format(
+        prefix, urllib.parse.quote(runtime["token"])
     )
     if platform.system().lower() == "darwin":
         browser_app = os.environ.get("WKCC_BROWSER_APP", "Google Chrome")
+        if browser_app == "Google Chrome":
+            reload_url = "{}&launch={}".format(url, secrets.token_hex(8))
+            try:
+                result = subprocess.run(
+                    ["osascript", "-e", CHROME_REUSE_SCRIPT, reload_url, prefix],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    capture_output=True,
+                    check=False,
+                    timeout=3.0,
+                )
+                output = result.stdout if isinstance(result.stdout, str) else ""
+                if result.returncode == 0 and output.strip() == CHROME_REUSE_RESULT:
+                    return
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         try:
             result = subprocess.run(
                 ["open", "-a", browser_app, url],

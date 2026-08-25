@@ -251,6 +251,136 @@ class LauncherTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_open_runtime_reloads_and_focuses_matching_chrome_tab(self):
+        runtime = {"port": 8891, "token": "private token"}
+        reused = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="WKCC_REUSED\n", stderr=""
+        )
+        with mock.patch.object(
+            launch.platform, "system", return_value="Darwin"
+        ), mock.patch.dict(
+            launch.os.environ, {"WKCC_BROWSER_APP": "Google Chrome"}
+        ), mock.patch.object(
+            launch.secrets, "token_hex", return_value="fresh-launch"
+        ), mock.patch.object(
+            launch.subprocess, "run", return_value=reused
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open:
+            launch.open_runtime(runtime)
+
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["osascript", "-e"])
+        self.assertIs(command[2], launch.CHROME_REUSE_SCRIPT)
+        self.assertNotIn("private token", command[2])
+        self.assertNotIn("8891", command[2])
+        self.assertEqual(
+            command[3],
+            "http://127.0.0.1:8891/?token=private%20token&launch=fresh-launch",
+        )
+        self.assertEqual(command[4], "http://127.0.0.1:8891/")
+        self.assertEqual(run.call_args.kwargs["timeout"], 3.0)
+        self.assertIn("set URL of tab", command[2])
+        self.assertIn("set active tab index", command[2])
+        self.assertIn("activate", command[2])
+        browser_open.assert_not_called()
+
+    def test_open_runtime_chrome_miss_preserves_native_open_fallback(self):
+        runtime = {"port": 8891, "token": "current-token"}
+        missed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="WKCC_MISS\n", stderr=""
+        )
+        opened = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with mock.patch.object(
+            launch.platform, "system", return_value="Darwin"
+        ), mock.patch.dict(
+            launch.os.environ, {"WKCC_BROWSER_APP": "Google Chrome"}
+        ), mock.patch.object(
+            launch.secrets, "token_hex", return_value="next-launch"
+        ), mock.patch.object(
+            launch.subprocess, "run", side_effect=[missed, opened]
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open:
+            launch.open_runtime(runtime)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].args[0][0], "osascript")
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "open",
+                "-a",
+                "Google Chrome",
+                "http://127.0.0.1:8891/?token=current-token",
+            ],
+        )
+        browser_open.assert_not_called()
+
+    def test_open_runtime_chrome_reuse_timeout_preserves_native_open_fallback(self):
+        runtime = {"port": 8891, "token": "current-token"}
+        timed_out = subprocess.TimeoutExpired(cmd=["osascript"], timeout=3.0)
+        opened = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with mock.patch.object(
+            launch.platform, "system", return_value="Darwin"
+        ), mock.patch.dict(
+            launch.os.environ, {"WKCC_BROWSER_APP": "Google Chrome"}
+        ), mock.patch.object(
+            launch.subprocess, "run", side_effect=[timed_out, opened]
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open:
+            launch.open_runtime(runtime)
+
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_args_list[0].kwargs["timeout"], 3.0)
+        self.assertEqual(
+            run.call_args_list[1].args[0],
+            [
+                "open",
+                "-a",
+                "Google Chrome",
+                "http://127.0.0.1:8891/?token=current-token",
+            ],
+        )
+        browser_open.assert_not_called()
+
+    def test_open_runtime_custom_macos_browser_skips_chrome_reuse(self):
+        runtime = {"port": 8891, "token": "current-token"}
+        opened = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with mock.patch.object(
+            launch.platform, "system", return_value="Darwin"
+        ), mock.patch.dict(
+            launch.os.environ, {"WKCC_BROWSER_APP": "Safari"}
+        ), mock.patch.object(
+            launch.subprocess, "run", return_value=opened
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open:
+            launch.open_runtime(runtime)
+
+        run.assert_called_once_with(
+            [
+                "open",
+                "-a",
+                "Safari",
+                "http://127.0.0.1:8891/?token=current-token",
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        browser_open.assert_not_called()
+
     def test_linux_installer_preserves_symlink_and_uses_numbered_shortcut(self):
         with tempfile.TemporaryDirectory() as raw:
             desktop = Path(raw) / "Desktop"

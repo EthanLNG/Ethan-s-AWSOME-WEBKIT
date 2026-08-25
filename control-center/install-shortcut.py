@@ -656,10 +656,14 @@ def _decompiled_native_source(path):
     return result.stdout.rstrip("\r\n") + "\n"
 
 
-def _native_bundle_signature_is_valid(path):
+def _native_bundle_signature_is_valid(path, strict=False):
+    command = ["/usr/bin/codesign", "--verify"]
+    if strict:
+        command.append("--strict")
+    command.append(str(path))
     try:
         result = subprocess.run(
-            ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+            command,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -826,6 +830,8 @@ def build_native_macos_app(
         )
         if signed.returncode != 0:
             raise RuntimeError("macOS shortcut applet could not be signed")
+        if not _native_bundle_signature_is_valid(destination, strict=True):
+            raise RuntimeError("macOS shortcut applet has an invalid signature")
         if native_macos_app_status(
             destination, launcher, icon_data=icon_data, product=product
         ) != "current":
@@ -1009,9 +1015,11 @@ def install_native_macos_app(
                 )
             )
 
-    with tempfile.TemporaryDirectory(
-        prefix=".wkcc-shortcut-", dir=str(preferred.parent)
-    ) as temporary:
+    # FileProvider-backed Desktop folders can mutate an app bundle while
+    # osacompile and codesign are still producing it. Build in the private
+    # system temporary directory, then move the verified Contents directory
+    # into the exclusively created destination bundle.
+    with tempfile.TemporaryDirectory(prefix="wkcc-shortcut-") as temporary:
         temporary = Path(temporary)
         candidate = temporary / "Candidate.app"
         build_native_macos_app(

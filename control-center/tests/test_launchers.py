@@ -526,6 +526,23 @@ class LauncherTests(unittest.TestCase):
             self.assertIn("Shortcut already installed:", output)
 
     @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_installer_builds_away_from_file_provider_desktop(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            real_temporary_directory = tempfile.TemporaryDirectory
+            with mock.patch.object(
+                install_shortcut.tempfile,
+                "TemporaryDirectory",
+                wraps=real_temporary_directory,
+            ) as temporary_directory:
+                self._run_shortcut_installer("Darwin", desktop)
+
+            temporary_directory.assert_called_once_with(
+                prefix="wkcc-shortcut-"
+            )
+
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
     def test_macos_installer_preserves_tampered_native_app_without_duplicate(self):
         with tempfile.TemporaryDirectory() as raw:
             desktop = Path(raw) / "Desktop"
@@ -601,6 +618,44 @@ class LauncherTests(unittest.TestCase):
             )
             verified = subprocess.run(
                 ["/usr/bin/codesign", "--verify", "--strict", str(app)],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_status_accepts_file_provider_finder_bundle_metadata(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            self._run_shortcut_installer("Darwin", desktop)
+            app = desktop / "AWESOME WEBKIT.app"
+            finder_info = bytearray(32)
+            finder_info[8:10] = b"\x20\x00"
+            attached = subprocess.run(
+                [
+                    "/usr/bin/xattr", "-wx", "com.apple.FinderInfo",
+                    bytes(finder_info).hex(), str(app),
+                ],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(attached.returncode, 0, attached.stderr)
+
+            self.assertEqual(
+                install_shortcut.native_macos_app_status(
+                    app, KIT_ROOT / "launch-control-center.sh"
+                ),
+                "current",
+            )
+            verified = subprocess.run(
+                ["/usr/bin/codesign", "--verify", str(app)],
                 text=True,
                 encoding="utf-8",
                 errors="replace",

@@ -141,6 +141,18 @@ class LauncherTests(unittest.TestCase):
             if os.name == "posix":
                 self.assertEqual(unrelated.stat().st_mode & 0o777, 0o755)
 
+    def test_state_root_accepts_native_browser_lock_file(self):
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "state"
+            state_dir.mkdir()
+            (state_dir / launch.BROWSER_LOCK_NAME).write_text(
+                "12345\n", encoding="utf-8"
+            )
+
+            self.assertEqual(
+                launch.secure_state_dir(state_dir), state_dir.resolve()
+            )
+
     def test_state_root_canonicalizes_symlinked_parent_before_use(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -235,21 +247,43 @@ class LauncherTests(unittest.TestCase):
                 log_file.read_text(encoding="utf-8"), "new startup\n"
             )
 
-    def test_open_runtime_prints_url_when_browser_launch_fails(self):
+    def test_open_runtime_unknown_chrome_failure_does_not_create_duplicate(self):
         runtime = {"port": 8790, "token": "token with spaces"}
-        output = io.StringIO()
         failed = mock.Mock(returncode=1)
         with mock.patch.object(launch.platform, "system", return_value="Darwin"), mock.patch.object(
             launch.subprocess, "run", return_value=failed
-        ), mock.patch.object(
-            launch.webbrowser, "open", return_value=False
-        ), contextlib.redirect_stdout(output):
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open:
             launch.open_runtime(runtime)
 
-        self.assertIn(
-            "http://127.0.0.1:8790/?token=token%20with%20spaces",
-            output.getvalue(),
+        self.assertEqual(run.call_count, 1)
+        browser_open.assert_not_called()
+
+    def test_open_runtime_handoff_returns_private_native_applet_fields(self):
+        runtime = {"port": 8890, "token": "private token"}
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(
+            launch.os.environ, {"WKCC_BROWSER_HANDOFF": "1"}
+        ), mock.patch.object(
+            launch.secrets, "token_hex", return_value="fresh-launch"
+        ), mock.patch.object(
+            launch.subprocess, "run"
+        ) as run, mock.patch.object(
+            launch.webbrowser, "open"
+        ) as browser_open, contextlib.redirect_stdout(output):
+            launch.open_runtime(runtime, state_dir=Path(raw))
+
+        self.assertEqual(
+            output.getvalue().strip().split("\t"),
+            [
+                "http://127.0.0.1:8890/",
+                "http://127.0.0.1:8890/?token=private%20token&launch=fresh-launch",
+                str(Path(raw).resolve() / launch.BROWSER_LOCK_NAME),
+            ],
         )
+        run.assert_not_called()
+        browser_open.assert_not_called()
 
     def test_open_runtime_reloads_and_focuses_matching_chrome_tab(self):
         runtime = {"port": 8891, "token": "private token"}
@@ -323,38 +357,26 @@ class LauncherTests(unittest.TestCase):
         )
         browser_open.assert_not_called()
 
-    def test_open_runtime_chrome_reuse_timeout_preserves_native_open_fallback(self):
+    def test_open_runtime_chrome_reuse_timeout_does_not_create_duplicate(self):
         runtime = {"port": 8891, "token": "current-token"}
         timed_out = subprocess.TimeoutExpired(
             cmd=["osascript"], timeout=launch.CHROME_REUSE_TIMEOUT_SECONDS
-        )
-        opened = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="", stderr=""
         )
         with mock.patch.object(
             launch.platform, "system", return_value="Darwin"
         ), mock.patch.dict(
             launch.os.environ, {"WKCC_BROWSER_APP": "Google Chrome"}
         ), mock.patch.object(
-            launch.subprocess, "run", side_effect=[timed_out, opened]
+            launch.subprocess, "run", side_effect=timed_out
         ) as run, mock.patch.object(
             launch.webbrowser, "open"
         ) as browser_open:
             launch.open_runtime(runtime)
 
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 1)
         self.assertEqual(
             run.call_args_list[0].kwargs["timeout"],
             launch.CHROME_REUSE_TIMEOUT_SECONDS,
-        )
-        self.assertEqual(
-            run.call_args_list[1].args[0],
-            [
-                "open",
-                "-a",
-                "Google Chrome",
-                "http://127.0.0.1:8891/?token=current-token",
-            ],
         )
         browser_open.assert_not_called()
 
@@ -416,20 +438,19 @@ class LauncherTests(unittest.TestCase):
             preferred = desktop / "AWESOME WEBKIT.app"
             preferred.write_bytes(b"user-owned shortcut\n")
 
-            output = self._run_shortcut_installer("Darwin", desktop)
+            output = io.StringIO()
+            with mock.patch.object(
+                install_shortcut.platform, "system", return_value="Darwin"
+            ), mock.patch.object(
+                install_shortcut, "desktop_directory", return_value=desktop
+            ), contextlib.redirect_stdout(output), self.assertRaisesRegex(
+                RuntimeError, "preserved and no duplicate shortcut was created"
+            ):
+                install_shortcut.main()
 
-            numbered = desktop / "AWESOME WEBKIT (2).app"
             self.assertEqual(preferred.read_bytes(), b"user-owned shortcut\n")
-            self.assertTrue(numbered.is_dir())
-            self.assertTrue((numbered / "Contents/Resources/AppIcon.icns").is_file())
-            self.assertIn(str(numbered), output)
-
-            repeated_output = self._run_shortcut_installer("Darwin", desktop)
-            self.assertIn("Shortcut already installed:", repeated_output)
-            self.assertEqual(
-                sorted(path.name for path in desktop.iterdir()),
-                ["AWESOME WEBKIT (2).app", "AWESOME WEBKIT.app"],
-            )
+            self.assertEqual([path.name for path in desktop.iterdir()], [preferred.name])
+            self.assertEqual(output.getvalue(), "")
 
     def test_windows_installer_preserves_differing_existing_shortcut(self):
         self._assert_conflicting_shortcut_is_preserved(
@@ -441,9 +462,8 @@ class LauncherTests(unittest.TestCase):
             "Linux", "awesome-webkit.desktop"
         )
 
-    def test_shortcut_installer_reuses_identical_content_on_every_platform(self):
+    def test_shortcut_installer_reuses_identical_content_on_file_platforms(self):
         cases = (
-            ("Darwin", "AWESOME WEBKIT.app"),
             ("Windows", "AWESOME WEBKIT.cmd"),
             ("Linux", "awesome-webkit.desktop"),
         )
@@ -451,10 +471,7 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(system=system), tempfile.TemporaryDirectory() as raw:
                 desktop = Path(raw) / "Desktop"
                 desktop.mkdir()
-                writer_name = (
-                    "write_macos_app_exclusive"
-                    if system == "Darwin" else "write_shortcut_exclusive"
-                )
+                writer_name = "write_shortcut_exclusive"
                 writer = getattr(install_shortcut, writer_name)
                 with mock.patch.object(
                     install_shortcut, writer_name, wraps=writer,
@@ -485,26 +502,52 @@ class LauncherTests(unittest.TestCase):
                 self.assertTrue(numbered.stat().st_mode & stat.S_IXUSR)
                 self.assertIn(str(numbered), output)
 
-    @unittest.skipUnless(os.name == "posix", "Executable shortcut modes are POSIX-only")
-    def test_macos_installer_does_not_reuse_app_with_non_executable_launcher(self):
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_installer_reuses_current_native_app_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as raw:
             desktop = Path(raw) / "Desktop"
             desktop.mkdir()
             self._run_shortcut_installer("Darwin", desktop)
             preferred = desktop / "AWESOME WEBKIT.app"
-            launcher = preferred / "Contents/MacOS/awesome-webkit"
-            launcher.chmod(0o644)
+            before = preferred.stat()
 
-            output = self._run_shortcut_installer("Darwin", desktop)
+            with mock.patch.object(
+                install_shortcut,
+                "build_native_macos_app",
+                side_effect=AssertionError("current applet must not be rebuilt"),
+            ):
+                output = self._run_shortcut_installer("Darwin", desktop)
 
-            numbered = desktop / "AWESOME WEBKIT (2).app"
-            self.assertFalse(launcher.stat().st_mode & stat.S_IXUSR)
-            self.assertTrue(
-                (numbered / "Contents/MacOS/awesome-webkit").stat().st_mode
-                & stat.S_IXUSR
+            after = preferred.stat()
+            self.assertEqual(
+                (after.st_dev, after.st_ino), (before.st_dev, before.st_ino)
             )
-            self.assertIn(str(numbered), output)
+            self.assertEqual([path.name for path in desktop.iterdir()], [preferred.name])
+            self.assertIn("Shortcut already installed:", output)
 
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_installer_preserves_tampered_native_app_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            self._run_shortcut_installer("Darwin", desktop)
+            preferred = desktop / "AWESOME WEBKIT.app"
+            executable = preferred / "Contents/MacOS/applet"
+            executable.chmod(0o644)
+
+            with mock.patch.object(
+                install_shortcut.platform, "system", return_value="Darwin"
+            ), mock.patch.object(
+                install_shortcut, "desktop_directory", return_value=desktop
+            ), self.assertRaisesRegex(
+                RuntimeError, "preserved and no duplicate shortcut was created"
+            ):
+                install_shortcut.main()
+
+            self.assertFalse(executable.stat().st_mode & stat.S_IXUSR)
+            self.assertEqual([path.name for path in desktop.iterdir()], [preferred.name])
+
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
     def test_macos_app_contains_native_icon_and_plist(self):
         with tempfile.TemporaryDirectory() as raw:
             desktop = Path(raw) / "Desktop"
@@ -513,15 +556,127 @@ class LauncherTests(unittest.TestCase):
             app = desktop / "AWESOME WEBKIT.app"
             info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             icon = (app / "Contents/Resources/AppIcon.icns").read_bytes()
+            executable = app / "Contents/MacOS/applet"
+            executable_magic = executable.read_bytes()[:4]
+            launcher = KIT_ROOT / "launch-control-center.sh"
 
+            self.assertEqual(info["CFBundleDisplayName"], "AWESOME WEBKIT")
+            self.assertEqual(info["CFBundleName"], "AWESOME WEBKIT")
+            self.assertEqual(
+                info["CFBundleIdentifier"], "dev.ethanlang.awesome-webkit"
+            )
             self.assertEqual(info["CFBundleIconFile"], "AppIcon.icns")
-            self.assertEqual(info["CFBundleExecutable"], "awesome-webkit")
+            self.assertEqual(info["CFBundleExecutable"], "applet")
+            self.assertEqual(
+                info["NSAppleEventsUsageDescription"],
+                install_shortcut.MACOS_APPLE_EVENTS_DESCRIPTION,
+            )
+            self.assertEqual(
+                info[install_shortcut.MACOS_SHORTCUT_SCHEMA_KEY],
+                install_shortcut.MACOS_SHORTCUT_SCHEMA_VERSION,
+            )
+            self.assertEqual(
+                info[install_shortcut.MACOS_SHORTCUT_LAUNCHER_KEY], str(launcher)
+            )
+            self.assertRegex(
+                info[install_shortcut.MACOS_SHORTCUT_SOURCE_KEY],
+                r"^[0-9a-f]{64}$",
+            )
+            self.assertTrue(executable.stat().st_mode & stat.S_IXUSR)
+            self.assertIn(executable_magic, {
+                b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf",
+                b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca",
+                b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+                b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+            })
             self.assertEqual(icon[:4], b"icns")
             self.assertEqual(struct.unpack(">I", icon[4:8])[0], len(icon))
             self.assertIn(b"\x89PNG\r\n\x1a\n", icon)
+            self.assertEqual(icon, install_shortcut.brand_icon_icns())
             self.assertEqual(
                 install_shortcut.brand_icon_png(128)[:8], b"\x89PNG\r\n\x1a\n"
             )
+            self.assertEqual(
+                install_shortcut.native_macos_app_status(app, launcher), "current"
+            )
+            verified = subprocess.run(
+                ["/usr/bin/codesign", "--verify", "--strict", str(app)],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_installer_upgrades_exact_handcrafted_legacy_app_in_place(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            preferred = desktop / "AWESOME WEBKIT.app"
+            launcher = KIT_ROOT / "launch-control-center.sh"
+            install_shortcut.write_macos_app_exclusive(
+                preferred, install_shortcut.macos_app_payload(launcher)
+            )
+            self.assertTrue(
+                (preferred / "Contents/MacOS/awesome-webkit").is_file()
+            )
+
+            output = self._run_shortcut_installer("Darwin", desktop)
+
+            self.assertIn("Updated shortcut:", output)
+            self.assertFalse(
+                (preferred / "Contents/MacOS/awesome-webkit").exists()
+            )
+            self.assertTrue((preferred / "Contents/MacOS/applet").is_file())
+            self.assertEqual(
+                install_shortcut.native_macos_app_status(preferred, launcher),
+                "current",
+            )
+            self.assertEqual([path.name for path in desktop.iterdir()], [preferred.name])
+
+    @unittest.skipUnless(sys.platform == "darwin", "Native applets require macOS")
+    def test_macos_installer_updates_native_app_when_source_hash_changes(self):
+        with tempfile.TemporaryDirectory() as raw:
+            desktop = Path(raw) / "Desktop"
+            desktop.mkdir()
+            preferred = desktop / "AWESOME WEBKIT.app"
+            launcher = KIT_ROOT / "launch-control-center.sh"
+            current_source = install_shortcut.MACOS_APPLET_SOURCE
+            previous_source = current_source.replace(
+                "attempt < 200", "attempt < 199", 1
+            )
+            self.assertNotEqual(previous_source, current_source)
+
+            with mock.patch.object(
+                install_shortcut, "MACOS_APPLET_SOURCE", previous_source
+            ):
+                self._run_shortcut_installer("Darwin", desktop)
+            previous_info = plistlib.loads(
+                (preferred / "Contents/Info.plist").read_bytes()
+            )
+            previous_hash = previous_info[install_shortcut.MACOS_SHORTCUT_SOURCE_KEY]
+            self.assertEqual(
+                install_shortcut.native_macos_app_status(preferred, launcher),
+                "outdated",
+            )
+
+            output = self._run_shortcut_installer("Darwin", desktop)
+            current_info = plistlib.loads(
+                (preferred / "Contents/Info.plist").read_bytes()
+            )
+
+            self.assertIn("Updated shortcut:", output)
+            self.assertNotEqual(
+                current_info[install_shortcut.MACOS_SHORTCUT_SOURCE_KEY],
+                previous_hash,
+            )
+            self.assertEqual(
+                install_shortcut.native_macos_app_status(preferred, launcher),
+                "current",
+            )
+            self.assertEqual([path.name for path in desktop.iterdir()], [preferred.name])
 
     def test_shortcut_exclusive_write_refuses_a_racing_existing_file(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -837,7 +992,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(launch.main(), 0)
 
         ready.assert_called_once_with(runtime, launch.installed_kit_version())
-        opened.assert_called_once_with(runtime)
+        opened.assert_called_once_with(runtime, state_dir=Path(raw).resolve())
         popen.assert_not_called()
 
     def test_launcher_replaces_an_authenticated_outdated_server(self):
@@ -881,7 +1036,7 @@ class LauncherTests(unittest.TestCase):
                 (state_dir / launch.RUNTIME_FILE_NAME).read_text(encoding="utf-8")
             )
             self.assertEqual(runtime["kitVersion"], expected_version)
-            opened.assert_called_once_with(runtime)
+            opened.assert_called_once_with(runtime, state_dir=state_dir.resolve())
 
     def test_invalid_port_starts_are_rejected_before_socket_creation(self):
         with mock.patch.object(launch.socket, "socket") as socket_factory:

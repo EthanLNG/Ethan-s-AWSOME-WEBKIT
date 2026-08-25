@@ -2,6 +2,8 @@
 """Install a clickable desktop shortcut for the local Control Center."""
 
 import base64
+import hashlib
+import json
 import math
 import os
 import platform
@@ -10,6 +12,7 @@ import shutil
 import stat
 import struct
 import subprocess
+import tempfile
 import zlib
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +20,185 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 KIT_ROOT = HERE.parent
+
+MACOS_APPLE_EVENTS_DESCRIPTION = (
+    "AWESOME WEBKIT uses Chrome automation to reuse and refresh its local "
+    "Control Center tab."
+)
+WEBKIT_MACOS_PRODUCT = {
+    "display_name": "AWESOME WEBKIT",
+    "bundle_id": "dev.ethanlang.awesome-webkit",
+    "icon_name": "AppIcon.icns",
+    "apple_events_description": MACOS_APPLE_EVENTS_DESCRIPTION,
+}
+MACOS_SHORTCUT_SCHEMA_VERSION = 2
+MACOS_SHORTCUT_SCHEMA_KEY = "WKCCShortcutSchemaVersion"
+MACOS_SHORTCUT_LAUNCHER_KEY = "WKCCLauncherPath"
+MACOS_SHORTCUT_SOURCE_KEY = "WKCCShortcutSourceSHA256"
+MACOS_APPLET_EXECUTABLE = "applet"
+MACOS_APPLET_SOURCE = r'''ObjC.import("Foundation");
+
+var launcherPath = __LAUNCHER_PATH__;
+
+function runTask(executable, args, extraEnvironment) {
+  var task = $.NSTask.alloc.init;
+  var outputPipe = $.NSPipe.pipe;
+  var environment = $.NSProcessInfo.processInfo.environment.mutableCopy;
+  if (extraEnvironment) {
+    Object.keys(extraEnvironment).forEach(function (key) {
+      environment.setObjectForKey($(String(extraEnvironment[key])), $(key));
+    });
+  }
+  task.launchPath = executable;
+  task.arguments = $(args || []);
+  task.environment = environment;
+  task.standardOutput = outputPipe;
+  task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  try {
+    task.launch;
+    var data = outputPipe.fileHandleForReading.readDataToEndOfFile;
+    task.waitUntilExit;
+    if (task.terminationStatus !== 0) return null;
+    var value = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+    return value.isNil() ? null : value.js.replace(/[\r\n]+$/, "");
+  } catch (error) {
+    return null;
+  }
+}
+
+function runStatus(executable, args) {
+  var task = $.NSTask.alloc.init;
+  task.launchPath = executable;
+  task.arguments = $(args || []);
+  task.standardOutput = $.NSFileHandle.fileHandleWithNullDevice;
+  task.standardError = $.NSFileHandle.fileHandleWithNullDevice;
+  try {
+    task.launch;
+    task.waitUntilExit;
+    return task.terminationStatus;
+  } catch (error) {
+    return -1;
+  }
+}
+
+function screenIsLocked() {
+  var details = runTask("/usr/sbin/ioreg", ["-n", "Root", "-d1"], null);
+  return details === null || details.indexOf("CGSSessionScreenIsLocked\"=Yes") !== -1;
+}
+
+function parseHandoff(value) {
+  if (value === null || /[\r\n]/.test(value)) return null;
+  var fields = value.split("\t");
+  if (fields.length !== 3) return null;
+  var targetPrefix = fields[0];
+  var targetURL = fields[1];
+  var lockPath = fields[2];
+  var prefixMatch = targetPrefix.match(/^http:\/\/127\.0\.0\.1:([0-9]{1,5})\/$/);
+  if (prefixMatch === null) return null;
+  var port = Number(prefixMatch[1]);
+  if (port < 1 || port > 65535) return null;
+  var suffix = targetURL.slice(targetPrefix.length);
+  if (targetURL.indexOf(targetPrefix) !== 0) return null;
+  if (!/^\?token=[A-Za-z0-9_-]{20,256}&launch=[0-9a-f]{16}$/.test(suffix)) return null;
+  if (!/^\/[^\t\r\n]+\/control-center-browser\.lock$/.test(lockPath)) return null;
+  if (lockPath.split("/").indexOf("..") !== -1) return null;
+  return {prefix: targetPrefix, url: targetURL, lockPath: lockPath};
+}
+
+function acquireBrowserLock(lockPath) {
+  var ownerPID = String($.NSProcessInfo.processInfo.processIdentifier);
+  for (var attempt = 0; attempt < 200; attempt += 1) {
+    if (runStatus("/usr/bin/shlock", ["-f", lockPath, "-p", ownerPID]) === 0) {
+      return true;
+    }
+    $.NSThread.sleepForTimeInterval(0.05);
+  }
+  return false;
+}
+
+function appleScriptString(value) {
+  return "\"" + String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\"/g, "\\\"")
+    .replace(/\r/g, "\\r")
+    .replace(/\n/g, "\\n") + "\"";
+}
+
+function chromeLookupScript(targetPrefix, targetURL) {
+  return [
+    "with timeout of 30 seconds",
+    "if application \"Google Chrome\" is not running then return \"WKCC_MISS\"",
+    "tell application \"Google Chrome\"",
+    "set targetPrefix to " + appleScriptString(targetPrefix),
+    "set targetURL to " + appleScriptString(targetURL),
+    "repeat with windowNumber from 1 to count of windows",
+    "repeat with tabNumber from 1 to count of tabs of window windowNumber",
+    "set candidateURL to URL of tab tabNumber of window windowNumber",
+    "if candidateURL starts with targetPrefix then",
+    "set URL of tab tabNumber of window windowNumber to targetURL",
+    "set active tab index of window windowNumber to tabNumber",
+    "set minimized of window windowNumber to false",
+    "set index of window windowNumber to 1",
+    "activate",
+    "return \"WKCC_REUSED\"",
+    "end if",
+    "end repeat",
+    "end repeat",
+    "return \"WKCC_MISS\"",
+    "end tell",
+    "end timeout"
+  ].join("\n");
+}
+
+function chromeOpenScript(targetURL) {
+  return [
+    "with timeout of 30 seconds",
+    "tell application \"Google Chrome\"",
+    "set targetURL to " + appleScriptString(targetURL),
+    "if count of windows is 0 then",
+    "set targetWindow to make new window",
+    "set URL of active tab of targetWindow to targetURL",
+    "set active tab index of targetWindow to 1",
+    "else",
+    "set targetWindow to window 1",
+    "tell targetWindow",
+    "make new tab at end of tabs with properties {URL:targetURL}",
+    "set active tab index to count of tabs",
+    "set minimized to false",
+    "set index to 1",
+    "end tell",
+    "end if",
+    "activate",
+    "return \"WKCC_OPENED\"",
+    "end tell",
+    "end timeout"
+  ].join("\n");
+}
+
+function runAppleScript(source) {
+  var script = $.NSAppleScript.alloc.initWithSource($(source));
+  var scriptError = Ref();
+  var result = script.executeAndReturnError(scriptError);
+  if (result.isNil()) return null;
+  var value = result.stringValue;
+  return value.isNil() ? null : value.js;
+}
+
+function run() {
+  var handoff = runTask(launcherPath, [], {WKCC_BROWSER_HANDOFF: "1"});
+  var target = parseHandoff(handoff);
+  if (target === null || screenIsLocked()) return;
+  if (!acquireBrowserLock(target.lockPath)) return;
+  try {
+    var outcome = runAppleScript(chromeLookupScript(target.prefix, target.url));
+    if (outcome === "WKCC_MISS") {
+      runAppleScript(chromeOpenScript(target.url));
+    }
+  } finally {
+    runStatus("/bin/rm", ["-f", target.lockPath]);
+  }
+}
+'''
 
 
 def _inside_rounded_rect(x, y, left, top, right, bottom, radius):
@@ -330,6 +512,335 @@ def macos_app_payload(launcher):
     }
 
 
+def _validated_macos_product(product):
+    product = dict(WEBKIT_MACOS_PRODUCT if product is None else product)
+    required = {"display_name", "bundle_id", "icon_name"}
+    if set(product) - (required | {"apple_events_description"}):
+        raise ValueError("macOS shortcut product contains an unknown key")
+    if not required.issubset(product):
+        raise ValueError("macOS shortcut product is incomplete")
+    for key in required:
+        if not isinstance(product[key], str) or not product[key].strip():
+            raise ValueError("macOS shortcut product {} is invalid".format(key))
+    if "/" in product["icon_name"] or product["icon_name"] in {".", ".."}:
+        raise ValueError("macOS shortcut icon name must be one file name")
+    description = product.get("apple_events_description")
+    if description is None:
+        description = (
+            "{} uses Chrome automation to reuse and refresh its local Control "
+            "Center tab."
+        ).format(product["display_name"])
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("macOS Apple Events description is invalid")
+    product["apple_events_description"] = description
+    return product
+
+
+def _validated_native_launcher(launcher):
+    launcher = Path(launcher)
+    if not launcher.is_absolute():
+        raise ValueError("macOS shortcut launcher must be an absolute path")
+    try:
+        launcher = launcher.resolve(strict=True)
+        details = launcher.lstat()
+    except (OSError, RuntimeError) as error:
+        raise RuntimeError("macOS shortcut launcher is unavailable") from error
+    if not stat.S_ISREG(details.st_mode):
+        raise RuntimeError("macOS shortcut launcher must be a regular file")
+    if not details.st_mode & stat.S_IXUSR:
+        raise RuntimeError("macOS shortcut launcher must be executable")
+    return launcher
+
+
+def native_macos_jxa_source(launcher):
+    """Return the native applet source with one safely encoded launcher path."""
+    launcher = Path(launcher)
+    if not launcher.is_absolute():
+        raise ValueError("macOS shortcut launcher must be an absolute path")
+    encoded = json.dumps(str(launcher), ensure_ascii=True)
+    return MACOS_APPLET_SOURCE.replace("__LAUNCHER_PATH__", encoded)
+
+
+def _source_sha256(source):
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _read_regular_file(path, limit):
+    try:
+        listed = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(listed.st_mode) or stat.S_ISLNK(listed.st_mode):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or (
+            opened.st_dev, opened.st_ino
+        ) != (listed.st_dev, listed.st_ino):
+            return None
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            data = handle.read(limit + 1)
+        if len(data) > limit:
+            return None
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+            return None
+        return data
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _bundle_entries_are_safe(path):
+    try:
+        for root, directories, files in os.walk(str(path), followlinks=False):
+            root_path = Path(root)
+            if not _real_directory(root_path):
+                return False
+            for name in directories:
+                if not _real_directory(root_path / name):
+                    return False
+            for name in files:
+                details = (root_path / name).lstat()
+                if not stat.S_ISREG(details.st_mode) or stat.S_ISLNK(details.st_mode):
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def _mach_o_executable(path):
+    data = _read_regular_file(path, 16 * 1024 * 1024)
+    if data is None or len(data) < 4:
+        return False
+    magic = data[:4]
+    if magic not in {
+        b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf",
+        b"\xbe\xba\xfe\xca", b"\xbf\xba\xfe\xca",
+        b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe",
+    }:
+        return False
+    try:
+        return bool(path.lstat().st_mode & stat.S_IXUSR)
+    except OSError:
+        return False
+
+
+def _decompiled_native_source(path):
+    script = path / "Contents" / "Resources" / "Scripts" / "main.scpt"
+    if _read_regular_file(script, 4 * 1024 * 1024) is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["/usr/bin/osadecompile", str(script)],
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.rstrip("\r\n") + "\n"
+
+
+def _native_bundle_signature_is_valid(path):
+    try:
+        result = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def native_macos_app_status(path, launcher, icon_data=None, product=None):
+    """Return current, outdated, or None for a native shortcut bundle."""
+    path = Path(path)
+    launcher = Path(launcher)
+    product = _validated_macos_product(product)
+    icon_data = brand_icon_icns() if icon_data is None else bytes(icon_data)
+    if not _real_directory(path) or not _bundle_entries_are_safe(path):
+        return None
+    for relative in (
+        Path("Contents"), Path("Contents/MacOS"), Path("Contents/Resources"),
+        Path("Contents/Resources/Scripts"),
+    ):
+        if not _real_directory(path / relative):
+            return None
+    plist_data = _read_regular_file(path / "Contents" / "Info.plist", 256 * 1024)
+    if plist_data is None:
+        return None
+    try:
+        info = plistlib.loads(plist_data)
+    except (ValueError, TypeError, plistlib.InvalidFileException):
+        return None
+    expected_values = {
+        "CFBundleDisplayName": product["display_name"],
+        "CFBundleExecutable": MACOS_APPLET_EXECUTABLE,
+        "CFBundleIconFile": product["icon_name"],
+        "CFBundleIdentifier": product["bundle_id"],
+        "CFBundleName": product["display_name"],
+        "CFBundlePackageType": "APPL",
+        "NSAppleEventsUsageDescription": product["apple_events_description"],
+        MACOS_SHORTCUT_SCHEMA_KEY: MACOS_SHORTCUT_SCHEMA_VERSION,
+        MACOS_SHORTCUT_LAUNCHER_KEY: str(launcher),
+    }
+    if any(info.get(key) != value for key, value in expected_values.items()):
+        return None
+    recorded_hash = info.get(MACOS_SHORTCUT_SOURCE_KEY)
+    if not isinstance(recorded_hash, str) or not all(
+        char in "0123456789abcdef" for char in recorded_hash
+    ) or len(recorded_hash) != 64:
+        return None
+    executable = path / "Contents" / "MacOS" / MACOS_APPLET_EXECUTABLE
+    icon = path / "Contents" / "Resources" / product["icon_name"]
+    if not _mach_o_executable(executable):
+        return None
+    if not regular_file_matches(icon, icon_data, 0o644):
+        return None
+    source = _decompiled_native_source(path)
+    if source is None or _source_sha256(source) != recorded_hash:
+        return None
+    encoded_launcher = json.dumps(str(launcher), ensure_ascii=True)
+    if "var launcherPath = {};".format(encoded_launcher) not in source:
+        return None
+    required_fragments = (
+        'ObjC.import("Foundation")',
+        'WKCC_BROWSER_HANDOFF: "1"',
+        '"/usr/bin/shlock"',
+        '$.NSAppleScript.alloc.initWithSource',
+        '"with timeout of 30 seconds"',
+    )
+    if any(fragment not in source for fragment in required_fragments):
+        return None
+    if not _native_bundle_signature_is_valid(path):
+        return None
+    expected_source = native_macos_jxa_source(launcher)
+    return "current" if recorded_hash == _source_sha256(expected_source) else "outdated"
+
+
+def build_native_macos_app(
+    destination, launcher, icon_data=None, product=None,
+):
+    """Compile, brand, sign, and verify one native JXA applet bundle."""
+    destination = Path(destination)
+    launcher = _validated_native_launcher(launcher)
+    product = _validated_macos_product(product)
+    icon_data = brand_icon_icns() if icon_data is None else bytes(icon_data)
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(str(destination))
+    if not _real_directory(destination.parent):
+        raise RuntimeError("macOS shortcut destination parent is unavailable")
+    source = native_macos_jxa_source(launcher)
+    source_hash = _source_sha256(source)
+    descriptor, source_name = tempfile.mkstemp(
+        prefix=".wkcc-applet-", suffix=".js", dir=str(destination.parent)
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = None
+            handle.write(source)
+            handle.flush()
+            os.fsync(handle.fileno())
+        result = subprocess.run(
+            [
+                "/usr/bin/osacompile", "-l", "JavaScript", "-o",
+                str(destination), source_name,
+            ],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+            timeout=45,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("macOS shortcut applet could not be compiled")
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    finally:
+        try:
+            os.unlink(source_name)
+        except OSError:
+            pass
+    try:
+        info_path = destination / "Contents" / "Info.plist"
+        info_data = _read_regular_file(info_path, 256 * 1024)
+        if info_data is None:
+            raise RuntimeError("compiled macOS shortcut has no valid property list")
+        info = plistlib.loads(info_data)
+        info.update({
+            "CFBundleDisplayName": product["display_name"],
+            "CFBundleExecutable": MACOS_APPLET_EXECUTABLE,
+            "CFBundleIconFile": product["icon_name"],
+            "CFBundleIconName": Path(product["icon_name"]).stem,
+            "CFBundleIdentifier": product["bundle_id"],
+            "CFBundleName": product["display_name"],
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "2.0",
+            "CFBundleVersion": "2",
+            "NSAppleEventsUsageDescription": product["apple_events_description"],
+            "NSHighResolutionCapable": True,
+            "OSAAppletShowStartupScreen": False,
+            MACOS_SHORTCUT_SCHEMA_KEY: MACOS_SHORTCUT_SCHEMA_VERSION,
+            MACOS_SHORTCUT_LAUNCHER_KEY: str(launcher),
+            MACOS_SHORTCUT_SOURCE_KEY: source_hash,
+        })
+        info_path.write_bytes(
+            plistlib.dumps(info, fmt=plistlib.FMT_XML, sort_keys=True)
+        )
+        icon_path = destination / "Contents" / "Resources" / product["icon_name"]
+        if icon_path.exists() and not stat.S_ISREG(icon_path.lstat().st_mode):
+            raise RuntimeError("compiled macOS shortcut icon path is unsafe")
+        icon_path.write_bytes(icon_data)
+        os.chmod(str(icon_path), 0o644)
+        signed = subprocess.run(
+            [
+                "/usr/bin/codesign", "--force", "--sign", "-",
+                "--timestamp=none", str(destination),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=30,
+        )
+        if signed.returncode != 0:
+            raise RuntimeError("macOS shortcut applet could not be signed")
+        if native_macos_app_status(
+            destination, launcher, icon_data=icon_data, product=product
+        ) != "current":
+            raise RuntimeError("compiled macOS shortcut applet failed verification")
+    except BaseException:
+        if (
+            destination.exists()
+            and _real_directory(destination)
+            and _bundle_entries_are_safe(destination)
+        ):
+            shutil.rmtree(str(destination))
+        raise
+    return destination
+
+
 def _real_directory(path):
     try:
         details = path.lstat()
@@ -426,6 +937,168 @@ def install_macos_app_without_overwrite(preferred, payload, limit=1000):
     )
 
 
+def _place_native_candidate_exclusive(candidate, preferred):
+    """Place a verified candidate without overwriting any existing path."""
+    os.mkdir(str(preferred), 0o755)
+    installed_root = preferred.lstat()
+    try:
+        candidate_contents = candidate / "Contents"
+        if not _real_directory(candidate_contents):
+            raise RuntimeError("compiled macOS shortcut has no Contents directory")
+        os.rename(str(candidate_contents), str(preferred / "Contents"))
+        candidate.rmdir()
+    except BaseException:
+        try:
+            current = preferred.lstat()
+            contents = preferred / "Contents"
+            if (
+                stat.S_ISDIR(current.st_mode)
+                and (current.st_dev, current.st_ino)
+                == (installed_root.st_dev, installed_root.st_ino)
+                and not contents.exists()
+            ):
+                preferred.rmdir()
+        except OSError:
+            pass
+        raise
+    return installed_root
+
+
+def _native_existing_kind(path, launcher, icon_data, product, legacy_payload):
+    status = native_macos_app_status(
+        path, launcher, icon_data=icon_data, product=product
+    )
+    if status is not None:
+        return status
+    if legacy_payload is not None and macos_app_matches(path, legacy_payload):
+        return "legacy"
+    return None
+
+
+def install_native_macos_app(
+    preferred, launcher, icon_data=None, product=None, legacy_payload=None,
+):
+    """Install or safely update the one stable native macOS shortcut path."""
+    preferred = Path(preferred)
+    launcher = _validated_native_launcher(launcher)
+    product = _validated_macos_product(product)
+    icon_data = brand_icon_icns() if icon_data is None else bytes(icon_data)
+    if legacy_payload is None and product == _validated_macos_product(
+        WEBKIT_MACOS_PRODUCT
+    ):
+        legacy_payload = macos_app_payload(launcher)
+
+    existing_kind = None
+    try:
+        preferred.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise RuntimeError("macOS shortcut path is unavailable") from error
+    else:
+        existing_kind = _native_existing_kind(
+            preferred, launcher, icon_data, product, legacy_payload
+        )
+        if existing_kind == "current":
+            return preferred, "current"
+        if existing_kind not in {"outdated", "legacy"}:
+            raise RuntimeError(
+                "The preferred macOS shortcut path is already occupied. "
+                "It was preserved and no duplicate shortcut was created: {}".format(
+                    preferred
+                )
+            )
+
+    with tempfile.TemporaryDirectory(
+        prefix=".wkcc-shortcut-", dir=str(preferred.parent)
+    ) as temporary:
+        temporary = Path(temporary)
+        candidate = temporary / "Candidate.app"
+        build_native_macos_app(
+            candidate, launcher, icon_data=icon_data, product=product
+        )
+        if existing_kind is None:
+            try:
+                installed_root = _place_native_candidate_exclusive(
+                    candidate, preferred
+                )
+            except FileExistsError:
+                raced_kind = _native_existing_kind(
+                    preferred, launcher, icon_data, product, legacy_payload
+                )
+                if raced_kind == "current":
+                    return preferred, "current"
+                raise RuntimeError(
+                    "The preferred macOS shortcut path became occupied. It was "
+                    "preserved and no duplicate shortcut was created: {}".format(
+                        preferred
+                    )
+                )
+            if native_macos_app_status(
+                preferred, launcher, icon_data=icon_data, product=product
+            ) != "current":
+                current = preferred.lstat()
+                if (current.st_dev, current.st_ino) != (
+                    installed_root.st_dev, installed_root.st_ino,
+                ):
+                    raise RuntimeError("installed macOS shortcut changed")
+                failed = temporary / "Failed.app"
+                os.rename(str(preferred), str(failed))
+                raise RuntimeError("installed macOS shortcut failed verification")
+            return preferred, "installed"
+
+        before = preferred.lstat()
+        if _native_existing_kind(
+            preferred, launcher, icon_data, product, legacy_payload
+        ) != existing_kind:
+            raise RuntimeError("macOS shortcut changed during update")
+        current = preferred.lstat()
+        if (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino):
+            raise RuntimeError("macOS shortcut changed during update")
+        previous = temporary / "Previous.app"
+        os.rename(str(preferred), str(previous))
+        moved = previous.lstat()
+        if (moved.st_dev, moved.st_ino) != (before.st_dev, before.st_ino):
+            os.rename(str(previous), str(preferred))
+            raise RuntimeError("macOS shortcut changed during update")
+        if _native_existing_kind(
+            previous, launcher, icon_data, product, legacy_payload
+        ) != existing_kind:
+            os.rename(str(previous), str(preferred))
+            raise RuntimeError("macOS shortcut changed during update")
+        installed_root = None
+        try:
+            installed_root = _place_native_candidate_exclusive(candidate, preferred)
+            if native_macos_app_status(
+                preferred, launcher, icon_data=icon_data, product=product
+            ) != "current":
+                raise RuntimeError("updated macOS shortcut failed verification")
+        except BaseException:
+            failed = temporary / "Failed.app"
+            try:
+                current = preferred.lstat() if preferred.exists() else None
+                if (
+                    current is not None
+                    and installed_root is not None
+                    and (current.st_dev, current.st_ino) != (
+                        installed_root.st_dev, installed_root.st_ino,
+                    )
+                ):
+                    raise RuntimeError("updated macOS shortcut changed")
+                if (
+                    current is not None
+                    and installed_root is not None
+                    and not failed.exists()
+                ):
+                    os.rename(str(preferred), str(failed))
+                if not preferred.exists():
+                    os.rename(str(previous), str(preferred))
+            except OSError:
+                pass
+            raise
+        return preferred, "updated"
+
+
 def main():
     system = platform.system().lower()
     desktop = desktop_directory(system)
@@ -433,8 +1106,12 @@ def main():
     launcher = KIT_ROOT / "launch-control-center.sh"
     if system == "darwin":
         preferred = desktop / "AWESOME WEBKIT.app"
-        shortcut, created = install_macos_app_without_overwrite(
-            preferred, macos_app_payload(launcher)
+        shortcut, action = install_native_macos_app(
+            preferred,
+            launcher,
+            icon_data=brand_icon_icns(),
+            product=WEBKIT_MACOS_PRODUCT,
+            legacy_payload=macos_app_payload(launcher),
         )
     elif system == "windows":
         preferred = desktop / "AWESOME WEBKIT.cmd"
@@ -450,8 +1127,11 @@ def main():
         mode = 0o755
     if system != "darwin":
         shortcut, created = install_without_overwrite(preferred, data, mode)
-    if created:
+        action = "installed" if created else "current"
+    if action == "installed":
         print("Installed shortcut: {}".format(shortcut))
+    elif action == "updated":
+        print("Updated shortcut: {}".format(shortcut))
     else:
         print("Shortcut already installed: {}".format(shortcut))
     return 0

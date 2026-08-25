@@ -28,16 +28,18 @@ RUNTIME_FILE = STATE_DIR / RUNTIME_FILE_NAME
 LOG_FILE = STATE_DIR / LOG_FILE_NAME
 STARTUP_LOCK_NAME = "control-center-startup.lock"
 INSTANCE_LOCK_NAME = "control-center-instance.lock"
+BROWSER_LOCK_NAME = "control-center-browser.lock"
 STATE_DIRECTORY_NAMES = frozenset(("logs", "projects", "worktrees"))
 STATE_FILE_NAMES = frozenset((
     RUNTIME_FILE_NAME,
     LOG_FILE_NAME,
     STARTUP_LOCK_NAME,
     INSTANCE_LOCK_NAME,
+    BROWSER_LOCK_NAME,
     "state.json",
 ))
 CHROME_REUSE_RESULT = "WKCC_REUSED"
-CHROME_REUSE_TIMEOUT_SECONDS = 15.0
+CHROME_REUSE_TIMEOUT_SECONDS = 30.0
 CHROME_REUSE_SCRIPT = """
 on run argv
     if (count of argv) is not 2 then return "WKCC_MISS"
@@ -751,15 +753,23 @@ def stop_outdated_runtime(runtime, state_dir, timeout=15.0):
     return not runtime_ready(runtime) and not instance_lock_held(state_dir)
 
 
-def open_runtime(runtime):
+def open_runtime(runtime, state_dir=None):
     prefix = "http://127.0.0.1:{}/".format(runtime["port"])
     url = "{}?token={}".format(
         prefix, urllib.parse.quote(runtime["token"])
     )
+    reload_url = "{}&launch={}".format(url, secrets.token_hex(8))
+    if os.environ.get("WKCC_BROWSER_HANDOFF") == "1":
+        state_dir = validated_state_dir_path(
+            STATE_DIR if state_dir is None else state_dir
+        )
+        print("{}\t{}\t{}".format(
+            prefix, reload_url, state_dir / BROWSER_LOCK_NAME
+        ))
+        return
     if platform.system().lower() == "darwin":
         browser_app = os.environ.get("WKCC_BROWSER_APP", "Google Chrome")
         if browser_app == "Google Chrome":
-            reload_url = "{}&launch={}".format(url, secrets.token_hex(8))
             try:
                 result = subprocess.run(
                     ["osascript", "-e", CHROME_REUSE_SCRIPT, reload_url, prefix],
@@ -773,8 +783,10 @@ def open_runtime(runtime):
                 output = result.stdout if isinstance(result.stdout, str) else ""
                 if result.returncode == 0 and output.strip() == CHROME_REUSE_RESULT:
                     return
+                if result.returncode != 0 or output.strip() != "WKCC_MISS":
+                    return
             except (OSError, subprocess.TimeoutExpired):
-                pass
+                return
         try:
             result = subprocess.run(
                 ["open", "-a", browser_app, url],
@@ -824,6 +836,7 @@ def main():
                 port = free_port(requested_port)
                 token = secrets.token_urlsafe(32)
                 env = os.environ.copy()
+                env.pop("WKCC_BROWSER_HANDOFF", None)
                 env["WKCC_TOKEN"] = token
                 env["WKCC_STATE_DIR"] = str(state_dir)
                 popen_kwargs = detached_process_kwargs()
@@ -871,7 +884,7 @@ def main():
                             state_dir / LOG_FILE_NAME
                         )
                     )
-    open_runtime(runtime)
+    open_runtime(runtime, state_dir=state_dir)
     return 0
 
 

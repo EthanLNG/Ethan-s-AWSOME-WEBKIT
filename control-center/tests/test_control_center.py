@@ -39,6 +39,7 @@ from control_center import (  # noqa: E402
     choose_folder,
     configured_lock_dir,
     load_webkit_config,
+    provider_cli_executable,
     read_stable_regular_text,
     sanitize_remote_url,
     slugify,
@@ -78,6 +79,10 @@ class ControlCenterTests(unittest.TestCase):
             clear=False,
         )
         self.runtime_env.start()
+        self.provider_candidates = mock.patch(
+            "control_center.provider_cli_candidates", return_value=()
+        )
+        self.provider_candidates.start()
         self.state_dir = self.root / "state"
         self.app = ControlCenter(KIT_ROOT, self.state_dir)
         self.app.store.update(lambda state: state.update({"providers": ["codex", "claude"]}))
@@ -86,6 +91,7 @@ class ControlCenterTests(unittest.TestCase):
         try:
             self.app.sessions.shutdown()
         finally:
+            self.provider_candidates.stop()
             self.runtime_env.stop()
             if os.name == "nt":
                 if os.path.exists(self.temp.name):
@@ -2072,6 +2078,8 @@ class ControlCenterTests(unittest.TestCase):
         )
         with mock.patch(
             "control_center.shutil.which", side_effect=executable_path
+        ), mock.patch(
+            "control_center.provider_cli_executable", return_value=None
         ), mock.patch("control_center.subprocess.run", side_effect=timeout):
             status = self.app.projects.system_status()
 
@@ -2080,6 +2088,36 @@ class ControlCenterTests(unittest.TestCase):
             "authenticated": False,
             "path": executable,
         })
+
+    def test_provider_cli_falls_back_when_desktop_path_hides_it(self):
+        executable = self.root / "ChatGPT.app" / "Contents" / "Resources" / "codex"
+        executable.parent.mkdir(parents=True)
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+        with mock.patch("control_center.shutil.which", return_value=None), mock.patch(
+            "control_center.provider_cli_candidates", return_value=(executable,)
+        ):
+            self.assertEqual(provider_cli_executable("codex"), str(executable))
+
+    def test_tool_status_executes_resolved_provider_path(self):
+        executable = "/Applications/ChatGPT.app/Contents/Resources/codex"
+        completed = subprocess.CompletedProcess(
+            [executable, "--version"], 0, "codex-cli 0.150.0\n", ""
+        )
+        with mock.patch(
+            "control_center.provider_cli_executable", return_value=executable
+        ), mock.patch("control_center.run_command", return_value=completed) as run:
+            status = self.app.projects._tool_status(
+                "codex", ["codex", "--version"]
+            )
+
+        self.assertTrue(status["installed"])
+        self.assertEqual(status["path"], executable)
+        self.assertEqual(status["version"], "codex-cli 0.150.0")
+        run.assert_called_once_with(
+            [executable, "--version"], check=False, timeout=15
+        )
 
     def test_github_status_skips_option_like_remote_names_and_uses_terminator(self):
         calls = []

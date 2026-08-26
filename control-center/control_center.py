@@ -212,6 +212,42 @@ def parsed_git_version(value):
     return tuple(int(part or 0) for part in match.groups())
 
 
+def provider_cli_candidates(name):
+    """Return provider CLI locations commonly hidden from desktop app PATHs."""
+    if name not in ("codex", "claude"):
+        return ()
+    home = Path.home()
+    candidates = [
+        home / ".local" / "bin" / name,
+        home / "bin" / name,
+        home / ".npm-global" / "bin" / name,
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+    ]
+    if name == "codex" and platform.system() == "Darwin":
+        candidates.extend([
+            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            home / "Applications/ChatGPT.app/Contents/Resources/codex",
+            Path("/Applications/Codex.app/Contents/Resources/codex"),
+            home / "Applications/Codex.app/Contents/Resources/codex",
+        ])
+    return tuple(candidates)
+
+
+def provider_cli_executable(name):
+    """Find an installed provider CLI even from a restricted desktop PATH."""
+    executable = shutil.which(name)
+    if executable:
+        return executable
+    for candidate in provider_cli_candidates(name):
+        try:
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def valid_color_label(value):
     if not isinstance(value, str) or not 1 <= len(value) <= 32:
         return False
@@ -3547,10 +3583,15 @@ class ProjectManager:
 
     @staticmethod
     def _tool_status(name, command):
-        executable = shutil.which(name)
+        executable = (
+            provider_cli_executable(name)
+            if name in ("codex", "claude")
+            else shutil.which(name)
+        )
         if not executable:
             return {"installed": False, "path": None, "version": None}
-        result = run_command(command, check=False, timeout=15)
+        resolved_command = [executable] + list(command[1:])
+        result = run_command(resolved_command, check=False, timeout=15)
         version = (result.stdout or result.stderr).strip().splitlines()
         version_text = version[0] if version else None
         installed = result.returncode == 0
@@ -6900,7 +6941,7 @@ class ProviderRunner:
         env["WK_CONTROL_CENTER"] = "1"
         env["WK_SESSION_COLOR"] = self.session["color"]
         if provider == "codex":
-            executable = shutil.which("codex")
+            executable = provider_cli_executable("codex")
             if not executable:
                 raise ControlCenterError("Codex CLI is not installed.", 409)
             command = [

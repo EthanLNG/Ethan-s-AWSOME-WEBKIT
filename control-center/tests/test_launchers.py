@@ -304,7 +304,7 @@ class LauncherTests(unittest.TestCase):
             launch.open_runtime(runtime)
 
         run.assert_called_once()
-        command = run.call_args.args[0]
+        command = run.call_args[0][0]
         self.assertEqual(command[:2], ["osascript", "-e"])
         self.assertIs(command[2], launch.CHROME_REUSE_SCRIPT)
         self.assertNotIn("private token", command[2])
@@ -315,7 +315,7 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(command[4], "http://127.0.0.1:8891/")
         self.assertEqual(
-            run.call_args.kwargs["timeout"],
+            run.call_args[1]["timeout"],
             launch.CHROME_REUSE_TIMEOUT_SECONDS,
         )
         self.assertIn("set URL of tab", command[2])
@@ -345,9 +345,9 @@ class LauncherTests(unittest.TestCase):
             launch.open_runtime(runtime)
 
         self.assertEqual(run.call_count, 2)
-        self.assertEqual(run.call_args_list[0].args[0][0], "osascript")
+        self.assertEqual(run.call_args_list[0][0][0][0], "osascript")
         self.assertEqual(
-            run.call_args_list[1].args[0],
+            run.call_args_list[1][0][0],
             [
                 "open",
                 "-a",
@@ -375,7 +375,7 @@ class LauncherTests(unittest.TestCase):
 
         self.assertEqual(run.call_count, 1)
         self.assertEqual(
-            run.call_args_list[0].kwargs["timeout"],
+            run.call_args_list[0][1]["timeout"],
             launch.CHROME_REUSE_TIMEOUT_SECONDS,
         )
         browser_open.assert_not_called()

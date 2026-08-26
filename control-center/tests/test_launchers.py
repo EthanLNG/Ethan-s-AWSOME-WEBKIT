@@ -431,6 +431,7 @@ class LauncherTests(unittest.TestCase):
             self.assertIn("[Desktop Entry]", numbered.read_text(encoding="utf-8"))
             self.assertIn(str(numbered), output)
 
+    @unittest.skipUnless(os.name == "posix", "macOS launcher modes require POSIX")
     def test_macos_installer_preserves_differing_existing_shortcut(self):
         with tempfile.TemporaryDirectory() as raw:
             desktop = Path(raw) / "Desktop"

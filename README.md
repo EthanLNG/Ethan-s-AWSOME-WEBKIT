@@ -26,7 +26,7 @@ variations, and explore entire design universes at the same time without
 getting lost in the chaos. The interface remains so braindead simple that the
 only thing you can lose is respect for slower workflows. AWESOME WEBKIT
 automatically organizes every agent, branch, preview, feedback point, version,
-and Git commit. It is stupidly optimized for mental clarity, so getting
+and Git commit. It is highly optimized for mental clarity, so getting
 overwhelmed would require genuine effort.
 
 - **Stupidly fast iteration:** visual feedback, agent work, and live review stay

@@ -84,6 +84,11 @@ coherent with the full scene visible on screen. Do not run wait-for-file, merge
 to a target branch, discard the worktree, or open another agent app. The
 controller owns those lifecycle actions and will invoke you for each transition.
 
+Read saved feedback with python3 webkit/scripts/read-feedback.py, then --point
+for each id. Broad JSON tool output can omit existing instruction fields. Never
+claim text is missing from that output alone. Empty space is a valid target for
+spacing/layout feedback; inspect its neighbors and source before asking again.
+
 Initialize this session context now without changing files, then wait for a
 specific task or Webkit transition.
 """
@@ -95,6 +100,10 @@ feedback.json is awaiting the agent, apply the points, commit one point at a
 time, publish an atomic review.json, and then exit. If verdicts.json is present,
 process the verdicts, archive the round correctly, and then exit. Follow the
 session context and do not perform controller-owned lifecycle actions.
+Read the saved document using python3 webkit/scripts/read-feedback.py, then read
+each actionable id separately with --point before applying or skipping it. For a
+feedback_update marker, read live feedback.json. Do not infer missing instructions
+from abbreviated JSON output or reject a spacing request because its area is blank.
 """
 
 

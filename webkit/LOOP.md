@@ -126,7 +126,30 @@ verdicts.
 
 ## Step 2: READ the batch
 
-Read `"$inbox/feedback.json"`. Full schema:
+Read the saved instructions explicitly before interpreting any point:
+
+```sh
+python3 webkit/scripts/read-feedback.py "$inbox/feedback.json"
+python3 webkit/scripts/read-feedback.py "$inbox/feedback.json" --point <point-id>
+```
+
+The first command lists every point and whether its instruction fields are
+present. Run the second command separately for **each** exact id. It prints the
+complete saved text, voice-note reference, variant request, and rectangle
+geometry without the bulky DOM context. For target lookup, read that same point
+again with `--point <point-id> --context`.
+
+Large JSON tool responses can be abbreviated and omit fields that are still
+present on disk. Absence from a broad `cat`, summary, or truncated response is
+**not evidence of an empty instruction**. Never mark a point skipped for missing
+instructions until its individual reader output confirms the actual text is
+empty or absent, no voice note is attached, and no variant prompts provide the
+request. If output is truncated, narrow the read; do not ask the user to retype
+saved feedback. A read/parse failure is a read error, not an empty point. If all
+instruction sources are truly empty, explain that specific point without
+discarding its rectangle or blocking other actionable points.
+
+Full `"$inbox/feedback.json"` schema:
 
 ```jsonc
 {
@@ -206,6 +229,18 @@ instead of a single change:
 
 Use `context[]` to find the target: try `context[0].selector` first; if the
 DOM shifted since capture, fall back to the rect + the other context entries.
+The saved instruction determines what the rectangle means. Empty space is a
+valid target: a request to reduce a gap, tighten spacing, align content, or add
+something in a blank region does not require an element inside the rectangle.
+Use the saved page, viewport, scroll, rectangle edges, nearby context, and source
+layout to locate the enclosing section and adjacent content. Inspect the margin,
+padding, gap, height, or scroll spacing responsible and make the requested change
+at the active breakpoint. A broad primary selector is an anchor for the scene,
+not a reason to ignore the user's more specific target. Empty context, a missing
+selector, or unavailable live browser access alone is not a reason to skip or
+require another drawing. Use source evidence and report any verification limit.
+Ask for clarification only if materially different targets or changes remain
+plausible after those checks, explaining the exact unresolved choice.
 `rectSurfaces`, when present, is overlay-only metadata parallel to `rects`.
 Each entry may separately record `geometrySelector` for placement,
 `targetSelector` plus `stateChain` for scene visibility, `anchor` for sticky or
@@ -379,7 +414,19 @@ fix/delete the file. While waiting, do nothing to the working tree.
 
 ## Step 8: PROCESS verdicts
 
-Read `"$inbox/verdicts.json"`. Full schema:
+Read `"$inbox/verdicts.json"`. For normal verdicts, use the same explicit reader:
+
+```sh
+python3 webkit/scripts/read-feedback.py "$inbox/verdicts.json"
+python3 webkit/scripts/read-feedback.py "$inbox/verdicts.json" --point <point-id>
+```
+
+Read each redo separately so `redoText`, `redoVoiceNote`, and `redoAbcRequest`
+cannot be lost in an abbreviated batch response. A `feedback_update` marker has
+no user instructions itself; follow step 8 below and read the affected revisions
+from live `feedback.json` instead.
+
+Full schema:
 
 ```jsonc
 {

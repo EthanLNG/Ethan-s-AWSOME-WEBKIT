@@ -36,6 +36,12 @@ When the controller invokes you because browser feedback changed, read
 `webkit/LOOP.md`, read the configured `feedback_dir`, and inspect
 `<feedback_dir>/<slug>/`.
 
+Use `python3 webkit/scripts/read-feedback.py` on the live feedback or verdict
+file, then read every actionable id separately with `--point <point-id>` before
+editing or claiming instructions are missing. Bulk JSON output may omit saved
+text. Empty marked space is a valid layout target; follow LOOP's source and
+neighbor lookup before asking the user to draw or type again.
+
 - `feedback.json` without `review.json`: process the batch through LOOP step 6,
   including local transcription of any `voiceNote`, one commit per point, and
   an atomic `review.json`, then **exit**.

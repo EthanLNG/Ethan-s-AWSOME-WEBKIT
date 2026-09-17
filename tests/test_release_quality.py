@@ -352,6 +352,7 @@ class ReleaseQualityTests(unittest.TestCase):
             "webkit/scripts/claim-color.sh",
             "webkit/scripts/config-get.sh",
             "webkit/scripts/open-preview.sh",
+            "webkit/scripts/read-feedback.py",
             "webkit/scripts/release-color.sh",
             "webkit/scripts/runtime_registry.py",
             "webkit/scripts/transcribe-voice-note.py",

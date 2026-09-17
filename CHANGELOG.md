@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added an explicit per-point feedback reader so abbreviated JSON tool output
+  cannot be mistaken for missing typed instructions. Original text, voice-note
+  references, variant prompts, and redo instructions are read separately from
+  bulky scene metadata without changing the saved feedback.
+- Updated agent prompts and the feedback protocol to verify saved instructions
+  before skipping and to handle marked whitespace through nearby layout and
+  source evidence, without requiring another drawing solely because it is blank.
+
 ## v0.8.22 (2026-08-24): Cleaner controls and section-local feedback
 
 - Moved the project-specific black or white overlay preference into Settings,
